@@ -1,0 +1,14 @@
+{
+  "name": "cc-pacekeeper",
+  "owner": {
+    "name": "leaflessbranch",
+    "url": "https://github.com/leaflessbranch"
+  },
+  "plugins": [
+    {
+      "name": "cc-pacekeeper",
+      "source": "./plugins/cc-pacekeeper",
+      "description": "Hands usage-limit monitoring to Claude itself — context %, 5h block %, weekly limits — with self-pacing, threshold warnings, and resumable checkpoints."
+    }
+  ]
+}

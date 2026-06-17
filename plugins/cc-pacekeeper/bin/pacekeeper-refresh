@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# cc-pacekeeper hook entrypoint: refresh (PostToolUse)
+# Spawns the OAuth refresh detached so the hook returns in <5ms.
+# The refresh script self-gates on cache staleness (>180s) so spawning every
+# call is harmless.
+set -euo pipefail
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+# Discard stdin (PostToolUse payload not needed by refresh)
+cat > /dev/null
+# Detach the refresh; ignore stdin/stdout/stderr so the parent can exit immediately
+setsid bun run --silent "$DIR/../src/refresh.ts" < /dev/null > /dev/null 2>&1 &
+disown 2>/dev/null || true
+echo '{}'

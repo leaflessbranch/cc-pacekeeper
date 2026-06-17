@@ -1,0 +1,79 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+let TMP_HOME = '';
+const ORIGINAL_HOME = process.env.HOME;
+
+beforeEach(() => {
+    TMP_HOME = path.join(os.tmpdir(), `cc-pacekeeper-cfg-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    fs.mkdirSync(TMP_HOME, { recursive: true });
+    process.env.HOME = TMP_HOME;
+});
+
+afterEach(() => {
+    process.env.HOME = ORIGINAL_HOME;
+    try { fs.rmSync(TMP_HOME, { recursive: true, force: true }); } catch { /* ignore */ }
+});
+
+describe('loadConfig', () => {
+    test('returns defaults when no file exists', async () => {
+        const { loadConfig, DEFAULT_CONFIG } = await import('../config');
+        expect(loadConfig()).toEqual(DEFAULT_CONFIG);
+    });
+
+    test('merges partial user config with defaults', async () => {
+        const { configFile, loadConfig } = await import('../config');
+        const file = configFile();
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({
+            thresholds: { context: { notify: 50, warn: 70, critical: 85 } },
+            debounce_seconds: 30
+        }));
+        const cfg = loadConfig();
+        expect(cfg.thresholds.context).toEqual({ notify: 50, warn: 70, critical: 85 });
+        expect(cfg.thresholds.five_hour).toEqual({ notify: 70, warn: 85, critical: 95 });
+        expect(cfg.debounce_seconds).toBe(30);
+        expect(cfg.context_window_size).toBe(200_000);
+    });
+
+    test('falls back to defaults on invalid JSON', async () => {
+        const { configFile, loadConfig, DEFAULT_CONFIG } = await import('../config');
+        const file = configFile();
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, 'this is not json{{');
+        expect(loadConfig()).toEqual(DEFAULT_CONFIG);
+    });
+
+    test('falls back to defaults on schema violation', async () => {
+        const { configFile, loadConfig, DEFAULT_CONFIG } = await import('../config');
+        const file = configFile();
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({
+            thresholds: { context: { notify: -50, warn: 70, critical: 85 } }
+        }));
+        expect(loadConfig()).toEqual(DEFAULT_CONFIG);
+    });
+
+    test('bootstrapConfigIfMissing creates default file', async () => {
+        const { bootstrapConfigIfMissing, configFile } = await import('../config');
+        const file = configFile();
+        expect(fs.existsSync(file)).toBe(false);
+        bootstrapConfigIfMissing();
+        expect(fs.existsSync(file)).toBe(true);
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+        expect(parsed.thresholds.context.notify).toBe(60);
+    });
+});
+
+describe('isProjectDenied', () => {
+    test('matches exact and prefix', async () => {
+        const { isProjectDenied, DEFAULT_CONFIG } = await import('../config');
+        const cfg = { ...DEFAULT_CONFIG, project_denylist: ['/home/u/scratch'] };
+        expect(isProjectDenied('/home/u/scratch', cfg)).toBe(true);
+        expect(isProjectDenied('/home/u/scratch/sub', cfg)).toBe(true);
+        expect(isProjectDenied('/home/u/scratchpad', cfg)).toBe(false);
+        expect(isProjectDenied('/home/u/other', cfg)).toBe(false);
+    });
+});

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# cc-pacekeeper hook entrypoint: tick (SessionStart, UserPromptSubmit, PreToolUse, Stop)
+# Reads hook stdin JSON, emits hookSpecificOutput.additionalContext when warranted.
+set -euo pipefail
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+exec bun run --silent "$DIR/../src/tick.ts"

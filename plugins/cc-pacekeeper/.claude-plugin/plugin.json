@@ -1,0 +1,12 @@
+{
+  "name": "cc-pacekeeper",
+  "version": "0.1.0",
+  "description": "Self-pacing usage monitor for Claude Code: injects context %, 5h block %, and weekly limit data into Claude's context via hooks, so Claude warns and offers checkpoints before walls.",
+  "author": {
+    "name": "leaflessbranch",
+    "url": "https://github.com/leaflessbranch"
+  },
+  "repository": "https://github.com/leaflessbranch/cc-pacekeeper",
+  "license": "MIT",
+  "homepage": "https://github.com/leaflessbranch/cc-pacekeeper"
+}

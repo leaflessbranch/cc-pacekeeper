@@ -1,0 +1,156 @@
+#!/usr/bin/env bun
+import { bootstrapConfigIfMissing, isProjectDenied, loadConfig } from './config';
+import { contextPercent, readContextTokens } from './ctx-tokens';
+import { emitAdditionalContext, emitEmpty, readStdinJson } from './hook-io';
+import { listActive } from './checkpoint';
+import {
+    computeSnapshot,
+    formatDirective,
+    formatStatusLine
+} from './thresholds';
+import { peekLevel, shouldInjectAndRecord, type Level, type Meter } from './state';
+import { readUsageCacheFile } from './vendor/usage-fetch';
+
+async function main(): Promise<void> {
+    const stdin = await readStdinJson();
+    const event = stdin.hook_event_name ?? '';
+    const cwd = stdin.cwd ?? process.cwd();
+    const sessionId = stdin.session_id ?? 'unknown';
+
+    bootstrapConfigIfMissing();
+    const cfg = loadConfig();
+
+    if (isProjectDenied(cwd, cfg)) {
+        emitEmpty();
+        return;
+    }
+
+    // ── SessionStart: surface active checkpoint(s) if present, then continue. ──
+    let sessionStartBlock = '';
+    if (event === 'SessionStart') {
+        sessionStartBlock = buildSessionStartContext(cwd, cfg.checkpoint_dir_name);
+    }
+
+    // ── Compute meters from cached usage + transcript. Hot path, no API. ──
+    const ctxTokens = stdin.transcript_path ? readContextTokens(stdin.transcript_path) : null;
+    const ctxPct = ctxTokens ? contextPercent(ctxTokens.contextLength, cfg.context_window_size) : null;
+    const usage = readUsageCacheFile();
+
+    const snap = computeSnapshot({ contextPercent: ctxPct, usage }, cfg);
+
+    // ── Decide injection based on event type. ──
+    const nowSec = Math.floor(Date.now() / 1000);
+    let injection = '';
+
+    if (event === 'SessionStart') {
+        // Always-allow snapshot at notify+ on SessionStart so Claude knows where it stands.
+        if (snap.maxLevel !== 'none') {
+            injection = formatStatusLine(snap);
+            // Update debounce state without spamming.
+            updateAllDebounce(sessionId, snap, nowSec, cfg.debounce_seconds);
+        }
+    } else if (event === 'UserPromptSubmit') {
+        // Inject a status line whenever any meter ≥ notify; debounced.
+        if (snap.maxLevel !== 'none') {
+            const fireMeters = applyDebounce(sessionId, snap, nowSec, cfg.debounce_seconds);
+            if (fireMeters.length > 0) {
+                injection = snap.maxLevel === 'notify'
+                    ? formatStatusLine(snap)
+                    : formatDirective(snap);
+            }
+        }
+    } else if (event === 'PreToolUse') {
+        // Only fire on transitions or persistence past debounce. Silent at notify
+        // unless a transition just happened, to keep tool-loop overhead minimal.
+        const fireMeters = applyDebounce(sessionId, snap, nowSec, cfg.debounce_seconds);
+        if (fireMeters.length > 0) {
+            // Skip noisy notify-only injections in the tool loop; let warn/critical drive.
+            if (snap.maxLevel === 'warn' || snap.maxLevel === 'critical') {
+                injection = formatDirective(snap);
+            }
+        }
+    } else if (event === 'Stop') {
+        // If any meter is currently at warn+ AND last-injected level for any meter
+        // shows an escalation persisted, give a soft end-of-turn reminder. Don't
+        // re-fire every turn — debounce same-level.
+        const escalated = snap.readings.some(r => {
+            if (r.level !== 'warn' && r.level !== 'critical') return false;
+            // The level is already recorded in debounce state by earlier hooks this turn.
+            return peekLevel(sessionId, r.meter) === r.level;
+        });
+        if (escalated) {
+            const fireMeters = applyDebounce(sessionId, snap, nowSec, cfg.debounce_seconds);
+            if (fireMeters.length > 0) {
+                injection = [
+                    formatStatusLine(snap),
+                    '',
+                    'End-of-turn reminder: limits remain elevated. Consider saving a checkpoint via /cc-pacekeeper:checkpoint save before starting the next big step.'
+                ].join('\n');
+            }
+        }
+    }
+
+    const fullText = [sessionStartBlock, injection].filter(s => s && s.trim() !== '').join('\n\n');
+
+    if (fullText.trim() === '') {
+        emitEmpty();
+    } else {
+        emitAdditionalContext(event || 'UnknownEvent', fullText);
+    }
+}
+
+function applyDebounce(
+    sessionId: string,
+    snap: ReturnType<typeof computeSnapshot>,
+    nowSec: number,
+    debounceSec: number
+): Meter[] {
+    const fired: Meter[] = [];
+    for (const r of snap.readings) {
+        const d = shouldInjectAndRecord(sessionId, r.meter, r.level, nowSec, debounceSec);
+        if (d.shouldInject) fired.push(r.meter);
+    }
+    return fired;
+}
+
+function updateAllDebounce(
+    sessionId: string,
+    snap: ReturnType<typeof computeSnapshot>,
+    nowSec: number,
+    debounceSec: number
+): void {
+    for (const r of snap.readings) {
+        shouldInjectAndRecord(sessionId, r.meter, r.level, nowSec, debounceSec);
+    }
+}
+
+function buildSessionStartContext(cwd: string, checkpointDirName: string): string {
+    const active = listActive(cwd, checkpointDirName);
+    if (active.length === 0) return '';
+    const newest = active[0]!;
+    const lines: string[] = [];
+    lines.push(`📌 Active checkpoint found in ${cwd}/${checkpointDirName}/:`);
+    lines.push(`   ${newest.path}`);
+    lines.push(`   Created: ${newest.frontmatter.created_at}`);
+    // Pull the Goal section out of the body if present.
+    const goalMatch = /(^|\n)## Goal\s*\n([\s\S]*?)(?=\n## |\n*$)/.exec(newest.body);
+    if (goalMatch) {
+        const goal = (goalMatch[2] ?? '').trim();
+        if (goal) lines.push(`   Goal: ${goal.split('\n')[0]}`);
+    }
+    lines.push('');
+    if (active.length === 1) {
+        lines.push('Run `/cc-pacekeeper:checkpoint resume` to orient from it, or carry on.');
+    } else {
+        lines.push(`${active.length - 1} additional active checkpoint(s) exist. Use \`/cc-pacekeeper:checkpoint list\` to review or \`/cc-pacekeeper:checkpoint cleanup\` to tidy.`);
+    }
+    return lines.join('\n');
+}
+
+main().catch((err) => {
+    // Never break Claude's workflow on hook error; emit empty + write debug log.
+    try {
+        process.stderr.write(`pacekeeper-tick error: ${err instanceof Error ? err.message : String(err)}\n`);
+    } catch { /* ignore */ }
+    emitEmpty();
+});
