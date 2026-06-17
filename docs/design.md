@@ -68,7 +68,10 @@ cc-pacekeeper/                              # github.com/leaflessbranch/cc-pacek
         ├── bin/
         │   ├── pacekeeper-tick             # sh shim → bun run src/tick.ts
         │   ├── pacekeeper-refresh          # sh shim → bun run src/refresh.ts
-        │   └── pacekeeper-precompact       # sh shim → bun run src/precompact.ts
+        │   ├── pacekeeper-precompact       # sh shim → bun run src/precompact.ts
+        │   └── pacekeeper-checkpoint       # sh shim → bun run src/checkpoint-cli.ts
+        │                                   # (invoked by SKILL.md for save/resume/list/
+        │                                   #  cleanup/discard verbs)
         ├── src/
         │   ├── tick.ts                     # Main hook entrypoint: read stdin,
         │   │                               # compute snapshot, emit additionalContext
@@ -78,7 +81,8 @@ cc-pacekeeper/                              # github.com/leaflessbranch/cc-pacek
         │   ├── precompact.ts               # PreCompact handler: force checkpoint nudge
         │   ├── ctx-tokens.ts               # Parse transcript JSONL → context %
         │   ├── thresholds.ts               # Threshold logic, debouncing, snapshot format
-        │   ├── checkpoint.ts               # Write/read <cwd>/.claude-checkpoints/*.md
+        │   ├── checkpoint.ts               # Write/read/archive <cwd>/.claude-checkpoints/
+        │   ├── checkpoint-cli.ts            # Verb dispatcher (save|resume|list|cleanup|discard)
         │   ├── config.ts                   # Load ~/.config/cc-pacekeeper/config.json
         │   ├── state.ts                    # Cross-call debounce state in ~/.cache/cc-pacekeeper/
         │   └── vendor/                     # MIT-licensed ccstatusline modules
@@ -111,7 +115,7 @@ Plus:
 
 | Event | Matcher | Script | Purpose |
 |---|---|---|---|
-| `SessionStart` | — | `pacekeeper-tick` | On `source=resume` or `source=startup`: if `<cwd>/.claude-checkpoints/` has a recent checkpoint (mtime within 24h), inject a 1-paragraph summary + path. Also primes cache. |
+| `SessionStart` | — | `pacekeeper-tick` | Fires on **every** `source` (`startup`, `resume`, `clear`, `compact`). If `<cwd>/.claude-checkpoints/` contains one or more files with `status: active` frontmatter, inject: (a) the newest one's summary + path, (b) a count of additional live checkpoints if any, (c) a nudge to use `/cc-pacekeeper:checkpoint resume` if Claude/user want to continue from it. If no active checkpoints, **silent** — no question, no intent confirmation. Also primes the usage cache. |
 | `UserPromptSubmit` | — | `pacekeeper-tick` | Inject current snapshot only if any meter ≥ notify threshold. Cheap — meters read from cache, never blocks waiting for API. |
 | `PreToolUse` | `*` | `pacekeeper-tick` | Inject directive ONLY at threshold transitions (debounced). Fast cache read; never triggers API call. |
 | `PostToolUse` | `*` | `pacekeeper-refresh` | Shim spawns the refresh detached (`setsid bun run … &`) and exits with `{}` in <5ms. Refresh runs in the background, updates cache when done. Stale check (>180s) lives inside the refresh script itself, so the shim has zero logic. |
@@ -180,6 +184,7 @@ Re-inject only when level *increases* (notify → warn, warn → critical) OR wh
 
 ```markdown
 ---
+status: active                   # active | resumed | superseded | stale
 created_at: 2026-06-17T15:42:11Z
 session_id: 01jcwq...
 trigger: user_invoked            # or: precompact | critical_threshold
@@ -218,9 +223,57 @@ Anything blocked on user input.
 - Related PR: #42
 ```
 
-The `checkpoint save` skill writes this file. `checkpoint resume` reads the newest file in `<cwd>/.claude-checkpoints/` and presents the body to Claude as orientation. `checkpoint list` lists all files with mtimes.
-
 The directory is **inside the project working tree**, so the user decides per-project whether to `.gitignore` it, commit checkpoints, or `rm -rf` after success. README will suggest adding `.claude-checkpoints/` to `.gitignore` as the common case.
+
+### 4.9.1 Checkpoint lifecycle & cleanup
+
+Checkpoint files have a `status` field in frontmatter that drives a soft-delete archive convention. The filesystem layout:
+
+```
+<cwd>/.claude-checkpoints/
+├── 2026-06-17T15-42-11Z.md      # status: active (live)
+├── 2026-06-17T18-03-09Z.md      # status: active (live, newer)
+└── archive/
+    ├── 2026-06-16T09-11-22Z.md  # status: resumed
+    └── 2026-06-15T14-30-00Z.md  # status: superseded
+```
+
+**Status values:**
+
+| Status | Set when | File location |
+|---|---|---|
+| `active` | `checkpoint save` writes it | top of `.claude-checkpoints/` |
+| `resumed` | user accepts `checkpoint resume` and Claude orients from it | atomically moved to `archive/` |
+| `superseded` | a new `active` checkpoint is written in same `cwd`; older actives are demoted | atomically moved to `archive/` |
+| `stale` | `checkpoint cleanup` marks files older than `stale_after_days` (default 14) and the user confirms | atomically moved to `archive/` |
+
+**Skill verbs (extends `/cc-pacekeeper:checkpoint`):**
+
+- `save` — write a new `active` checkpoint; demote previous actives to `superseded`.
+- `resume [N]` — read the newest active (or Nth from `list`), present to Claude as orientation; on confirmation, move to `archive/` with `status: resumed`.
+- `list` — show live actives in `.claude-checkpoints/` with mtimes, ages, brief goal line.
+- `list --archived` — show files under `archive/`.
+- `cleanup [--older-than 7d] [--apply]` — list candidates (active files older than threshold, plus any orphaned archive files older than `archive_keep_days`, default 90). Without `--apply`, dry-run only. With `--apply`, archive (for live) or delete (for archive older than `archive_keep_days`).
+- `discard [N]` — explicit drop of a live checkpoint without resuming; moves to `archive/` with `status: superseded` and a `discard_reason` field.
+
+**Why frontmatter + archive (not a ledger):**
+
+- The filesystem is the source of truth — `git status` shows orphan checkpoints, `rm` and `mv` work naturally.
+- Frontmatter explains *why* a file is in `archive/` (resumed vs. superseded vs. stale vs. discarded) for human review.
+- No external state file to drift out of sync if the user moves directories, renames the project, or wipes the dir.
+- Git stays the user's hard backstop: anyone who wants permanent record commits the file before resume.
+
+**SessionStart surfacing logic:**
+
+1. List `*.md` directly under `<cwd>/.claude-checkpoints/` (not recursive — `archive/` is excluded).
+2. Filter to `status: active`.
+3. If zero → silent.
+4. If one → inject 1-paragraph summary of the file + path + offer `checkpoint resume`.
+5. If two or more → inject summary of newest + `"N other active checkpoints exist in <cwd>/.claude-checkpoints/ — run /cc-pacekeeper:checkpoint list to review or /cc-pacekeeper:checkpoint cleanup to tidy."`
+
+**Atomic move:** `archive/` writes use `fs.renameSync` (same filesystem, atomic). The directory is created on first archive event. Conflict on filename collision (same ISO timestamp): append `-1`, `-2`, etc.
+
+### 4.10 Configuration
 
 ### 4.10 Configuration
 
@@ -238,6 +291,10 @@ The directory is **inside the project working tree**, so the user decides per-pr
   "context_window_size": 200000,
   "project_denylist": [],
   "checkpoint_dir_name": ".claude-checkpoints",
+  "checkpoint": {
+    "stale_after_days": 14,
+    "archive_keep_days": 90
+  },
   "share_ccstatusline_cache": false
 }
 ```
@@ -338,7 +395,8 @@ Vendored ccstatusline modules: keep ccstatusline's own tests where they apply, d
 ## 10. Decisions made by default (override at review)
 
 - **`share_ccstatusline_cache` defaults to `false`.** Sharing is opt-in via config; default avoids surprising the user if ccstatusline's cache schema drifts.
-- **`SessionStart` checkpoint surfacing fires only on `source=resume`.** `source=startup` is the cold-start case where surfacing an old checkpoint from an unrelated intent would be noisy. User can override via config (`surface_checkpoint_on: ["resume", "startup"]`).
+- **`SessionStart` surfacing fires on every source.** If `<cwd>/.claude-checkpoints/` has active checkpoints, surface them — otherwise silent. No intent confirmation, no "do you want to resume" prompt on cold start; the user (or Claude reading the injected summary) decides whether to invoke `checkpoint resume`.
+- **Checkpoint cleanup uses frontmatter status + filesystem archive.** No external ledger. `archive/` subdirectory holds resumed/superseded/stale files; `cleanup --apply` is the only destructive verb and requires the user's explicit flag.
 
 ## 11. Open question for review
 
