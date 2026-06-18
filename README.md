@@ -18,8 +18,6 @@ Plus **extra-usage credits** state, so when limits approach Claude can ask wheth
 
 ## Install
 
-> Not yet released. Once published:
-
 ```
 /plugin marketplace add leaflessbranch/cc-pacekeeper
 /plugin install cc-pacekeeper@cc-pacekeeper
