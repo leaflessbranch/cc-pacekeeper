@@ -12,7 +12,7 @@ import {
     ageDays,
     type Checkpoint
 } from './checkpoint';
-import { contextPercent, readContextTokens } from './ctx-tokens';
+import { contextPercent, readContextTokens, resolveUsableContextWindow } from './ctx-tokens';
 import { readUsageCacheFile } from './vendor/usage-fetch';
 
 interface Args {
@@ -92,11 +92,14 @@ async function readAllStdin(): Promise<string> {
     return raw;
 }
 
-function gatherMeters(transcriptPath: string | undefined, windowSize: number): Record<string, unknown> {
+function gatherMeters(transcriptPath: string | undefined, configWindowSize: number): Record<string, unknown> {
     const usage = readUsageCacheFile();
     const ctx = transcriptPath ? readContextTokens(transcriptPath) : null;
     const meters: Record<string, unknown> = {};
-    if (ctx) meters.context_pct = Math.round(contextPercent(ctx.contextLength, windowSize));
+    if (ctx) {
+        const usable = resolveUsableContextWindow(ctx.model, configWindowSize);
+        meters.context_pct = Math.round(contextPercent(ctx.contextLength, usable));
+    }
     if (usage) {
         if (usage.sessionUsage !== undefined) meters.five_hour_pct = Math.round(usage.sessionUsage);
         if (usage.weeklyUsage !== undefined) meters.weekly_all_pct = Math.round(usage.weeklyUsage);

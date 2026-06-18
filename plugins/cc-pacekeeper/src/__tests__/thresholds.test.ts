@@ -62,6 +62,48 @@ describe('computeSnapshot', () => {
         expect(snap.readings).toHaveLength(0);
         expect(snap.maxLevel).toBe('none');
     });
+
+    test('drops five_hour reading when sessionResetAt is in the past (stale cache)', () => {
+        const pastIso = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+        const futureIso = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        const snap = computeSnapshot({
+            contextPercent: 10,
+            usage: {
+                sessionUsage: 95,           // would be critical, but stale
+                sessionResetAt: pastIso,
+                weeklyUsage: 40,
+                weeklyResetAt: futureIso
+            }
+        }, DEFAULT_CONFIG);
+        expect(snap.readings.find(r => r.meter === 'five_hour')).toBeUndefined();
+        expect(snap.readings.find(r => r.meter === 'weekly')).toBeDefined();
+        expect(snap.maxLevel).toBe('none');
+    });
+
+    test('keeps five_hour reading when sessionResetAt is in the future', () => {
+        const futureIso = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        const snap = computeSnapshot({
+            contextPercent: null,
+            usage: { sessionUsage: 88, sessionResetAt: futureIso }
+        }, DEFAULT_CONFIG);
+        expect(snap.readings.find(r => r.meter === 'five_hour')?.level).toBe('warn');
+    });
+
+    test('drops each weekly meter independently when its reset is past', () => {
+        const past = new Date(Date.now() - 1000).toISOString();
+        const future = new Date(Date.now() + 1000_000).toISOString();
+        const snap = computeSnapshot({
+            contextPercent: null,
+            usage: {
+                weeklyUsage: 90, weeklyResetAt: past,
+                weeklySonnetUsage: 70, weeklySonnetResetAt: future,
+                weeklyOpusUsage: 80, weeklyOpusResetAt: past
+            }
+        }, DEFAULT_CONFIG);
+        expect(snap.readings.find(r => r.meter === 'weekly')).toBeUndefined();
+        expect(snap.readings.find(r => r.meter === 'weekly_opus')).toBeUndefined();
+        expect(snap.readings.find(r => r.meter === 'weekly_sonnet')).toBeDefined();
+    });
 });
 
 describe('formatStatusLine', () => {

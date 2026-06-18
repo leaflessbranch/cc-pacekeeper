@@ -6,7 +6,10 @@ const HookStdinSchema = z.object({
     cwd: z.string().optional(),
     hook_event_name: z.string().optional(),
     source: z.string().optional(),
-    tool_name: z.string().optional()
+    tool_name: z.string().optional(),
+    // SessionStart includes the active model id directly. Other events don't,
+    // so we fall back to reading it from the transcript.
+    model: z.string().optional()
 });
 
 export type HookStdin = z.infer<typeof HookStdinSchema>;

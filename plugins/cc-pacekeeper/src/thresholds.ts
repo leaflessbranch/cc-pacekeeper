@@ -27,6 +27,12 @@ export interface Snapshot {
 
 const LEVEL_RANK: Record<Level, number> = { none: 0, notify: 1, warn: 2, critical: 3 };
 
+function isResetInPast(iso: string | undefined, now: number = Date.now()): boolean {
+    if (!iso) return false;
+    const t = Date.parse(iso);
+    return Number.isFinite(t) && t <= now;
+}
+
 function levelFor(percent: number, t: ThresholdLevels): Level {
     if (percent >= t.critical) return 'critical';
     if (percent >= t.warn) return 'warn';
@@ -52,7 +58,7 @@ export function computeSnapshot(inputs: ComputeInputs, cfg: Config): Snapshot {
 
     const u = inputs.usage;
     if (u && !u.error) {
-        if (u.sessionUsage !== undefined) {
+        if (u.sessionUsage !== undefined && !isResetInPast(u.sessionResetAt)) {
             readings.push({
                 meter: 'five_hour',
                 percent: u.sessionUsage,
@@ -60,7 +66,7 @@ export function computeSnapshot(inputs: ComputeInputs, cfg: Config): Snapshot {
                 resetsAt: u.sessionResetAt
             });
         }
-        if (u.weeklyUsage !== undefined) {
+        if (u.weeklyUsage !== undefined && !isResetInPast(u.weeklyResetAt)) {
             readings.push({
                 meter: 'weekly',
                 percent: u.weeklyUsage,
@@ -68,7 +74,7 @@ export function computeSnapshot(inputs: ComputeInputs, cfg: Config): Snapshot {
                 resetsAt: u.weeklyResetAt
             });
         }
-        if (u.weeklySonnetUsage !== undefined) {
+        if (u.weeklySonnetUsage !== undefined && !isResetInPast(u.weeklySonnetResetAt)) {
             readings.push({
                 meter: 'weekly_sonnet',
                 percent: u.weeklySonnetUsage,
@@ -76,7 +82,7 @@ export function computeSnapshot(inputs: ComputeInputs, cfg: Config): Snapshot {
                 resetsAt: u.weeklySonnetResetAt
             });
         }
-        if (u.weeklyOpusUsage !== undefined) {
+        if (u.weeklyOpusUsage !== undefined && !isResetInPast(u.weeklyOpusResetAt)) {
             readings.push({
                 meter: 'weekly_opus',
                 percent: u.weeklyOpusUsage,

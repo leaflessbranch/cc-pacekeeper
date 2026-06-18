@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { bootstrapConfigIfMissing, isProjectDenied, loadConfig } from './config';
-import { contextPercent, readContextTokens } from './ctx-tokens';
+import { contextPercent, readContextTokens, readMostRecentModel, resolveUsableContextWindow } from './ctx-tokens';
 import { emitAdditionalContext, emitEmpty, readStdinJson } from './hook-io';
 import { listActive } from './checkpoint';
 import {
@@ -9,7 +9,9 @@ import {
     formatStatusLine
 } from './thresholds';
 import { peekLevel, shouldInjectAndRecord, type Level, type Meter } from './state';
-import { readUsageCacheFile } from './vendor/usage-fetch';
+import { fetchUsageData, readUsageCacheFile } from './vendor/usage-fetch';
+import type { UsageData } from './vendor/usage-types';
+import { fetchAndCacheMaxInputTokens, readCachedMaxInputTokens } from './model-info';
 
 async function main(): Promise<void> {
     const stdin = await readStdinJson();
@@ -31,10 +33,36 @@ async function main(): Promise<void> {
         sessionStartBlock = buildSessionStartContext(cwd, cfg.checkpoint_dir_name);
     }
 
-    // ── Compute meters from cached usage + transcript. Hot path, no API. ──
+    // ── Compute meters from cached usage + transcript. Hot path, no API except
+    //    on SessionStart when the cache is detectably stale (see below). ──
     const ctxTokens = stdin.transcript_path ? readContextTokens(stdin.transcript_path) : null;
-    const ctxPct = ctxTokens ? contextPercent(ctxTokens.contextLength, cfg.context_window_size) : null;
-    const usage = readUsageCacheFile();
+    const model = stdin.model
+        ?? ctxTokens?.model
+        ?? (stdin.transcript_path ? readMostRecentModel(stdin.transcript_path) : null)
+        ?? undefined;
+
+    // On SessionStart, if we have a model id but no cached max_input_tokens
+    // yet, fetch it now — the user is already waiting on session bootstrap,
+    // and one accurate first tick beats one wrong tick. Other events skip
+    // this; the PostToolUse refresh script handles background population.
+    if (event === 'SessionStart' && model && readCachedMaxInputTokens(model) === null) {
+        try { await fetchAndCacheMaxInputTokens(model); } catch { /* fall through to 200k */ }
+    }
+
+    const usableWindow = resolveUsableContextWindow(model, cfg.context_window_size);
+    const ctxPct = ctxTokens ? contextPercent(ctxTokens.contextLength, usableWindow) : null;
+
+    let usage: UsageData | null = readUsageCacheFile();
+    if (event === 'SessionStart' && hasStaleReset(usage)) {
+        // Last block ended while no Claude session was running, so nothing
+        // refreshed the cache. Force a synchronous refetch before computing
+        // the snapshot — SessionStart fires once, latency is acceptable.
+        try {
+            usage = await fetchUsageData();
+        } catch {
+            // computeSnapshot will drop stale-reset readings.
+        }
+    }
 
     const snap = computeSnapshot({ contextPercent: ctxPct, usage }, cfg);
 
@@ -122,6 +150,23 @@ function updateAllDebounce(
     for (const r of snap.readings) {
         shouldInjectAndRecord(sessionId, r.meter, r.level, nowSec, debounceSec);
     }
+}
+
+function hasStaleReset(usage: UsageData | null): boolean {
+    if (!usage) return false;
+    const now = Date.now();
+    const resets: (string | undefined)[] = [
+        usage.sessionResetAt,
+        usage.weeklyResetAt,
+        usage.weeklySonnetResetAt,
+        usage.weeklyOpusResetAt
+    ];
+    for (const iso of resets) {
+        if (!iso) continue;
+        const t = Date.parse(iso);
+        if (Number.isFinite(t) && t <= now) return true;
+    }
+    return false;
 }
 
 function buildSessionStartContext(cwd: string, checkpointDirName: string): string {

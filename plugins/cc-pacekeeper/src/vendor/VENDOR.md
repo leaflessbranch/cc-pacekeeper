@@ -17,5 +17,9 @@ MIT-licensed.
 - `claude-config-dir.ts`: extracted just `getClaudeConfigDir` from upstream's
   `claude-settings.ts` (rest of that file is install/uninstall TUI logic we
   don't need).
+- `model-context.ts`: re-exported `USABLE_CONTEXT_RATIO` and
+  `DEFAULT_CONTEXT_WINDOW_SIZE` so callers can scale to the same "usable"
+  denominator ccstatusline uses for `context-percentage-usable`. Otherwise
+  copied verbatim.
 
 When syncing from upstream, update the SHA above and re-run the vendor diff.
