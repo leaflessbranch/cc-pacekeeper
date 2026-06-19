@@ -33,19 +33,25 @@ async function main(): Promise<void> {
         sessionStartBlock = buildSessionStartContext(cwd, cfg.checkpoint_dir_name);
     }
 
-    // ── Compute meters from cached usage + transcript. Hot path, no API except
-    //    on SessionStart when the cache is detectably stale (see below). ──
+    // ── Compute meters from cached usage + transcript. Hot path. The only API
+    //    calls are a once-per-model context-window fetch on cache-miss (below)
+    //    and, on SessionStart, a usage refetch when the cache is detectably
+    //    stale (further below). ──
     const ctxTokens = stdin.transcript_path ? readContextTokens(stdin.transcript_path) : null;
     const model = stdin.model
         ?? ctxTokens?.model
         ?? (stdin.transcript_path ? readMostRecentModel(stdin.transcript_path) : null)
         ?? undefined;
 
-    // On SessionStart, if we have a model id but no cached max_input_tokens
-    // yet, fetch it now — the user is already waiting on session bootstrap,
-    // and one accurate first tick beats one wrong tick. Other events skip
-    // this; the PostToolUse refresh script handles background population.
-    if (event === 'SessionStart' && model && readCachedMaxInputTokens(model) === null) {
+    // If we have a model id but no cached max_input_tokens yet, fetch it now so
+    // this tick reports an accurate context %. One accurate tick beats one wrong
+    // one, and the fetch happens at most once per model (the cache is eternal).
+    // This must run for every event, not just SessionStart: a model first seen
+    // mid-session (a model switch, or a resume/compact SessionStart that omits
+    // `model`) would otherwise stay on the 200k fallback for the rest of the
+    // session. The PostToolUse refresh also populates this cache in the
+    // background, but this guarantees correctness on the very next tick.
+    if (model && readCachedMaxInputTokens(model) === null) {
         try { await fetchAndCacheMaxInputTokens(model); } catch { /* fall through to 200k */ }
     }
 

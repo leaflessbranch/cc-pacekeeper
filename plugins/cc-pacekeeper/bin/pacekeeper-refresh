@@ -5,9 +5,13 @@
 # call is harmless.
 set -euo pipefail
 DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-# Discard stdin (PostToolUse payload not needed by refresh)
-cat > /dev/null
-# Detach the refresh; ignore stdin/stdout/stderr so the parent can exit immediately
-setsid bun run --silent "$DIR/../src/refresh.ts" < /dev/null > /dev/null 2>&1 &
+# Capture stdin to a temp file so the detached refresh can read the PostToolUse
+# payload (model / transcript_path) to populate the per-model context-window
+# cache. Feeding it /dev/null here silently disabled that population.
+STDIN_TMP="$(mktemp -t pacekeeper-refresh.XXXXXX)"
+cat > "$STDIN_TMP"
+# Detach the refresh; the subshell feeds it the payload then deletes the temp
+# file. stdout/stderr ignored so the parent returns immediately.
+setsid bash -c "bun run --silent '$DIR/../src/refresh.ts' < '$STDIN_TMP'; rm -f '$STDIN_TMP'" < /dev/null > /dev/null 2>&1 &
 disown 2>/dev/null || true
 echo '{}'
