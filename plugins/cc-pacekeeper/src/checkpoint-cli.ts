@@ -14,6 +14,7 @@ import {
 } from './checkpoint';
 import { contextPercent, readContextTokens, resolveUsableContextWindow } from './ctx-tokens';
 import { readUsageCacheFile } from './vendor/usage-fetch';
+import { resolveProjectRoot } from './resolve-root';
 
 interface Args {
     verb: string;
@@ -270,9 +271,13 @@ function verbHelp(): void {
         '',
         'Usage: pacekeeper-checkpoint <verb> [args]',
         '',
+        'All verbs accept --cwd <path> to pin the project root explicitly. When',
+        'omitted, the root is resolved from --transcript-path, then the git repo',
+        'root, then the process cwd; transient dirs (/tmp, $HOME, /) are refused.',
+        '',
         'Verbs:',
         '  save [--body <text> | --body-file <path>] [--trigger <kind>]',
-        '       [--session-id <id>] [--transcript-path <path>]',
+        '       [--session-id <id>] [--transcript-path <path>] [--cwd <path>]',
         '       Write a new active checkpoint. Body may also be piped on stdin.',
         '       If no body is provided, emits a template and exits 2.',
         '',
@@ -290,8 +295,23 @@ function verbHelp(): void {
 async function main(): Promise<void> {
     bootstrapConfigIfMissing();
     const cfg = loadConfig();
-    const cwd = process.cwd();
     const args = parseArgs(process.argv.slice(2));
+
+    // `help` needs no project root; resolving it (and possibly throwing on an
+    // unsafe dir) before printing usage would be unhelpful.
+    if (args.verb === 'help' || args.verb === '--help' || args.verb === '-h') {
+        verbHelp();
+        return;
+    }
+
+    // Anchor the checkpoint dir to the real project root — independent of the
+    // shell/tmux/cd the CLI was launched from. Throws (caught below) if only a
+    // transient dir like /tmp is available.
+    const cwd = resolveProjectRoot({
+        cwdFlag: typeof args.flags.cwd === 'string' ? args.flags.cwd : undefined,
+        transcriptPath: typeof args.flags['transcript-path'] === 'string' ? args.flags['transcript-path'] : undefined,
+        processCwd: process.cwd()
+    });
 
     switch (args.verb) {
         case 'save': await verbSave(args, cwd, cfg); return;
@@ -299,10 +319,6 @@ async function main(): Promise<void> {
         case 'list': verbList(args, cwd, cfg); return;
         case 'discard': verbDiscard(args, cwd, cfg); return;
         case 'cleanup': verbCleanup(args, cwd, cfg); return;
-        case 'help':
-        case '--help':
-        case '-h':
-            verbHelp(); return;
         default:
             process.stdout.write(`Unknown verb: ${args.verb}\n\n`);
             verbHelp();

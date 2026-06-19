@@ -41,7 +41,7 @@ When a meter crosses a warning threshold, Claude is nudged to pause, surface the
 /cc-pacekeeper:checkpoint list
 ```
 
-Checkpoints are written to `<cwd>/.claude-checkpoints/` — commit, ignore, or delete them as you see fit.
+Checkpoints are written to your project's `.claude-checkpoints/` directory — anchored to the git repo root (or the session's working directory for non-git projects), never a transient dir like `/tmp`. Because they live in the working tree, you can commit, ignore, or delete them as you see fit.
 
 ## License
 

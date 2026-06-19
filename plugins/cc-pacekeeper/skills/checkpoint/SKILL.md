@@ -1,6 +1,6 @@
 ---
 name: checkpoint
-description: Save, resume, list, or clean up cc-pacekeeper checkpoint files. Use when limits are nearing, before context compaction, to preserve in-flight work for resumption in a fresh session, or to orient a new session from a previously saved checkpoint. Checkpoints live in <cwd>/.claude-checkpoints/ and the user controls commit/ignore/delete via git.
+description: Save, resume, list, or clean up cc-pacekeeper checkpoint files. Use when limits are nearing, before context compaction, to preserve in-flight work for resumption in a fresh session, or to orient a new session from a previously saved checkpoint. Checkpoints live in the project's .claude-checkpoints/ (anchored to the git repo root, never /tmp) and the user controls commit/ignore/delete via git.
 ---
 
 # /cc-pacekeeper:checkpoint
@@ -22,11 +22,13 @@ Persistent resumable handoff files for cc-pacekeeper. All operations run via the
 The CLI expects a markdown body with the canonical sections (Goal / Status / In flight / Next / Open questions / References). When invoked without `--body` or stdin, it prints a template and exits 2 — fill the template, then either:
 
 1. Pipe it back: `printf '%s' "$BODY" | pacekeeper-checkpoint save --trigger user_invoked`
-2. Write to a temp file and pass `--body-file /tmp/checkpoint-body.md`
+2. Write to a temp file and pass `--body-file <tmpfile>`
 
 In a Claude Code session, you (Claude) compose the body from the current conversation: the explicit goal the user gave you, the steps already done, the exact in-flight step, the next concrete step, anything blocked on user input, plus relevant plan/PR/file references. Then invoke the CLI with `--body-file` so YAML-unfriendly content (colons, hashes) is safe.
 
-You should also pass `--session-id $CLAUDE_SESSION_ID --transcript-path $CLAUDE_TRANSCRIPT_PATH` when available so frontmatter captures live meter readings (context %, 5h %, weekly %).
+**Always pass `--transcript-path $CLAUDE_TRANSCRIPT_PATH`** (and `--session-id $CLAUDE_SESSION_ID`) when available. This serves two purposes: frontmatter captures live meter readings (context %, 5h %, weekly %), **and** the CLI reads the session's real working directory from the transcript to anchor the checkpoint to the project root — independent of whatever shell, tmux pane, or `cd` the command runs in. This is what guarantees the checkpoint lands in `<project>/.claude-checkpoints/` (where git can track it) and not in a scratch dir like `/tmp` (which is lost on reboot).
+
+The body temp file's location does **not** affect where the checkpoint is written — only `--transcript-path` / `--cwd` / git root / process cwd do (in that order). If none resolves to a real project dir (only transient dirs like `/tmp`, `$HOME`, or `/` are available), `save` refuses and exits non-zero; re-invoke with `--cwd <project-root>`.
 
 ## Resume flow
 
@@ -45,10 +47,12 @@ Files in the project's working tree — if the user committed any to git, those 
 
 ## File locations
 
+The project root is resolved as: `--cwd` flag → session cwd from `--transcript-path` → git repo root → process cwd; transient dirs (`/tmp`, `$HOME`, `/`) are refused. When the project is a git repo, checkpoints always live at the repo root.
+
 | Path | Purpose |
 |---|---|
-| `<cwd>/.claude-checkpoints/*.md` | Live (active or stranded-orphan) checkpoints |
-| `<cwd>/.claude-checkpoints/archive/*.md` | Resumed / superseded / stale checkpoints |
+| `<project-root>/.claude-checkpoints/*.md` | Live (active or stranded-orphan) checkpoints |
+| `<project-root>/.claude-checkpoints/archive/*.md` | Resumed / superseded / stale checkpoints |
 | `~/.config/cc-pacekeeper/config.json` | Thresholds, debounce, checkpoint cleanup ages |
 
 ## Tip
