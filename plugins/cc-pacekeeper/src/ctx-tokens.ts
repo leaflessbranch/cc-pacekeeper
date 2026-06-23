@@ -99,14 +99,40 @@ export function readMostRecentModel(transcriptPath: string): string | null {
 }
 
 /**
+ * Look up an explicit per-model context-window override.
+ *
+ * Matches the model string against the override map: an exact key first, then
+ * the longest key that is a prefix of the model string — so a base id like
+ * `claude-opus-4-8` also covers dated/suffixed variants such as
+ * `claude-opus-4-8-20260101` or `claude-opus-4-8 [1M]`. Returns null when no
+ * key matches or the mapped value is not a positive number.
+ */
+export function lookupModelOverride(model: string, overrides: Record<string, number>): number | null {
+    const exact = overrides[model];
+    if (typeof exact === 'number' && exact > 0) return exact;
+    let best: number | null = null;
+    let bestLen = -1;
+    for (const [key, value] of Object.entries(overrides)) {
+        if (typeof value === 'number' && value > 0 && key.length > bestLen && model.startsWith(key)) {
+            best = value;
+            bestLen = key.length;
+        }
+    }
+    return best;
+}
+
+/**
  * Resolve the context window denominator.
  *
  * Order:
- *   1. Explicit non-default `configOverride` (user-set value).
- *   2. Cached `max_input_tokens` from Anthropic's `/v1/models/{id}` endpoint —
+ *   1. Explicit per-model override (`context_window_overrides[model]`) — the
+ *      most specific signal, so switching models stays correct. Wins over the
+ *      global override and the auto-detection below.
+ *   2. Explicit non-default global `configOverride` (user-set value).
+ *   3. Cached `max_input_tokens` from Anthropic's `/v1/models/{id}` endpoint —
  *      authoritative, populated by a background fetch on first encounter.
- *   3. ccstatusline-style regex parse of size hints in the model string (`[1M]`).
- *   4. 200k default.
+ *   4. ccstatusline-style regex parse of size hints in the model string (`[1M]`).
+ *   5. 200k default.
  *
  * We divide by the "usable" portion (0.8 × max) so cc-pacekeeper's reported
  * percentage matches ccstatusline's `context-percentage-usable` widget — 80%
@@ -114,8 +140,21 @@ export function readMostRecentModel(transcriptPath: string): string | null {
  *
  * `configOverride` equal to the historical default (200k) is treated as a
  * sentinel "no override" so existing configs don't silently cap modern models.
+ * A per-model override is the model-adaptive answer when the 200k and 1M tiers
+ * share one model id (the 1M window is a per-request beta tier the API does not
+ * report), so a single global `context_window_size` would mis-scale others.
  */
-export function resolveUsableContextWindow(model?: string, configOverride?: number): number {
+export function resolveUsableContextWindow(
+    model?: string,
+    configOverride?: number,
+    perModelOverrides?: Record<string, number>
+): number {
+    if (model && perModelOverrides) {
+        const override = lookupModelOverride(model, perModelOverrides);
+        if (override !== null) {
+            return getContextConfig(undefined, override).usableTokens;
+        }
+    }
     if (configOverride !== undefined && configOverride !== DEFAULT_CONTEXT_WINDOW_SIZE) {
         return getContextConfig(undefined, configOverride).usableTokens;
     }

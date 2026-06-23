@@ -127,6 +127,37 @@ describe('resolveUsableContextWindow', () => {
     });
 });
 
+describe('resolveUsableContextWindow — per-model overrides', () => {
+    test('exact-match override wins over the 200k default', () => {
+        expect(resolveUsableContextWindow('claude-opus-4-8', 200_000, { 'claude-opus-4-8': 1_000_000 })).toBe(800_000);
+    });
+
+    test('prefix-match override covers dated/suffixed variants', () => {
+        expect(resolveUsableContextWindow('claude-opus-4-8-20260101', 200_000, { 'claude-opus-4-8': 1_000_000 })).toBe(800_000);
+        expect(resolveUsableContextWindow('claude-opus-4-8 [1M]', 200_000, { 'claude-opus-4-8': 1_000_000 })).toBe(800_000);
+    });
+
+    test('per-model override beats a non-default global override', () => {
+        // global 500k → usable 400k; per-model 1M → usable 800k. Per-model wins.
+        expect(resolveUsableContextWindow('claude-opus-4-8', 500_000, { 'claude-opus-4-8': 1_000_000 })).toBe(800_000);
+    });
+
+    test('longest matching prefix wins', () => {
+        const overrides = { 'claude': 300_000, 'claude-opus-4-8': 1_000_000 };
+        expect(resolveUsableContextWindow('claude-opus-4-8', 200_000, overrides)).toBe(800_000);
+    });
+
+    test('non-matching model falls through to normal detection', () => {
+        // claude-sonnet-4-6 has no override and no size hint → 200k default → 160k.
+        expect(resolveUsableContextWindow('claude-sonnet-4-6', 200_000, { 'claude-opus-4-8': 1_000_000 })).toBe(160_000);
+    });
+
+    test('empty/undefined override map preserves existing behavior', () => {
+        expect(resolveUsableContextWindow('claude-opus-4-7 [1M]', 200_000, {})).toBe(800_000);
+        expect(resolveUsableContextWindow(undefined, 200_000, { 'claude-opus-4-8': 1_000_000 })).toBe(160_000);
+    });
+});
+
 describe('contextPercent', () => {
     test('clamps at 100', () => {
         expect(contextPercent(300_000, 200_000)).toBe(100);

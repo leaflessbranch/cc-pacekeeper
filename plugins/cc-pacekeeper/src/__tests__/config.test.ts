@@ -65,6 +65,34 @@ describe('loadConfig', () => {
         const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
         expect(parsed.thresholds.context.notify).toBe(60);
     });
+
+    test('default config has an empty context_window_overrides map', async () => {
+        const { DEFAULT_CONFIG } = await import('../config');
+        expect(DEFAULT_CONFIG.context_window_overrides).toEqual({});
+    });
+
+    test('accepts and merges a context_window_overrides map', async () => {
+        const { configFile, loadConfig } = await import('../config');
+        const file = configFile();
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({
+            context_window_overrides: { 'claude-opus-4-8': 1_000_000 }
+        }));
+        const cfg = loadConfig();
+        expect(cfg.context_window_overrides).toEqual({ 'claude-opus-4-8': 1_000_000 });
+        // Unrelated defaults stay intact.
+        expect(cfg.context_window_size).toBe(200_000);
+    });
+
+    test('rejects a non-positive override value (schema violation → defaults)', async () => {
+        const { configFile, loadConfig, DEFAULT_CONFIG } = await import('../config');
+        const file = configFile();
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({
+            context_window_overrides: { 'claude-opus-4-8': 0 }
+        }));
+        expect(loadConfig()).toEqual(DEFAULT_CONFIG);
+    });
 });
 
 describe('isProjectDenied', () => {

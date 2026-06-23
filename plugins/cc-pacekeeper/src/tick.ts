@@ -55,7 +55,7 @@ async function main(): Promise<void> {
         try { await fetchAndCacheMaxInputTokens(model); } catch { /* fall through to 200k */ }
     }
 
-    const usableWindow = resolveUsableContextWindow(model, cfg.context_window_size);
+    const usableWindow = resolveUsableContextWindow(model, cfg.context_window_size, cfg.context_window_overrides);
     const ctxPct = ctxTokens ? contextPercent(ctxTokens.contextLength, usableWindow) : null;
 
     let usage: UsageData | null = readUsageCacheFile();

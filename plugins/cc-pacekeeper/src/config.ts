@@ -18,6 +18,7 @@ const ConfigSchema = z.object({
     debounce_seconds: z.number().int().nonnegative(),
     cache_ttl_seconds: z.number().int().positive(),
     context_window_size: z.number().int().positive(),
+    context_window_overrides: z.record(z.string(), z.number().int().positive()),
     project_denylist: z.array(z.string()),
     checkpoint_dir_name: z.string(),
     checkpoint: z.object({
@@ -39,6 +40,7 @@ export const DEFAULT_CONFIG: Config = {
     debounce_seconds: 60,
     cache_ttl_seconds: 180,
     context_window_size: 200_000,
+    context_window_overrides: {},
     project_denylist: [],
     checkpoint_dir_name: '.claude-checkpoints',
     checkpoint: {
