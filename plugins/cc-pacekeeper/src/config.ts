@@ -24,6 +24,10 @@ const ConfigSchema = z.object({
         stale_after_days: z.number().int().positive(),
         archive_keep_days: z.number().int().positive()
     }),
+    time: z.object({
+        idle_threshold_min: z.number().int().positive(),
+        tool_tick_min: z.number().int().positive()
+    }),
     share_ccstatusline_cache: z.boolean()
 });
 
@@ -44,6 +48,10 @@ export const DEFAULT_CONFIG: Config = {
     checkpoint: {
         stale_after_days: 14,
         archive_keep_days: 90
+    },
+    time: {
+        idle_threshold_min: 10,
+        tool_tick_min: 5
     },
     share_ccstatusline_cache: false
 };

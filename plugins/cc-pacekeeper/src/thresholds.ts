@@ -148,7 +148,11 @@ function formatExtra(extra: Snapshot['extraUsage']): string {
     return '';
 }
 
-export function formatStatusLine(snap: Snapshot): string {
+/**
+ * The meter body without the `[pacekeeper]` prefix, e.g.
+ * `ctx 62% · 5h 71% (1h20m) · week 43%` — composable into a combined line.
+ */
+export function formatMeterSegment(snap: Snapshot): string {
     const parts = snap.readings
         .filter(r => r.meter === 'context' || r.meter === 'five_hour' || r.meter === 'weekly')
         .map(r => {
@@ -156,7 +160,11 @@ export function formatStatusLine(snap: Snapshot): string {
             const reset = formatResetCountdown(r.resetsAt);
             return reset ? `${label} ${r.percent.toFixed(0)}% (${reset})` : `${label} ${r.percent.toFixed(0)}%`;
         });
-    return `[pacekeeper] ${parts.join(' · ')}${formatExtra(snap.extraUsage)}`;
+    return `${parts.join(' · ')}${formatExtra(snap.extraUsage)}`;
+}
+
+export function formatStatusLine(snap: Snapshot): string {
+    return `[pacekeeper] ${formatMeterSegment(snap)}`;
 }
 
 const METER_HUMAN: Record<Meter, string> = {
