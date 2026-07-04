@@ -14,7 +14,7 @@ import {
 } from './checkpoint';
 import { contextPercent, readContextTokens, resolveUsableContextWindow } from './ctx-tokens';
 import { readUsageCacheFile } from './vendor/usage-fetch';
-import { resolveProjectRoot } from './resolve-root';
+import { projectRootFromTranscript, resolveProjectRoot, worktreeInfo } from './resolve-root';
 
 interface Args {
     verb: string;
@@ -135,6 +135,15 @@ function verbSave(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): 
         }
 
         const meters = gatherMeters(transcriptPath, cfg.context_window_size);
+
+        // Provenance: if the session was running in a *linked* worktree, record
+        // the worktree path + its branch so resume can re-enter it. Resolve from
+        // the session's real dir (transcript cwd → process cwd), before `cwd`
+        // was snapped to the main repo root.
+        const sessionDir = (transcriptPath ? projectRootFromTranscript(transcriptPath) : undefined) ?? process.cwd();
+        const wt = worktreeInfo(sessionDir);
+        const worktreeProvenance = wt?.isWorktree ? wt.worktreeRoot : undefined;
+
         const { path: written, supersededPaths } = saveCheckpoint({
             cwd,
             checkpointDirName: cfg.checkpoint_dir_name,
@@ -142,7 +151,9 @@ function verbSave(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): 
                 session_id: sessionId,
                 trigger,
                 meters: Object.keys(meters).length > 0 ? meters : undefined,
-                project_root: cwd
+                project_root: cwd,
+                ...(worktreeProvenance ? { worktree: worktreeProvenance } : {}),
+                ...(wt?.isWorktree && wt.branch ? { git_branch: wt.branch } : {})
             },
             body
         });

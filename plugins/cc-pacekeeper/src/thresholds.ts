@@ -148,7 +148,11 @@ function formatExtra(extra: Snapshot['extraUsage']): string {
     return '';
 }
 
-export function formatStatusLine(snap: Snapshot): string {
+/**
+ * The meter body without the `[pacekeeper]` prefix, e.g.
+ * `ctx 62% · 5h 71% (1h20m) · week 43%` — composable into a combined line.
+ */
+export function formatMeterSegment(snap: Snapshot): string {
     const parts = snap.readings
         .filter(r => r.meter === 'context' || r.meter === 'five_hour' || r.meter === 'weekly')
         .map(r => {
@@ -156,7 +160,11 @@ export function formatStatusLine(snap: Snapshot): string {
             const reset = formatResetCountdown(r.resetsAt);
             return reset ? `${label} ${r.percent.toFixed(0)}% (${reset})` : `${label} ${r.percent.toFixed(0)}%`;
         });
-    return `[pacekeeper] ${parts.join(' · ')}${formatExtra(snap.extraUsage)}`;
+    return `${parts.join(' · ')}${formatExtra(snap.extraUsage)}`;
+}
+
+export function formatStatusLine(snap: Snapshot): string {
+    return `[pacekeeper] ${formatMeterSegment(snap)}`;
 }
 
 const METER_HUMAN: Record<Meter, string> = {
@@ -166,6 +174,69 @@ const METER_HUMAN: Record<Meter, string> = {
     weekly_sonnet: 'weekly Sonnet limit',
     weekly_opus: 'weekly Opus limit'
 };
+
+/**
+ * Minutes until a windowed meter resets, or null if unknown.
+ */
+export function minutesUntilReset(resetsAt: string | undefined, now: number = Date.now()): number | null {
+    if (!resetsAt) return null;
+    const t = Date.parse(resetsAt);
+    if (!Number.isFinite(t)) return null;
+    return (t - now) / 60000;
+}
+
+/**
+ * The 5h block-reset bridge. When the 5-hour block is warn/critical and its
+ * reset is near (< maxWaitMin), suppress the checkpoint directive — waiting out
+ * a short reset beats a full checkpoint/resume cycle. Returns the bridge text,
+ * or null when the bridge doesn't apply (caller falls back to formatDirective).
+ */
+export function formatBridgeDirective(snap: Snapshot, maxWaitMin: number, now: number = Date.now()): string | null {
+    const five = snap.readings.find(r => r.meter === 'five_hour');
+    if (!five || (five.level !== 'warn' && five.level !== 'critical')) return null;
+    const mins = minutesUntilReset(five.resetsAt, now);
+    if (mins === null || mins >= maxWaitMin || mins < 0) return null;
+    const status = formatStatusLine(snap);
+    const m = Math.ceil(mins);
+    return [
+        status,
+        '',
+        `⏳ 5-hour block at ${five.percent.toFixed(0)}%, but it resets in ~${m}m — close enough to wait out rather than checkpoint.`,
+        `Keep working on small steps. If you expect to go idle before the reset, schedule a ${KEEPALIVE_MARKER_HINT} one-shot for reset+2m as a safety net to reset the block cleanly.`
+    ].join('\n');
+}
+
+// Kept as a string constant here to avoid a circular import with keepalive.ts.
+const KEEPALIVE_MARKER_HINT = '[pacekeeper-keepalive]';
+
+/**
+ * Weekly model-family arbitrage nudge. When the *current* model family's weekly
+ * meter is stressed (≥ warn) but the all-models weekly is still fine (< warn)
+ * and the other family has headroom (< notify), suggest switching families.
+ * `modelId` picks the current family. Returns null when it doesn't apply.
+ */
+export function formatArbitrageNudge(snap: Snapshot, modelId: string | undefined): string | null {
+    if (!modelId) return null;
+    const family: 'sonnet' | 'opus' | null =
+        /opus/i.test(modelId) ? 'opus' : /sonnet/i.test(modelId) ? 'sonnet' : null;
+    if (!family) return null;
+
+    const all = snap.readings.find(r => r.meter === 'weekly');
+    const cur = snap.readings.find(r => r.meter === (family === 'opus' ? 'weekly_opus' : 'weekly_sonnet'));
+    const other = snap.readings.find(r => r.meter === (family === 'opus' ? 'weekly_sonnet' : 'weekly_opus'));
+    if (!all || !cur || !other) return null;
+
+    const RANK: Record<Level, number> = { none: 0, notify: 1, warn: 2, critical: 3 };
+    if (RANK[cur.level] < RANK['warn']) return null;   // current family not stressed
+    if (RANK[all.level] >= RANK['warn']) return null;  // overall weekly also tight → switching won't help
+    if (RANK[other.level] >= RANK['notify']) return null; // other family has no headroom
+
+    const otherName = family === 'opus' ? 'Sonnet' : 'Opus';
+    const curName = family === 'opus' ? 'Opus' : 'Sonnet';
+    return `↔ Weekly ${curName} is at ${cur.percent.toFixed(0)}% while ${otherName} sits at ${other.percent.toFixed(0)}%. `
+        + `If the next work suits ${otherName}, switching models spreads the load. `
+        + `(Switching re-reads the context uncached once, a one-time token cost.)`;
+}
 
 export function formatDirective(snap: Snapshot): string {
     const status = formatStatusLine(snap);

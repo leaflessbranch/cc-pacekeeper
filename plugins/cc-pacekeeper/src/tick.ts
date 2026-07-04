@@ -5,10 +5,17 @@ import { emitAdditionalContext, emitEmpty, readStdinJson } from './hook-io';
 import { listActive } from './checkpoint';
 import {
     computeSnapshot,
+    formatArbitrageNudge,
+    formatBridgeDirective,
     formatDirective,
+    formatMeterSegment,
     formatStatusLine
 } from './thresholds';
+import { keepaliveDirective, scanKeepaliveState } from './keepalive';
 import { peekLevel, shouldInjectAndRecord, type Level, type Meter } from './state';
+import { touchSession, updateSession, type SessionEntry } from './session-state';
+import { detectAfkReturn, formatTimeSegment } from './timeline';
+import { liveSessionCount } from './live-sessions';
 import { fetchUsageData, readUsageCacheFile } from './vendor/usage-fetch';
 import type { UsageData } from './vendor/usage-types';
 import { fetchAndCacheMaxInputTokens, readCachedMaxInputTokens } from './model-info';
@@ -26,6 +33,11 @@ async function main(): Promise<void> {
         emitEmpty();
         return;
     }
+
+    // ── Update per-session timeline state on every event. previousEventAt is
+    //    the prior event's time, used to detect an AFK gap. ──
+    const nowMs = Date.now();
+    const { previousEventAt, entry: sessionEntry } = touchSession(sessionId, nowMs);
 
     // ── SessionStart: surface active checkpoint(s) if present, then continue. ──
     let sessionStartBlock = '';
@@ -84,24 +96,36 @@ async function main(): Promise<void> {
             updateAllDebounce(sessionId, snap, nowSec, cfg.debounce_seconds);
         }
     } else if (event === 'UserPromptSubmit') {
-        // Inject a status line whenever any meter ≥ notify; debounced.
-        if (snap.maxLevel !== 'none') {
-            const fireMeters = applyDebounce(sessionId, snap, nowSec, cfg.debounce_seconds);
-            if (fireMeters.length > 0) {
-                injection = snap.maxLevel === 'notify'
-                    ? formatStatusLine(snap)
-                    : formatDirective(snap);
-            }
+        // Always inject the combined time + meter line, plus any AFK-return note
+        // and any debounced warn/critical directive. This is the per-prompt
+        // heartbeat: the user sees where time and budget stand every turn.
+        const afk = afkLine(sessionId, previousEventAt, sessionEntry, nowMs, cfg);
+        const directive = directiveIfEscalated(sessionId, snap, nowSec, cfg);
+        const extras: string[] = [];
+        // A prompt means the user is active: cancel any pending keepalive one-shot.
+        if (stdin.transcript_path) {
+            const ka = keepaliveDirective({
+                cfg, snap, state: scanKeepaliveState(stdin.transcript_path),
+                userIsIdle: false, nowMs
+            });
+            if (ka.directive) extras.push(ka.directive);
         }
+        const arb = formatArbitrageNudge(snap, model);
+        if (arb) extras.push(arb);
+        injection = composeLine(nowMs, sessionEntry, snap, cfg, afk, directive, extras);
+        updateSession(sessionId, nowMs, { lastTimestampInjectedAt: nowMs });
     } else if (event === 'PreToolUse') {
-        // Only fire on transitions or persistence past debounce. Silent at notify
-        // unless a transition just happened, to keep tool-loop overhead minimal.
-        const fireMeters = applyDebounce(sessionId, snap, nowSec, cfg.debounce_seconds);
-        if (fireMeters.length > 0) {
-            // Skip noisy notify-only injections in the tool loop; let warn/critical drive.
-            if (snap.maxLevel === 'warn' || snap.maxLevel === 'critical') {
-                injection = formatDirective(snap);
-            }
+        // Inject the time+status line only once per `time.tool_tick_min` to keep
+        // tool-loop overhead minimal; warn/critical directives still fire on
+        // their own debounce regardless of the tick gate.
+        const lastInj = sessionEntry.lastTimestampInjectedAt ?? 0;
+        const tickDue = nowMs - lastInj >= cfg.time.tool_tick_min * 60000;
+        const directive = directiveIfEscalated(sessionId, snap, nowSec, cfg);
+        if (tickDue) {
+            injection = composeLine(nowMs, sessionEntry, snap, cfg, null, directive);
+            updateSession(sessionId, nowMs, { lastTimestampInjectedAt: nowMs });
+        } else if (directive) {
+            injection = directive;
         }
     } else if (event === 'Stop') {
         // If any meter is currently at warn+ AND last-injected level for any meter
@@ -131,6 +155,77 @@ async function main(): Promise<void> {
     } else {
         emitAdditionalContext(event || 'UnknownEvent', fullText);
     }
+}
+
+/**
+ * Build the combined `[pacekeeper]` heartbeat line: time segment + meter
+ * segment, with an optional AFK-return note above and an optional warn/critical
+ * directive below.
+ */
+function composeLine(
+    nowMs: number,
+    entry: SessionEntry,
+    snap: ReturnType<typeof computeSnapshot>,
+    cfg: ReturnType<typeof loadConfig>,
+    afk: string | null,
+    directive: string | null,
+    extras: string[] = []
+): string {
+    const time = formatTimeSegment(nowMs, entry, cfg);
+    const meters = formatMeterSegment(snap);
+    const count = liveSessionCount();
+    const live = (count !== null && count > 1) ? ` · ${count} live sessions sharing budget` : '';
+    const head = meters ? `[pacekeeper] ${time} · ${meters}${live}` : `[pacekeeper] ${time}${live}`;
+    const lines: string[] = [];
+    if (afk) lines.push(afk);
+    lines.push(head);
+    if (directive) lines.push('', directive);
+    for (const extra of extras) lines.push('', extra);
+    return lines.join('\n');
+}
+
+/**
+ * The AFK-return line, surfaced once per gap. Marks it surfaced in session
+ * state so a later tick in the same idle window doesn't repeat it.
+ */
+function afkLine(
+    sessionId: string,
+    previousEventAt: number | null,
+    entry: SessionEntry,
+    nowMs: number,
+    cfg: ReturnType<typeof loadConfig>
+): string | null {
+    if (previousEventAt === null) return null;
+    const gap = nowMs - previousEventAt;
+    const line = detectAfkReturn(gap, cfg);
+    if (!line) return null;
+    // Guard against double-surfacing within the same gap: only show if the
+    // recorded afk marker doesn't already cover this away-window.
+    if (entry.afk?.surfaced && entry.afk.awayFrom === previousEventAt) return null;
+    updateSession(sessionId, nowMs, { afk: { awayFrom: previousEventAt, surfaced: true } });
+    return line;
+}
+
+/**
+ * Return the warn/critical directive for this event if the debounce fires and
+ * the level warrants it; otherwise null. Mirrors the prior PreToolUse gate.
+ */
+function directiveIfEscalated(
+    sessionId: string,
+    snap: ReturnType<typeof computeSnapshot>,
+    nowSec: number,
+    cfg: ReturnType<typeof loadConfig>
+): string | null {
+    const fired = applyDebounce(sessionId, snap, nowSec, cfg.debounce_seconds);
+    if (fired.length === 0) return null;
+    if (snap.maxLevel !== 'warn' && snap.maxLevel !== 'critical') return null;
+    // Prefer the 5h block-reset bridge over the checkpoint directive when a
+    // short reset is imminent: waiting it out beats a checkpoint/resume cycle.
+    if (cfg.bridge.enabled) {
+        const bridge = formatBridgeDirective(snap, cfg.bridge.max_wait_min);
+        if (bridge) return bridge;
+    }
+    return formatDirective(snap);
 }
 
 function applyDebounce(

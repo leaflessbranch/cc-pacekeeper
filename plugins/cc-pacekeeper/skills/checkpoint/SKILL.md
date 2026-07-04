@@ -1,6 +1,6 @@
 ---
 name: checkpoint
-description: Save, resume, list, or clean up cc-pacekeeper checkpoint files. Use when limits are nearing, before context compaction, to preserve in-flight work for resumption in a fresh session, or to orient a new session from a previously saved checkpoint. Checkpoints live in the project's .claude-checkpoints/ (anchored to the git repo root, never /tmp) and the user controls commit/ignore/delete via git.
+description: Save, resume, list, or clean up cc-pacekeeper checkpoint files. Use when limits are nearing, before context compaction, to preserve in-flight work for resumption in a fresh session, or to orient a new session from a previously saved checkpoint. To orient from or pick up a checkpoint, ALWAYS run the `resume` verb — never open/Read the .md file directly, because `resume` also archives it (marks it resumed and moves it to archive/) so a stale checkpoint isn't re-surfaced next session; reading the file skips that archival and leaves it dangling. Checkpoints live in the project's .claude-checkpoints/ and the user controls commit/ignore/delete via git.
 ---
 
 # /cc-pacekeeper:checkpoint
@@ -26,15 +26,19 @@ The CLI expects a markdown body with the canonical sections (Goal / Status / In 
 
 In a Claude Code session, you (Claude) compose the body from the current conversation: the explicit goal the user gave you, the steps already done, the exact in-flight step, the next concrete step, anything blocked on user input, plus relevant plan/PR/file references. Then invoke the CLI with `--body-file` so YAML-unfriendly content (colons, hashes) is safe.
 
-**Always pass `--transcript-path $CLAUDE_TRANSCRIPT_PATH`** (and `--session-id $CLAUDE_SESSION_ID`) when available. This serves two purposes: frontmatter captures live meter readings (context %, 5h %, weekly %), **and** the CLI reads the session's real working directory from the transcript to anchor the checkpoint to the project root — independent of whatever shell, tmux pane, or `cd` the command runs in. This is what guarantees the checkpoint lands in `<project>/.claude-checkpoints/` (where git can track it) and not in a scratch dir like `/tmp` (which is lost on reboot).
+**Always pass `--transcript-path $CLAUDE_TRANSCRIPT_PATH`** (and `--session-id $CLAUDE_SESSION_ID`) when available: frontmatter captures live meter readings, and the CLI uses the transcript to anchor the checkpoint to the project root. <!-- Anchoring: transcript cwd → --cwd → git root → process cwd; refuses transient dirs so the file lands where git can track it. -->
 
-The body temp file's location does **not** affect where the checkpoint is written — only `--transcript-path` / `--cwd` / git root / process cwd do (in that order). If none resolves to a real project dir (only transient dirs like `/tmp`, `$HOME`, or `/` are available), `save` refuses and exits non-zero; re-invoke with `--cwd <project-root>`.
+> **Anchoring is internal mechanics — never mention `/tmp`, root resolution, or anchoring to the user. Just save and report the saved checkpoint path.**
+
+The body temp file's location does **not** affect where the checkpoint is written. If `save` can only resolve a transient dir it refuses and exits non-zero; re-invoke with `--cwd <project-root>`.
 
 ## Resume flow
 
-`pacekeeper-checkpoint resume` prints the body of the newest active checkpoint and **archives it** (status `resumed`, moved to `archive/`). After running it, you have full orientation — proceed from "Next" unless the user redirects.
+**Always resume via the CLI — never by reading the `.md` file yourself.** `pacekeeper-checkpoint resume` prints the body of the newest active checkpoint **and archives it** (status `resumed`, moved to `archive/`). Reading the file directly gives you the same text but skips the archival, so the checkpoint stays `active` and gets re-surfaced on the next SessionStart as if it were never picked up. If the SessionStart banner shows an active checkpoint, run `resume` to orient — do not Read the path it prints. After running it, you have full orientation — proceed from "Next" unless the user redirects.
 
 If multiple actives exist and the user wants an older one, run `list` first, then `resume N` with the index from the list.
+
+**Worktree provenance:** if the resumed checkpoint's frontmatter carries a `worktree` path (it was saved from a linked git worktree) and its `git_branch` still exists, re-enter that worktree with `EnterWorktree` before continuing — recreate it from the branch if the directory is gone. Do this silently; don't narrate the worktree mechanics to the user.
 
 ## Cleanup safety
 
@@ -47,7 +51,7 @@ Files in the project's working tree — if the user committed any to git, those 
 
 ## File locations
 
-The project root is resolved as: `--cwd` flag → session cwd from `--transcript-path` → git repo root → process cwd; transient dirs (`/tmp`, `$HOME`, `/`) are refused. When the project is a git repo, checkpoints always live at the repo root.
+When the project is a git repo, checkpoints live at the repo root.
 
 | Path | Purpose |
 |---|---|

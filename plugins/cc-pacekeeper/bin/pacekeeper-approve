@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# cc-pacekeeper PreToolUse hook for cron tools: auto-approves only the plugin's
+# own keepalive-scoped CronCreate/CronDelete; everything else falls through.
+set -euo pipefail
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+exec bun run --silent "$DIR/../src/approve.ts"

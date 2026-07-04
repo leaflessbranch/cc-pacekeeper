@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { isUnsafeRoot, projectRootFromTranscript, resolveProjectRoot } from '../resolve-root';
+import { isUnsafeRoot, projectRootFromTranscript, resolveProjectRoot, worktreeInfo } from '../resolve-root';
 
 // Fixtures must live OUTSIDE the tmp roots and $HOME, since resolveProjectRoot
 // refuses those. We stage them under the test file's own directory tree.
@@ -117,5 +117,54 @@ describe('resolveProjectRoot', () => {
         gitInit(TMP);
         const root = resolveProjectRoot({ cwdFlag: undefined, transcriptPath: undefined, processCwd: TMP });
         expect(root).toBe(fs.realpathSync(TMP));
+    });
+
+    test('a linked worktree resolves to the MAIN repo root, not the worktree', () => {
+        gitInit(TMP);
+        // A commit is required before `git worktree add` can create a branch.
+        execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-q', '-m', 'init'], { cwd: TMP });
+        const wt = path.join(TMP, '..', `wt-${path.basename(TMP)}`);
+        execFileSync('git', ['worktree', 'add', '-q', '-b', 'feature', wt], { cwd: TMP });
+        try {
+            const root = resolveProjectRoot({ cwdFlag: wt, transcriptPath: undefined, processCwd: '/tmp' });
+            expect(root).toBe(fs.realpathSync(TMP));
+        } finally {
+            execFileSync('git', ['worktree', 'remove', '--force', wt], { cwd: TMP });
+        }
+    });
+});
+
+describe('worktreeInfo', () => {
+    function gitInit(dir: string): void {
+        execFileSync('git', ['init', '-q'], { cwd: dir });
+    }
+
+    test('normal checkout: not a worktree, mainRoot == worktreeRoot', () => {
+        gitInit(TMP);
+        const info = worktreeInfo(TMP);
+        expect(info?.isWorktree).toBe(false);
+        expect(info?.mainRoot).toBe(fs.realpathSync(TMP));
+    });
+
+    test('linked worktree: flagged, mainRoot points at the main repo, branch captured', () => {
+        gitInit(TMP);
+        execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-q', '-m', 'init'], { cwd: TMP });
+        const wt = path.join(TMP, '..', `wt2-${path.basename(TMP)}`);
+        execFileSync('git', ['worktree', 'add', '-q', '-b', 'feat-x', wt], { cwd: TMP });
+        try {
+            const info = worktreeInfo(wt);
+            expect(info?.isWorktree).toBe(true);
+            expect(info?.mainRoot).toBe(fs.realpathSync(TMP));
+            expect(info?.worktreeRoot).toBe(fs.realpathSync(wt));
+            expect(info?.branch).toBe('feat-x');
+        } finally {
+            execFileSync('git', ['worktree', 'remove', '--force', wt], { cwd: TMP });
+        }
+    });
+
+    test('a truly non-git path returns undefined', () => {
+        // Use the filesystem root's parent-less sentinel: a path with no repo
+        // above it. os.tmpdir() is not under a git repo on CI/dev machines.
+        expect(worktreeInfo(os.tmpdir())).toBeUndefined();
     });
 });

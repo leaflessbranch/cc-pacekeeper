@@ -55,15 +55,72 @@ export function projectRootFromTranscript(transcriptPath: string): string | unde
     return found;
 }
 
-function gitToplevel(dir: string): string | undefined {
+function gitExec(dir: string, args: string[]): string | undefined {
     try {
-        const out = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+        const out = execFileSync('git', args, {
             cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']
         }).trim();
         return out || undefined;
     } catch {
         return undefined;
     }
+}
+
+/**
+ * The repo root that owns checkpoints for `dir`. For a normal checkout this is
+ * `--show-toplevel`. For a *linked worktree*, checkpoints belong with the main
+ * repo, not the worktree: `--git-common-dir` resolves to `<main>/.git`, whose
+ * parent is the main working tree. We detect a linked worktree by comparing the
+ * per-worktree git dir (`--git-dir`) against the common dir — they differ only
+ * in a linked worktree.
+ */
+function gitToplevel(dir: string): string | undefined {
+    const toplevel = gitExec(dir, ['rev-parse', '--show-toplevel']);
+    if (!toplevel) return undefined;
+    const info = worktreeInfo(dir);
+    if (info?.isWorktree && info.mainRoot) return info.mainRoot;
+    return toplevel;
+}
+
+export interface WorktreeInfo {
+    isWorktree: boolean;
+    /** Working directory of this worktree (linked or main). */
+    worktreeRoot?: string;
+    /** Main repo working tree — same as worktreeRoot for a normal checkout. */
+    mainRoot?: string;
+    branch?: string;
+}
+
+/**
+ * Describe the git worktree situation for `dir`, or undefined if `dir` is not
+ * in a git repo. Used both for checkpoint anchoring and for provenance
+ * frontmatter so a resume can re-enter the originating worktree.
+ */
+export function worktreeInfo(dir: string): WorktreeInfo | undefined {
+    const toplevel = gitExec(dir, ['rev-parse', '--show-toplevel']);
+    if (!toplevel) return undefined;
+    const gitDir = gitExec(dir, ['rev-parse', '--absolute-git-dir']);
+    const commonDir = gitExec(dir, ['rev-parse', '--git-common-dir']);
+    const branch = gitExec(dir, ['rev-parse', '--abbrev-ref', 'HEAD']);
+
+    // `--git-common-dir` may be relative (e.g. ".git") — resolve it against the
+    // queried dir, not process.cwd().
+    let commonAbs: string | undefined;
+    if (commonDir) {
+        const abs = path.isAbsolute(commonDir) ? commonDir : path.resolve(dir, commonDir);
+        try { commonAbs = fs.realpathSync(abs); }
+        catch { commonAbs = abs; }
+    }
+    // Linked worktree ⇔ this worktree's git dir differs from the common dir.
+    const isWorktree = !!(gitDir && commonAbs && path.resolve(gitDir) !== commonAbs);
+    const mainRoot = isWorktree && commonAbs ? path.dirname(commonAbs) : toplevel;
+
+    return {
+        isWorktree,
+        worktreeRoot: toplevel,
+        mainRoot,
+        ...(branch && branch !== 'HEAD' ? { branch } : {})
+    };
 }
 
 export interface ResolveInput {
