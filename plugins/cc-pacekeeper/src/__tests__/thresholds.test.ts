@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_CONFIG } from '../config';
-import { computeSnapshot, formatDirective, formatStatusLine } from '../thresholds';
+import { computeSnapshot, formatArbitrageNudge, formatBridgeDirective, formatDirective, formatStatusLine } from '../thresholds';
 
 describe('computeSnapshot', () => {
     test('all meters none when below thresholds', () => {
@@ -162,5 +162,55 @@ describe('formatDirective', () => {
         expect(out).toContain('(a) continue');
         expect(out).toContain('(b) save a checkpoint');
         expect(out).toContain('(c) keep going');
+    });
+});
+
+describe('formatBridgeDirective', () => {
+    const now = Date.parse('2026-07-04T10:00:00Z');
+    const resetIn = (min: number): string => new Date(now + min * 60000).toISOString();
+
+    test('null when 5h not warn/critical', () => {
+        const snap = computeSnapshot({ contextPercent: 10, usage: { sessionUsage: 20, sessionResetAt: resetIn(30) } }, DEFAULT_CONFIG);
+        expect(formatBridgeDirective(snap, 60, now)).toBeNull();
+    });
+
+    test('bridges when 5h warn and reset is near', () => {
+        const snap = computeSnapshot({ contextPercent: 10, usage: { sessionUsage: 88, sessionResetAt: resetIn(20) } }, DEFAULT_CONFIG);
+        const out = formatBridgeDirective(snap, 60, now);
+        expect(out).toContain('resets in ~20m');
+        expect(out).toContain('[pacekeeper-keepalive]');
+    });
+
+    test('null when reset is beyond max wait', () => {
+        const snap = computeSnapshot({ contextPercent: 10, usage: { sessionUsage: 88, sessionResetAt: resetIn(90) } }, DEFAULT_CONFIG);
+        expect(formatBridgeDirective(snap, 60, now)).toBeNull();
+    });
+});
+
+describe('formatArbitrageNudge', () => {
+    // opus family stressed, all-weekly fine, sonnet has headroom
+    const nudgeable = computeSnapshot({
+        contextPercent: 10,
+        usage: { weeklyUsage: 30, weeklyOpusUsage: 75, weeklySonnetUsage: 20 }
+    }, DEFAULT_CONFIG);
+
+    test('nudges to switch family when current family stressed', () => {
+        const out = formatArbitrageNudge(nudgeable, 'claude-opus-4-8');
+        expect(out).toContain('Opus');
+        expect(out).toContain('Sonnet');
+    });
+
+    test('null when overall weekly also tight', () => {
+        const snap = computeSnapshot({ contextPercent: 10, usage: { weeklyUsage: 80, weeklyOpusUsage: 75, weeklySonnetUsage: 20 } }, DEFAULT_CONFIG);
+        expect(formatArbitrageNudge(snap, 'claude-opus-4-8')).toBeNull();
+    });
+
+    test('null when other family has no headroom', () => {
+        const snap = computeSnapshot({ contextPercent: 10, usage: { weeklyUsage: 30, weeklyOpusUsage: 75, weeklySonnetUsage: 60 } }, DEFAULT_CONFIG);
+        expect(formatArbitrageNudge(snap, 'claude-opus-4-8')).toBeNull();
+    });
+
+    test('null for unknown model family', () => {
+        expect(formatArbitrageNudge(nudgeable, 'some-other-model')).toBeNull();
     });
 });

@@ -28,6 +28,14 @@ const ConfigSchema = z.object({
         idle_threshold_min: z.number().int().positive(),
         tool_tick_min: z.number().int().positive()
     }),
+    keepalive: z.object({
+        enabled: z.boolean(),
+        interval_min: z.number().int().positive()
+    }),
+    bridge: z.object({
+        enabled: z.boolean(),
+        max_wait_min: z.number().int().positive()
+    }),
     share_ccstatusline_cache: z.boolean()
 });
 
@@ -52,6 +60,14 @@ export const DEFAULT_CONFIG: Config = {
     time: {
         idle_threshold_min: 10,
         tool_tick_min: 5
+    },
+    keepalive: {
+        enabled: true,
+        interval_min: 50
+    },
+    bridge: {
+        enabled: true,
+        max_wait_min: 60
     },
     share_ccstatusline_cache: false
 };

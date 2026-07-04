@@ -5,10 +5,13 @@ import { emitAdditionalContext, emitEmpty, readStdinJson } from './hook-io';
 import { listActive } from './checkpoint';
 import {
     computeSnapshot,
+    formatArbitrageNudge,
+    formatBridgeDirective,
     formatDirective,
     formatMeterSegment,
     formatStatusLine
 } from './thresholds';
+import { keepaliveDirective, scanKeepaliveState } from './keepalive';
 import { peekLevel, shouldInjectAndRecord, type Level, type Meter } from './state';
 import { touchSession, updateSession, type SessionEntry } from './session-state';
 import { detectAfkReturn, formatTimeSegment } from './timeline';
@@ -98,7 +101,18 @@ async function main(): Promise<void> {
         // heartbeat: the user sees where time and budget stand every turn.
         const afk = afkLine(sessionId, previousEventAt, sessionEntry, nowMs, cfg);
         const directive = directiveIfEscalated(sessionId, snap, nowSec, cfg);
-        injection = composeLine(nowMs, sessionEntry, snap, cfg, afk, directive);
+        const extras: string[] = [];
+        // A prompt means the user is active: cancel any pending keepalive one-shot.
+        if (stdin.transcript_path) {
+            const ka = keepaliveDirective({
+                cfg, snap, state: scanKeepaliveState(stdin.transcript_path),
+                userIsIdle: false, nowMs
+            });
+            if (ka.directive) extras.push(ka.directive);
+        }
+        const arb = formatArbitrageNudge(snap, model);
+        if (arb) extras.push(arb);
+        injection = composeLine(nowMs, sessionEntry, snap, cfg, afk, directive, extras);
         updateSession(sessionId, nowMs, { lastTimestampInjectedAt: nowMs });
     } else if (event === 'PreToolUse') {
         // Inject the time+status line only once per `time.tool_tick_min` to keep
@@ -154,7 +168,8 @@ function composeLine(
     snap: ReturnType<typeof computeSnapshot>,
     cfg: ReturnType<typeof loadConfig>,
     afk: string | null,
-    directive: string | null
+    directive: string | null,
+    extras: string[] = []
 ): string {
     const time = formatTimeSegment(nowMs, entry, cfg);
     const meters = formatMeterSegment(snap);
@@ -165,6 +180,7 @@ function composeLine(
     if (afk) lines.push(afk);
     lines.push(head);
     if (directive) lines.push('', directive);
+    for (const extra of extras) lines.push('', extra);
     return lines.join('\n');
 }
 
@@ -202,8 +218,14 @@ function directiveIfEscalated(
 ): string | null {
     const fired = applyDebounce(sessionId, snap, nowSec, cfg.debounce_seconds);
     if (fired.length === 0) return null;
-    if (snap.maxLevel === 'warn' || snap.maxLevel === 'critical') return formatDirective(snap);
-    return null;
+    if (snap.maxLevel !== 'warn' && snap.maxLevel !== 'critical') return null;
+    // Prefer the 5h block-reset bridge over the checkpoint directive when a
+    // short reset is imminent: waiting it out beats a checkpoint/resume cycle.
+    if (cfg.bridge.enabled) {
+        const bridge = formatBridgeDirective(snap, cfg.bridge.max_wait_min);
+        if (bridge) return bridge;
+    }
+    return formatDirective(snap);
 }
 
 function applyDebounce(
