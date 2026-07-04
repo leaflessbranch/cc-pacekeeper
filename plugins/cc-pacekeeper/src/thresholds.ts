@@ -45,7 +45,7 @@ export interface ComputeInputs {
     usage: UsageData | null;
 }
 
-export function computeSnapshot(inputs: ComputeInputs, cfg: Config): Snapshot {
+export function computeSnapshot(inputs: ComputeInputs, cfg: Config, now: number = Date.now()): Snapshot {
     const readings: MeterReading[] = [];
 
     if (inputs.contextPercent !== null) {
@@ -58,7 +58,7 @@ export function computeSnapshot(inputs: ComputeInputs, cfg: Config): Snapshot {
 
     const u = inputs.usage;
     if (u && !u.error) {
-        if (u.sessionUsage !== undefined && !isResetInPast(u.sessionResetAt)) {
+        if (u.sessionUsage !== undefined && !isResetInPast(u.sessionResetAt, now)) {
             readings.push({
                 meter: 'five_hour',
                 percent: u.sessionUsage,
@@ -66,7 +66,7 @@ export function computeSnapshot(inputs: ComputeInputs, cfg: Config): Snapshot {
                 resetsAt: u.sessionResetAt
             });
         }
-        if (u.weeklyUsage !== undefined && !isResetInPast(u.weeklyResetAt)) {
+        if (u.weeklyUsage !== undefined && !isResetInPast(u.weeklyResetAt, now)) {
             readings.push({
                 meter: 'weekly',
                 percent: u.weeklyUsage,
@@ -74,7 +74,7 @@ export function computeSnapshot(inputs: ComputeInputs, cfg: Config): Snapshot {
                 resetsAt: u.weeklyResetAt
             });
         }
-        if (u.weeklySonnetUsage !== undefined && !isResetInPast(u.weeklySonnetResetAt)) {
+        if (u.weeklySonnetUsage !== undefined && !isResetInPast(u.weeklySonnetResetAt, now)) {
             readings.push({
                 meter: 'weekly_sonnet',
                 percent: u.weeklySonnetUsage,
@@ -82,7 +82,7 @@ export function computeSnapshot(inputs: ComputeInputs, cfg: Config): Snapshot {
                 resetsAt: u.weeklySonnetResetAt
             });
         }
-        if (u.weeklyOpusUsage !== undefined && !isResetInPast(u.weeklyOpusResetAt)) {
+        if (u.weeklyOpusUsage !== undefined && !isResetInPast(u.weeklyOpusResetAt, now)) {
             readings.push({
                 meter: 'weekly_opus',
                 percent: u.weeklyOpusUsage,

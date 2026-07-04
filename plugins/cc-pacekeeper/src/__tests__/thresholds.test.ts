@@ -170,19 +170,19 @@ describe('formatBridgeDirective', () => {
     const resetIn = (min: number): string => new Date(now + min * 60000).toISOString();
 
     test('null when 5h not warn/critical', () => {
-        const snap = computeSnapshot({ contextPercent: 10, usage: { sessionUsage: 20, sessionResetAt: resetIn(30) } }, DEFAULT_CONFIG);
+        const snap = computeSnapshot({ contextPercent: 10, usage: { sessionUsage: 20, sessionResetAt: resetIn(30) } }, DEFAULT_CONFIG, now);
         expect(formatBridgeDirective(snap, 60, now)).toBeNull();
     });
 
     test('bridges when 5h warn and reset is near', () => {
-        const snap = computeSnapshot({ contextPercent: 10, usage: { sessionUsage: 88, sessionResetAt: resetIn(20) } }, DEFAULT_CONFIG);
+        const snap = computeSnapshot({ contextPercent: 10, usage: { sessionUsage: 88, sessionResetAt: resetIn(20) } }, DEFAULT_CONFIG, now);
         const out = formatBridgeDirective(snap, 60, now);
         expect(out).toContain('resets in ~20m');
         expect(out).toContain('[pacekeeper-keepalive]');
     });
 
     test('null when reset is beyond max wait', () => {
-        const snap = computeSnapshot({ contextPercent: 10, usage: { sessionUsage: 88, sessionResetAt: resetIn(90) } }, DEFAULT_CONFIG);
+        const snap = computeSnapshot({ contextPercent: 10, usage: { sessionUsage: 88, sessionResetAt: resetIn(90) } }, DEFAULT_CONFIG, now);
         expect(formatBridgeDirective(snap, 60, now)).toBeNull();
     });
 });

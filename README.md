@@ -4,6 +4,8 @@ A Claude Code plugin that hands monitoring of context window, 5-hour session blo
 
 **Status:** v0.2 — time & AFK awareness, cross-session budget awareness, worktree-aware checkpoints, a worktree lifecycle skill, and AFK cache keepalive.
 
+![cc-pacekeeper in action](docs/demo.gif)
+
 ## What it does
 
 ccstatusline shows usage to *you*. cc-pacekeeper injects those same numbers into Claude's context via hooks, so Claude actively self-paces, surfaces threshold crossings, and offers to write a resumable checkpoint before limits force a stop.
