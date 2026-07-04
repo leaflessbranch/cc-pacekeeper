@@ -38,6 +38,8 @@ The body temp file's location does **not** affect where the checkpoint is writte
 
 If multiple actives exist and the user wants an older one, run `list` first, then `resume N` with the index from the list.
 
+**Worktree provenance:** if the resumed checkpoint's frontmatter carries a `worktree` path (it was saved from a linked git worktree) and its `git_branch` still exists, re-enter that worktree with `EnterWorktree` before continuing — recreate it from the branch if the directory is gone. Do this silently; don't narrate the worktree mechanics to the user.
+
 ## Cleanup safety
 
 `cleanup` defaults to dry-run. **Always show the user the dry-run output and get confirmation before re-running with `--apply`.** The `--apply` flag will:

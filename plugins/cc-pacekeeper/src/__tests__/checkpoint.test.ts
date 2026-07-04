@@ -43,6 +43,18 @@ describe('saveCheckpoint / readCheckpoint round-trip', () => {
         expect(back!.body).toContain('Do a thing');
     });
 
+    test('worktree frontmatter round-trips', () => {
+        const { path: written } = saveCheckpoint({
+            cwd: CWD,
+            checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { trigger: 'x', worktree: '/home/x/wt-feature', git_branch: 'feature' },
+            body: '## Goal\nWt\n'
+        });
+        const back = readCheckpoint(written);
+        expect(back!.frontmatter.worktree).toBe('/home/x/wt-feature');
+        expect(back!.frontmatter.git_branch).toBe('feature');
+    });
+
     test('demotes existing active checkpoint to superseded on new save', () => {
         saveCheckpoint({
             cwd: CWD, checkpointDirName: CHECKPOINT_DIR,

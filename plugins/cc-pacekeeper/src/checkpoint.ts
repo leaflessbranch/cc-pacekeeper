@@ -13,6 +13,8 @@ export interface CheckpointFrontmatter {
     project_root?: string;
     git_branch?: string;
     git_head?: string;
+    /** Working directory of the linked worktree this was saved from, if any. */
+    worktree?: string;
     files_touched?: string[];
     discard_reason?: string;
 }
