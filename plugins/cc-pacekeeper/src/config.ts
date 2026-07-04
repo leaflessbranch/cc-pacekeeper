@@ -28,7 +28,7 @@ const ConfigSchema = z.object({
         idle_threshold_min: z.number().int().positive(),
         tool_tick_min: z.number().int().positive()
     }),
-    // interval_min defaults to 50 to sit safely under the 1-hour prompt-cache
+    // interval_min defaults to 30 to sit comfortably under the 1-hour prompt-cache
     // TTL that Claude Code requests automatically on a subscription. If you set
     // FORCE_PROMPT_CACHING_5M=1 (or run on an API key without
     // ENABLE_PROMPT_CACHING_1H), the TTL is 5m — lower interval_min accordingly.
@@ -67,7 +67,7 @@ export const DEFAULT_CONFIG: Config = {
     },
     keepalive: {
         enabled: true,
-        interval_min: 50
+        interval_min: 30
     },
     bridge: {
         enabled: true,
@@ -124,7 +124,18 @@ export function loadConfig(): Config {
     }
     const merged = deepMergeDefaults(raw, DEFAULT_CONFIG);
     const parsed = ConfigSchema.safeParse(merged);
-    return parsed.success ? parsed.data : DEFAULT_CONFIG;
+    if (!parsed.success) {
+        // One invalid value would otherwise silently discard the entire user
+        // config. Name the offending paths on stderr so the misconfig is
+        // visible, then fall back to defaults. stderr is safe here: hooks
+        // return their payload on stdout.
+        const where = parsed.error.issues
+            .map(i => `${i.path.join('.')}: ${i.message}`)
+            .join('; ');
+        console.error(`[cc-pacekeeper] ignoring invalid config (${configFile()}): ${where}`);
+        return DEFAULT_CONFIG;
+    }
+    return parsed.data;
 }
 
 export function bootstrapConfigIfMissing(): void {

@@ -46,14 +46,23 @@ describe('loadConfig', () => {
         expect(loadConfig()).toEqual(DEFAULT_CONFIG);
     });
 
-    test('falls back to defaults on schema violation', async () => {
+    test('falls back to defaults on schema violation and warns', async () => {
         const { configFile, loadConfig, DEFAULT_CONFIG } = await import('../config');
         const file = configFile();
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, JSON.stringify({
             thresholds: { context: { notify: -50, warn: 70, critical: 85 } }
         }));
-        expect(loadConfig()).toEqual(DEFAULT_CONFIG);
+        const errs: string[] = [];
+        const original = console.error;
+        console.error = (...args: unknown[]) => { errs.push(args.join(' ')); };
+        try {
+            expect(loadConfig()).toEqual(DEFAULT_CONFIG);
+        } finally {
+            console.error = original;
+        }
+        // The invalid key is named, so a one-value typo doesn't fail silently.
+        expect(errs.some(e => e.includes('thresholds.context.notify'))).toBe(true);
     });
 
     test('bootstrapConfigIfMissing creates default file', async () => {

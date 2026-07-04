@@ -128,6 +128,7 @@ async function main(): Promise<void> {
             injection = directive;
         }
     } else if (event === 'Stop') {
+        const stopLines: string[] = [];
         // If any meter is currently at warn+ AND last-injected level for any meter
         // shows an escalation persisted, give a soft end-of-turn reminder. Don't
         // re-fire every turn — debounce same-level.
@@ -139,13 +140,28 @@ async function main(): Promise<void> {
         if (escalated) {
             const fireMeters = applyDebounce(sessionId, snap, nowSec, cfg.debounce_seconds);
             if (fireMeters.length > 0) {
-                injection = [
+                stopLines.push(
                     formatStatusLine(snap),
                     '',
                     'End-of-turn reminder: limits remain elevated. Consider saving a checkpoint via /cc-pacekeeper:checkpoint save before starting the next big step.'
-                ].join('\n');
+                );
             }
         }
+        // Stop fires when the turn ends and control returns to the user — the one
+        // idle signal available to hooks. This is where the AFK cache keepalive is
+        // scheduled: emit the directive so Claude sets up the one-shot before the
+        // idle window (and the prompt cache) can lapse.
+        if (stdin.transcript_path) {
+            const ka = keepaliveDirective({
+                cfg, snap, state: scanKeepaliveState(stdin.transcript_path),
+                userIsIdle: true, nowMs
+            });
+            if (ka.directive) {
+                if (stopLines.length > 0) stopLines.push('');
+                stopLines.push(ka.directive);
+            }
+        }
+        if (stopLines.length > 0) injection = stopLines.join('\n');
     }
 
     const fullText = [sessionStartBlock, injection].filter(s => s && s.trim() !== '').join('\n\n');
