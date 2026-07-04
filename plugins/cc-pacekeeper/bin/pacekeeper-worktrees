@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# cc-pacekeeper worktrees: prints git worktrees + dirty/live-session state as
+# JSON. Invoked by the /cc-pacekeeper:worktree skill's `list` verb.
+set -euo pipefail
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+exec bun run --silent "$DIR/../src/worktrees.ts" "$@"
