@@ -12,6 +12,7 @@ import {
 import { peekLevel, shouldInjectAndRecord, type Level, type Meter } from './state';
 import { touchSession, updateSession, type SessionEntry } from './session-state';
 import { detectAfkReturn, formatTimeSegment } from './timeline';
+import { liveSessionCount } from './live-sessions';
 import { fetchUsageData, readUsageCacheFile } from './vendor/usage-fetch';
 import type { UsageData } from './vendor/usage-types';
 import { fetchAndCacheMaxInputTokens, readCachedMaxInputTokens } from './model-info';
@@ -157,7 +158,9 @@ function composeLine(
 ): string {
     const time = formatTimeSegment(nowMs, entry, cfg);
     const meters = formatMeterSegment(snap);
-    const head = meters ? `[pacekeeper] ${time} · ${meters}` : `[pacekeeper] ${time}`;
+    const count = liveSessionCount();
+    const live = (count !== null && count > 1) ? ` · ${count} live sessions sharing budget` : '';
+    const head = meters ? `[pacekeeper] ${time} · ${meters}${live}` : `[pacekeeper] ${time}${live}`;
     const lines: string[] = [];
     if (afk) lines.push(afk);
     lines.push(head);
