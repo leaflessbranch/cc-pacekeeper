@@ -11,7 +11,7 @@ import {
     formatMeterSegment,
     formatStatusLine
 } from './thresholds';
-import { keepaliveDirective, scanKeepaliveState } from './keepalive';
+import { keepaliveDirective, scanKeepaliveState, KEEPALIVE_MARKER } from './keepalive';
 import { peekLevel, shouldInjectAndRecord, type Level, type Meter } from './state';
 import { touchSession, updateSession, type SessionEntry } from './session-state';
 import { detectAfkReturn, formatTimeSegment } from './timeline';
@@ -30,6 +30,17 @@ async function main(): Promise<void> {
     const cfg = loadConfig();
 
     if (isProjectDenied(cwd, cfg)) {
+        emitEmpty();
+        return;
+    }
+
+    // ── Keepalive pings are system events, not user activity. A ping arrives as
+    //    a UserPromptSubmit carrying the marker; if we let it fall through it
+    //    would overwrite lastEventAt (destroying the real idle-start time),
+    //    surface a bogus "you were away" line, and emit a cancel directive that
+    //    fights the ping's own reschedule instruction. Short-circuit before any
+    //    state mutation so the ping is transparent to idle tracking. ──
+    if (event === 'UserPromptSubmit' && (stdin.prompt ?? '').includes(KEEPALIVE_MARKER)) {
         emitEmpty();
         return;
     }

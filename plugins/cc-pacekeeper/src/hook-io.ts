@@ -7,6 +7,9 @@ const HookStdinSchema = z.object({
     hook_event_name: z.string().optional(),
     source: z.string().optional(),
     tool_name: z.string().optional(),
+    // UserPromptSubmit carries the submitted prompt text. Used to recognize
+    // keepalive pings so they don't count as user activity.
+    prompt: z.string().optional(),
     // SessionStart includes the active model id directly. Other events don't,
     // so we fall back to reading it from the transcript.
     model: z.string().optional()
