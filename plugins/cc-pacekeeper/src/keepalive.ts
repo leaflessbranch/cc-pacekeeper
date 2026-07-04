@@ -146,18 +146,38 @@ export interface KeepaliveDecision {
 }
 
 /**
- * Decide the keepalive directive given current state.
- * - When the user has returned (not idle) and a task is pending → instruct delete.
- * - When idle-eligible and no fresh pending one-shot → instruct (re)schedule.
+ * At ping-fire time, idle is measurable: gapMs = now - lastEventAt is the true
+ * gap since the last real event. Decide whether the keepalive chain should
+ * reschedule (user still idle) or die quietly (user active again).
+ *
+ * The gate is min(idle_threshold_min, interval_min * 0.8): normally the idle
+ * threshold, but never above the ping interval itself, so a short interval_min
+ * can't make every ping read as "active".
+ */
+export function pingContinuation(gapMs: number, cfg: Config): { reschedule: boolean } {
+    const thresholdMin = Math.min(
+        cfg.time.idle_threshold_min,
+        cfg.keepalive.interval_min * 0.8
+    );
+    return { reschedule: gapMs >= thresholdMin * 60_000 };
+}
+
+/**
+ * Ensure a keepalive chain exists. Emits a schedule directive when none is
+ * pending (or the pending one has gone stale), and null otherwise. It never
+ * cancels: the chain self-terminates at ping-fire time (see pingContinuation),
+ * so there is no schedule/cancel churn and no cancel-vs-reschedule race.
+ *
+ * Called on Stop, which fires every turn-end. The idempotency (pending + fresh
+ * → null) is what keeps it from re-emitting on every turn during active work.
  */
 export function keepaliveDirective(args: {
     cfg: Config;
     snap: Snapshot;
     state: KeepaliveState;
-    userIsIdle: boolean;
     nowMs: number;
 }): KeepaliveDecision {
-    const { cfg, snap, state, userIsIdle, nowMs } = args;
+    const { cfg, snap, state, nowMs } = args;
     if (!cfg.keepalive.enabled) return { directive: null };
     if (onUsageCredits(snap)) return { directive: null };
     // Keepalive only makes sense with a readable subscription usage cache.
@@ -165,29 +185,22 @@ export function keepaliveDirective(args: {
         return { directive: null };
     }
 
-    if (!userIsIdle) {
-        // User is active. If a keepalive is still pending, cancel it.
-        if (state.hasPending) {
-            const target = state.pendingTaskId
-                ? `call CronDelete with id "${state.pendingTaskId}"`
-                : `run CronList to find the [pacekeeper-keepalive] job, then CronDelete it by id`;
-            return { directive: `${KEEPALIVE_MARKER} You are active again; cancel the pending keepalive one-shot: ${target}.` };
-        }
-        return { directive: null };
+    // A pending one-shot is "fresh" until interval + 5m has elapsed (it should
+    // have fired and rescheduled by then). An unrecoverable id/createdAt is
+    // treated as fresh too — fail quiet rather than re-emit every turn forever.
+    if (state.hasPending) {
+        const createdMs = state.createdAt ? Date.parse(state.createdAt) : NaN;
+        if (!Number.isFinite(createdMs)) return { directive: null };
+        const staleMs = (cfg.keepalive.interval_min + 5) * 60_000;
+        if (nowMs - createdMs < staleMs) return { directive: null };
+        // else: stale → fall through and re-schedule.
     }
-
-    // User is idle. Schedule/refresh a one-shot if none pending or it's stale.
-    const staleMs = 10 * 60 * 1000;
-    const createdMs = state.createdAt ? Date.parse(state.createdAt) : NaN;
-    const fresh = state.hasPending && Number.isFinite(createdMs) && (nowMs - createdMs) < staleMs;
-    if (fresh) return { directive: null };
 
     const mins = cfg.keepalive.interval_min;
     return {
         directive: [
-            `${KEEPALIVE_MARKER} The user is idle. To keep the prompt cache warm, schedule a one-shot ~${mins} minutes out via CronCreate (recurring: false; pin the cron minute/hour to ~${mins}m from now).`,
-            state.hasPending ? `First cancel the stale pending keepalive (CronList → CronDelete by id).` : '',
-            `The one-shot's prompt MUST contain the literal marker ${KEEPALIVE_MARKER} and instruct: reply with a single word, then, if the user is still idle, reschedule another ${mins}-minute one-shot; if the user has returned, do nothing.`
-        ].filter(Boolean).join(' ')
+            `${KEEPALIVE_MARKER} To keep the prompt cache warm if the user goes idle, ensure a keepalive one-shot is scheduled ~${mins} minutes out via CronCreate (recurring: false; pin the cron minute/hour to ~${mins}m from now).`,
+            `The one-shot's prompt MUST contain the literal marker ${KEEPALIVE_MARKER}; when it fires, reply with a single word and follow the injected pacekeeper guidance (which decides, from measured idle time, whether to reschedule or stop).`
+        ].join(' ')
     };
 }

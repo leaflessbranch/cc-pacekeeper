@@ -45,7 +45,7 @@ function seedSandbox(): string {
 }
 
 describe('keepalive ping transparency', () => {
-    test('a keepalive ping emits nothing and does not touch idle state', () => {
+    test('a keepalive ping emits continuation guidance without touching idle state', () => {
         const home = seedSandbox();
         // Establish an idle-start: a prior Stop stamped lastEventAt well in the past.
         const idleStart = Date.now() - 40 * 60_000;
@@ -60,14 +60,41 @@ describe('keepalive ping transparency', () => {
             prompt: `${MARKER} Cache-warming ping. Reply with a single word.`
         });
 
-        // No output at all — no AFK line, no cancel directive, no heartbeat.
-        expect(out.includes('additionalContext')).toBe(false);
+        // No AFK line, no heartbeat, no cancel directive. The ping emits only
+        // continuation guidance based on measured idle — here 40m idle → reschedule.
         expect(out).not.toContain('were away');
-        expect(out).not.toContain('cancel');
+        expect(out).not.toContain('CronDelete');
+        expect(out).toContain(MARKER);
+        expect(out).toContain('still idle');
+        expect(out).toContain('schedule another');
 
         // lastEventAt is preserved: the ping did not overwrite the idle-start.
         const state = JSON.parse(fs.readFileSync(stateFile(home), 'utf8'));
         expect(state['sess-1'].lastEventAt).toBe(idleStart);
+
+        fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    test('a ping with a small idle gap tells the chain to stop', () => {
+        const home = seedSandbox();
+        // lastEventAt only 30s ago → user active again → do not reschedule.
+        const recent = Date.now() - 30_000;
+        fs.writeFileSync(stateFile(home), JSON.stringify({
+            'sess-1': { sessionStartedAt: recent - 60_000, lastEventAt: recent }
+        }));
+
+        const out = runTick(home, {
+            session_id: 'sess-1',
+            hook_event_name: 'UserPromptSubmit',
+            cwd: path.join(home, 'proj'),
+            prompt: `${MARKER} Cache-warming ping.`
+        });
+
+        expect(out).toContain('active again');
+        expect(out).toContain('do NOT reschedule');
+        // Still no state mutation.
+        const state = JSON.parse(fs.readFileSync(stateFile(home), 'utf8'));
+        expect(state['sess-1'].lastEventAt).toBe(recent);
 
         fs.rmSync(home, { recursive: true, force: true });
     });

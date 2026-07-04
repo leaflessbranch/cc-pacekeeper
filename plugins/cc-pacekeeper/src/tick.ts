@@ -11,9 +11,9 @@ import {
     formatMeterSegment,
     formatStatusLine
 } from './thresholds';
-import { keepaliveDirective, scanKeepaliveState, KEEPALIVE_MARKER } from './keepalive';
+import { keepaliveDirective, scanKeepaliveState, pingContinuation, KEEPALIVE_MARKER } from './keepalive';
 import { peekLevel, shouldInjectAndRecord, type Level, type Meter } from './state';
-import { touchSession, updateSession, type SessionEntry } from './session-state';
+import { touchSession, updateSession, getSessionEntry, type SessionEntry } from './session-state';
 import { detectAfkReturn, formatTimeSegment } from './timeline';
 import { liveSessionCount } from './live-sessions';
 import { fetchUsageData, readUsageCacheFile } from './vendor/usage-fetch';
@@ -41,6 +41,21 @@ async function main(): Promise<void> {
     //    fights the ping's own reschedule instruction. Short-circuit before any
     //    state mutation so the ping is transparent to idle tracking. ──
     if (event === 'UserPromptSubmit' && (stdin.prompt ?? '').includes(KEEPALIVE_MARKER)) {
+        // The ping is where idle is actually measurable. Read (don't mutate) the
+        // session entry: gap = now - lastEventAt is the true idle time. Tell the
+        // chain to reschedule (still idle) or stop (user active again). This is
+        // the one place with real data — Stop can't know future idleness.
+        const entry = getSessionEntry(sessionId);
+        if (entry) {
+            const gapMs = Date.now() - entry.lastEventAt;
+            const { reschedule } = pingContinuation(gapMs, cfg);
+            const mins = cfg.keepalive.interval_min;
+            const guidance = reschedule
+                ? `${KEEPALIVE_MARKER} User still idle. Reply with a single word, then schedule another ${mins}-minute one-shot via CronCreate whose prompt contains ${KEEPALIVE_MARKER}.`
+                : `${KEEPALIVE_MARKER} User is active again. Reply with a single word and do NOT reschedule.`;
+            emitAdditionalContext(event, guidance);
+            return;
+        }
         emitEmpty();
         return;
     }
@@ -113,14 +128,8 @@ async function main(): Promise<void> {
         const afk = afkLine(sessionId, previousEventAt, sessionEntry, nowMs, cfg);
         const directive = directiveIfEscalated(sessionId, snap, nowSec, cfg);
         const extras: string[] = [];
-        // A prompt means the user is active: cancel any pending keepalive one-shot.
-        if (stdin.transcript_path) {
-            const ka = keepaliveDirective({
-                cfg, snap, state: scanKeepaliveState(stdin.transcript_path),
-                userIsIdle: false, nowMs
-            });
-            if (ka.directive) extras.push(ka.directive);
-        }
+        // No keepalive handling on a real prompt: the chain self-terminates at
+        // ping-fire time, so there is nothing to cancel here.
         const arb = formatArbitrageNudge(snap, model);
         if (arb) extras.push(arb);
         injection = composeLine(nowMs, sessionEntry, snap, cfg, afk, directive, extras);
@@ -158,14 +167,14 @@ async function main(): Promise<void> {
                 );
             }
         }
-        // Stop fires when the turn ends and control returns to the user — the one
-        // idle signal available to hooks. This is where the AFK cache keepalive is
-        // scheduled: emit the directive so Claude sets up the one-shot before the
-        // idle window (and the prompt cache) can lapse.
+        // Stop fires at every turn-end. Rather than guess idleness (impossible
+        // here), just ensure a keepalive chain exists — idempotently, so it emits
+        // at most once per interval, not every turn. The chain decides at ping-fire
+        // time (with real idle data) whether to continue or stop.
         if (stdin.transcript_path) {
             const ka = keepaliveDirective({
                 cfg, snap, state: scanKeepaliveState(stdin.transcript_path),
-                userIsIdle: true, nowMs
+                nowMs
             });
             if (ka.directive) {
                 if (stopLines.length > 0) stopLines.push('');
