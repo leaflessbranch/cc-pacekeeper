@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3]
+
+### Changed
+- **Keepalive no longer churns the context on every turn.** The `Stop` hook used
+  to emit the "schedule a keepalive" directive at every turn-end (there is no
+  idle signal at `Stop` time), and every real prompt emitted a matching cancel —
+  spamming context during active work. Redesigned: `Stop` now just ensures a
+  chain exists *idempotently* (emits at most once per interval), the cancel path
+  is gone, and the decision to continue or stop moves to **ping-fire time**,
+  where `now − lastEventAt` is a real idle measurement. A ping replies and either
+  reschedules (still idle) or stops (active again). Fixes the freshness window
+  (was 10m regardless of a 30m interval, so pings always read as stale).
+
 ## [0.2.2]
 
 ### Fixed

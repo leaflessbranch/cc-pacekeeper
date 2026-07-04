@@ -90,47 +90,64 @@ describe('onUsageCredits', () => {
 describe('keepaliveDirective', () => {
     const base = snapWith([{ meter: 'five_hour', percent: 40, level: 'none' }]);
 
-    test('active user with pending (id known) → cancel by id', () => {
-        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: true, pendingTaskId: 'abc12345' }, userIsIdle: false, nowMs: 0 });
-        expect(d.directive).toContain('CronDelete');
-        expect(d.directive).toContain('abc12345');
-    });
+    // The directive ensures a keepalive chain exists (schedule once, idempotent).
+    // It never cancels — the chain self-terminates at ping-fire time. So the only
+    // outputs are "schedule" or null.
 
-    test('active user with pending (id unknown) → CronList then delete', () => {
-        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: true }, userIsIdle: false, nowMs: 0 });
-        expect(d.directive).toContain('CronList');
-    });
-
-    test('active user no pending → nothing', () => {
-        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: false }, userIsIdle: false, nowMs: 0 });
-        expect(d.directive).toBeNull();
-    });
-
-    test('idle no pending → schedule', () => {
-        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: false }, userIsIdle: true, nowMs: 0 });
+    test('no pending → schedule directive', () => {
+        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: false }, nowMs: 0 });
         expect(d.directive).toContain('CronCreate');
         expect(d.directive).toContain(KEEPALIVE_MARKER);
     });
 
-    test('idle with fresh pending → nothing', () => {
+    test('fresh pending → nothing (idempotent)', () => {
         const now = Date.parse('2026-07-04T10:00:00Z');
+        // interval_min=30 default → freshness window 35m. Created 2m ago → fresh.
         const d = keepaliveDirective({
             cfg: DEFAULT_CONFIG, snap: base,
             state: { hasPending: true, pendingTaskId: 'abc12345', createdAt: '2026-07-04T09:58:00Z' },
-            userIsIdle: true, nowMs: now
+            nowMs: now
         });
         expect(d.directive).toBeNull();
     });
 
+    test('stale pending (older than interval+5m) → re-schedule', () => {
+        const now = Date.parse('2026-07-04T10:00:00Z');
+        // 40m old > 35m window → stale → re-emit.
+        const d = keepaliveDirective({
+            cfg: DEFAULT_CONFIG, snap: base,
+            state: { hasPending: true, pendingTaskId: 'abc12345', createdAt: '2026-07-04T09:20:00Z' },
+            nowMs: now
+        });
+        expect(d.directive).toContain('CronCreate');
+    });
+
+    test('pending with unrecoverable id → treated as fresh (fail quiet)', () => {
+        const now = Date.parse('2026-07-04T10:00:00Z');
+        // hasPending but no createdAt/id: do NOT re-emit forever.
+        const d = keepaliveDirective({
+            cfg: DEFAULT_CONFIG, snap: base,
+            state: { hasPending: true },
+            nowMs: now
+        });
+        expect(d.directive).toBeNull();
+    });
+
+    test('never emits a cancel directive', () => {
+        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: true, pendingTaskId: 'abc12345', createdAt: new Date().toISOString() }, nowMs: Date.now() });
+        // fresh → null; and even when it does emit, it's a schedule, never a delete.
+        if (d.directive) expect(d.directive).not.toContain('CronDelete');
+    });
+
     test('disabled config → nothing', () => {
         const cfg = { ...DEFAULT_CONFIG, keepalive: { ...DEFAULT_CONFIG.keepalive, enabled: false } };
-        const d = keepaliveDirective({ cfg, snap: base, state: { hasPending: true }, userIsIdle: false, nowMs: 0 });
+        const d = keepaliveDirective({ cfg, snap: base, state: { hasPending: false }, nowMs: 0 });
         expect(d.directive).toBeNull();
     });
 
     test('on usage credits → nothing', () => {
         const credits = snapWith([{ meter: 'five_hour', percent: 100, level: 'critical' }], { enabled: true });
-        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: credits, state: { hasPending: false }, userIsIdle: true, nowMs: 0 });
+        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: credits, state: { hasPending: false }, nowMs: 0 });
         expect(d.directive).toBeNull();
     });
 });
