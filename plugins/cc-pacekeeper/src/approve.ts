@@ -58,12 +58,19 @@ async function main(): Promise<void> {
     }
 
     if (toolName === 'CronDelete') {
-        const id = input.id ?? input.taskId ?? input.cronId;
-        const pending = data.transcript_path ? scanKeepaliveState(data.transcript_path).pendingTaskId : undefined;
-        if (typeof id === 'string' && pending && id === pending) {
-            return allow('pacekeeper keepalive cancel');
+        // The deleted job's id is system-assigned; CronCreate's input never
+        // carried it, so we can only sometimes recover it. Approve when: the id
+        // matches the recovered pending keepalive id, OR a keepalive is pending
+        // and we couldn't recover its id (CronDelete is low-risk — it only
+        // removes a scheduled job — and this is gated on a pending keepalive).
+        const state = data.transcript_path ? scanKeepaliveState(data.transcript_path) : { hasPending: false };
+        if (!state.hasPending) return passthrough();
+        const id = input.id;
+        if (state.pendingTaskId) {
+            if (typeof id === 'string' && id === state.pendingTaskId) return allow('pacekeeper keepalive cancel');
+            return passthrough();
         }
-        return passthrough();
+        return allow('pacekeeper keepalive cancel (id unrecoverable; keepalive pending)');
     }
 
     return passthrough();

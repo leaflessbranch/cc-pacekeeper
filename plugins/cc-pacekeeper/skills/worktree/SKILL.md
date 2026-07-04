@@ -27,17 +27,21 @@ Present it as a short table. Call out any worktree that is `dirty` (uncommitted 
 
 ## new [name]
 
-Use the harness's `EnterWorktree` tool to create and switch into a new worktree. Pick a branch name from the user's intent (or the provided `[name]`).
+Use the harness's `EnterWorktree` tool to create and switch into a new worktree. By default it lands at `.claude/worktrees/<name>/` on a new branch `worktree-<name>`, branched from the repo's default branch (`origin/HEAD`). Pick `<name>` from the user's intent.
 
-- Worktrees do **not** inherit gitignored files (`.env`, local configs, build caches). If the project relies on such files, tell the user they can add a `.worktreeinclude` file to the repo so the harness copies them into new worktrees.
-- One branch per worktree: git refuses to check out a branch already checked out elsewhere. If that happens, either reuse the existing worktree or pick a new branch.
+- Suggest adding `.claude/worktrees/` to `.gitignore` so worktree contents don't show as untracked files in the main checkout.
+- Worktrees are a fresh checkout and do **not** inherit gitignored files (`.env`, local configs, build caches). If the project relies on such files, tell the user to add a `.worktreeinclude` file (`.gitignore` syntax) to the repo root — the harness copies matching gitignored files into each new worktree.
+- One branch per worktree: git refuses to check out a branch already checked out elsewhere. If that happens, reuse the existing worktree or pick a new branch.
+- Remember to run project setup (install deps, venv, etc.) in the new worktree — it doesn't carry those over.
 
 ## cleanup
 
+The harness already handles the common case: **exiting** a worktree (`ExitWorktree`) auto-removes it and its branch when the tree is clean (no uncommitted changes, untracked files, or new commits), and prompts to keep-or-remove when it's dirty or named. This skill's `cleanup` covers worktrees that linger beyond that.
+
 1. Run `list` first and show it to the user.
-2. **Never remove a worktree that is `dirty` or has `liveSessions > 0`.** For a dirty tree, surface the uncommitted changes and stop — the user must commit, stash, or explicitly pass `--force`.
-3. Remove a clean, idle worktree with the harness's `ExitWorktree`/`git worktree remove`. Only use `--force` when the user has explicitly confirmed they accept losing uncommitted work.
-4. After removals, mention `git worktree prune` clears any stale administrative entries.
+2. **Never remove a worktree that is `dirty` or has `liveSessions > 0`.** For a dirty tree, surface the uncommitted changes and stop — the user must commit, stash, or explicitly confirm `--force`. A running session's worktree is `git worktree lock`ed by the harness anyway.
+3. Remove a clean, idle worktree with `git worktree remove <path>`. Use `--force` only when the user has explicitly confirmed they accept losing uncommitted/untracked work.
+4. After removals, `git worktree prune` clears any stale administrative entries.
 
 ## Note
 

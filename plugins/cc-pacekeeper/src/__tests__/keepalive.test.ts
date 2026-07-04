@@ -16,36 +16,55 @@ function transcript(entries: unknown[]): string {
     return p;
 }
 
-const cronCreate = (id: string, marker: boolean, ts: string): unknown => ({
+// CronCreate's input has NO id; the id comes back in the tool_result. We model
+// both the assistant tool_use (with a tool_use id) and the user tool_result.
+const cronCreate = (toolUseId: string, marker: boolean, ts: string): unknown => ({
     type: 'assistant', timestamp: ts,
-    message: { content: [{ type: 'tool_use', name: 'CronCreate', input: { id, prompt: (marker ? KEEPALIVE_MARKER + ' ' : '') + 'do a tiny turn' } }] }
+    message: { content: [{ type: 'tool_use', id: toolUseId, name: 'CronCreate', input: { cron: '7 * * * *', recurring: false, prompt: (marker ? KEEPALIVE_MARKER + ' ' : '') + 'do a tiny turn' } }] }
 });
-const cronDelete = (id: string, ts: string): unknown => ({
+const createResult = (toolUseId: string, jobId: string): unknown => ({
+    type: 'user',
+    message: { content: [{ type: 'tool_result', tool_use_id: toolUseId, content: `Scheduled job ${jobId}, fires at :07.` }] }
+});
+const cronDelete = (jobId: string, ts: string): unknown => ({
     type: 'assistant', timestamp: ts,
-    message: { content: [{ type: 'tool_use', name: 'CronDelete', input: { id } }] }
+    message: { content: [{ type: 'tool_use', id: 'del-1', name: 'CronDelete', input: { id: jobId } }] }
 });
 
 describe('scanKeepaliveState', () => {
-    test('finds newest marker CronCreate as pending', () => {
-        const p = transcript([cronCreate('task-1', true, '2026-07-04T10:00:00Z')]);
-        expect(scanKeepaliveState(p).pendingTaskId).toBe('task-1');
+    test('finds newest marker CronCreate as pending, recovers job id from result', () => {
+        const p = transcript([
+            cronCreate('tu-1', true, '2026-07-04T10:00:00Z'),
+            createResult('tu-1', 'abc12345')
+        ]);
+        const s = scanKeepaliveState(p);
+        expect(s.hasPending).toBe(true);
+        expect(s.pendingTaskId).toBe('abc12345');
     });
 
-    test('a later CronDelete clears pending', () => {
+    test('pending true even when job id not recoverable', () => {
+        const p = transcript([cronCreate('tu-1', true, '2026-07-04T10:00:00Z')]);
+        const s = scanKeepaliveState(p);
+        expect(s.hasPending).toBe(true);
+        expect(s.pendingTaskId).toBeUndefined();
+    });
+
+    test('a later CronDelete of the recovered id clears pending', () => {
         const p = transcript([
-            cronCreate('task-1', true, '2026-07-04T10:00:00Z'),
-            cronDelete('task-1', '2026-07-04T10:05:00Z')
+            cronCreate('tu-1', true, '2026-07-04T10:00:00Z'),
+            createResult('tu-1', 'abc12345'),
+            cronDelete('abc12345', '2026-07-04T10:05:00Z')
         ]);
-        expect(scanKeepaliveState(p).pendingTaskId).toBeUndefined();
+        expect(scanKeepaliveState(p).hasPending).toBe(false);
     });
 
     test('ignores non-marker CronCreate', () => {
-        const p = transcript([cronCreate('other', false, '2026-07-04T10:00:00Z')]);
-        expect(scanKeepaliveState(p)).toEqual({});
+        const p = transcript([cronCreate('tu-1', false, '2026-07-04T10:00:00Z')]);
+        expect(scanKeepaliveState(p).hasPending).toBe(false);
     });
 
-    test('missing transcript → empty', () => {
-        expect(scanKeepaliveState(path.join(TMP, 'nope.jsonl'))).toEqual({});
+    test('missing transcript → not pending', () => {
+        expect(scanKeepaliveState(path.join(TMP, 'nope.jsonl')).hasPending).toBe(false);
     });
 });
 
@@ -71,19 +90,24 @@ describe('onUsageCredits', () => {
 describe('keepaliveDirective', () => {
     const base = snapWith([{ meter: 'five_hour', percent: 40, level: 'none' }]);
 
-    test('active user with pending task → cancel', () => {
-        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { pendingTaskId: 'x' }, userIsIdle: false, nowMs: 0 });
+    test('active user with pending (id known) → cancel by id', () => {
+        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: true, pendingTaskId: 'abc12345' }, userIsIdle: false, nowMs: 0 });
         expect(d.directive).toContain('CronDelete');
-        expect(d.directive).toContain('x');
+        expect(d.directive).toContain('abc12345');
+    });
+
+    test('active user with pending (id unknown) → CronList then delete', () => {
+        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: true }, userIsIdle: false, nowMs: 0 });
+        expect(d.directive).toContain('CronList');
     });
 
     test('active user no pending → nothing', () => {
-        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: {}, userIsIdle: false, nowMs: 0 });
+        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: false }, userIsIdle: false, nowMs: 0 });
         expect(d.directive).toBeNull();
     });
 
     test('idle no pending → schedule', () => {
-        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: {}, userIsIdle: true, nowMs: 0 });
+        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: false }, userIsIdle: true, nowMs: 0 });
         expect(d.directive).toContain('CronCreate');
         expect(d.directive).toContain(KEEPALIVE_MARKER);
     });
@@ -92,7 +116,7 @@ describe('keepaliveDirective', () => {
         const now = Date.parse('2026-07-04T10:00:00Z');
         const d = keepaliveDirective({
             cfg: DEFAULT_CONFIG, snap: base,
-            state: { pendingTaskId: 'x', createdAt: '2026-07-04T09:58:00Z' },
+            state: { hasPending: true, pendingTaskId: 'abc12345', createdAt: '2026-07-04T09:58:00Z' },
             userIsIdle: true, nowMs: now
         });
         expect(d.directive).toBeNull();
@@ -100,13 +124,13 @@ describe('keepaliveDirective', () => {
 
     test('disabled config → nothing', () => {
         const cfg = { ...DEFAULT_CONFIG, keepalive: { ...DEFAULT_CONFIG.keepalive, enabled: false } };
-        const d = keepaliveDirective({ cfg, snap: base, state: { pendingTaskId: 'x' }, userIsIdle: false, nowMs: 0 });
+        const d = keepaliveDirective({ cfg, snap: base, state: { hasPending: true }, userIsIdle: false, nowMs: 0 });
         expect(d.directive).toBeNull();
     });
 
     test('on usage credits → nothing', () => {
         const credits = snapWith([{ meter: 'five_hour', percent: 100, level: 'critical' }], { enabled: true });
-        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: credits, state: {}, userIsIdle: true, nowMs: 0 });
+        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: credits, state: { hasPending: false }, userIsIdle: true, nowMs: 0 });
         expect(d.directive).toBeNull();
     });
 });

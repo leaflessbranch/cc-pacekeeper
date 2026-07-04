@@ -28,6 +28,10 @@ const ConfigSchema = z.object({
         idle_threshold_min: z.number().int().positive(),
         tool_tick_min: z.number().int().positive()
     }),
+    // interval_min defaults to 50 to sit safely under the 1-hour prompt-cache
+    // TTL that Claude Code requests automatically on a subscription. If you set
+    // FORCE_PROMPT_CACHING_5M=1 (or run on an API key without
+    // ENABLE_PROMPT_CACHING_1H), the TTL is 5m — lower interval_min accordingly.
     keepalive: z.object({
         enabled: z.boolean(),
         interval_min: z.number().int().positive()

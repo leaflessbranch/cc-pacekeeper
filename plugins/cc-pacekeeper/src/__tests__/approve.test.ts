@@ -28,13 +28,30 @@ function run(stdin: unknown): Record<string, unknown> {
     return JSON.parse(res.stdout || '{}');
 }
 
-function transcriptWith(taskId: string): string {
+// A keepalive CronCreate whose result reveals the job id, so pendingTaskId
+// is recoverable and CronDelete can be matched precisely.
+function transcriptWith(jobId: string): string {
     const p = path.join(TMP_HOME, 't.jsonl');
-    const entry = {
+    const create = {
         type: 'assistant',
-        message: { content: [{ type: 'tool_use', name: 'CronCreate', input: { id: taskId, prompt: KEEPALIVE_MARKER + ' tiny' } }] }
+        message: { content: [{ type: 'tool_use', id: 'tu-1', name: 'CronCreate', input: { cron: '7 * * * *', recurring: false, prompt: KEEPALIVE_MARKER + ' tiny' } }] }
     };
-    fs.writeFileSync(p, JSON.stringify(entry) + '\n');
+    const result = {
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'tu-1', content: `Scheduled job ${jobId}.` }] }
+    };
+    fs.writeFileSync(p, JSON.stringify(create) + '\n' + JSON.stringify(result) + '\n');
+    return p;
+}
+
+// A keepalive create with no result: pending, but job id unrecoverable.
+function transcriptNoId(): string {
+    const p = path.join(TMP_HOME, 't.jsonl');
+    const create = {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'tu-1', name: 'CronCreate', input: { cron: '7 * * * *', recurring: false, prompt: KEEPALIVE_MARKER + ' tiny' } }] }
+    };
+    fs.writeFileSync(p, JSON.stringify(create) + '\n');
     return p;
 }
 
@@ -49,15 +66,26 @@ describe('pacekeeper-approve', () => {
         expect(out).toEqual({});
     });
 
-    test('allows CronDelete of the pending keepalive task', () => {
-        const tp = transcriptWith('task-9');
-        const out = run({ tool_name: 'CronDelete', tool_input: { id: 'task-9' }, transcript_path: tp });
+    test('allows CronDelete of the pending keepalive task (id recovered)', () => {
+        const tp = transcriptWith('abc99999');
+        const out = run({ tool_name: 'CronDelete', tool_input: { id: 'abc99999' }, transcript_path: tp });
         expect((out.hookSpecificOutput as Record<string, unknown>)?.permissionDecision).toBe('allow');
     });
 
-    test('passes through CronDelete of an unrelated task', () => {
-        const tp = transcriptWith('task-9');
-        const out = run({ tool_name: 'CronDelete', tool_input: { id: 'other' }, transcript_path: tp });
+    test('passes through CronDelete of an unrelated task when id is known', () => {
+        const tp = transcriptWith('abc99999');
+        const out = run({ tool_name: 'CronDelete', tool_input: { id: 'other567' }, transcript_path: tp });
+        expect(out).toEqual({});
+    });
+
+    test('allows CronDelete when a keepalive is pending but its id is unrecoverable', () => {
+        const tp = transcriptNoId();
+        const out = run({ tool_name: 'CronDelete', tool_input: { id: 'whatever1' }, transcript_path: tp });
+        expect((out.hookSpecificOutput as Record<string, unknown>)?.permissionDecision).toBe('allow');
+    });
+
+    test('passes through CronDelete when no keepalive is pending', () => {
+        const out = run({ tool_name: 'CronDelete', tool_input: { id: 'anything1' } });
         expect(out).toEqual({});
     });
 

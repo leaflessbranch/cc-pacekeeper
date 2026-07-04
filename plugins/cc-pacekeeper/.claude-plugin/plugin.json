@@ -1,6 +1,6 @@
 {
   "name": "cc-pacekeeper",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Self-pacing usage monitor for Claude Code: injects context %, 5h block %, and weekly limit data into Claude's context via hooks, so Claude warns and offers checkpoints before walls.",
   "author": {
     "name": "leaflessbranch",
