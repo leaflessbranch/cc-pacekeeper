@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2]
+
+### Fixed
+- **Keepalive pings counted as user activity.** A keepalive ping arrives as a
+  `UserPromptSubmit`, so the tick treated it as the user returning: it overwrote
+  the idle-start time, surfaced a bogus "you were away" line, and emitted a
+  cancel directive that fought the ping's own reschedule instruction. Pings
+  carrying the `[pacekeeper-keepalive]` marker are now transparent to idle
+  tracking — the tick short-circuits before touching session state and emits
+  nothing, so the real idle-start (the last `Stop`) is preserved.
+
 ## [0.2.1]
 
 ### Fixed
