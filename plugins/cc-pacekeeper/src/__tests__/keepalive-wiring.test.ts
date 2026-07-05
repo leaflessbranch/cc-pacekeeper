@@ -88,4 +88,42 @@ describe('Stop hook keepalive wiring', () => {
 
         expect(second).not.toContain('[pacekeeper-keepalive]');
     });
+
+    test('Stop does not re-arm after the give-up teardown (idleSince past max_idle_hours)', () => {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-ka-'));
+        fs.mkdirSync(path.join(home, '.cache', 'cc-pacekeeper'), { recursive: true });
+        fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+        fs.writeFileSync(
+            path.join(home, '.cache', 'cc-pacekeeper', 'usage.json'),
+            JSON.stringify({
+                sessionUsage: 45,
+                sessionResetAt: new Date(Date.now() + 3 * 3600_000).toISOString(),
+                weeklyUsage: 40,
+                fetchedAt: Date.now()
+            })
+        );
+        fs.writeFileSync(
+            path.join(home, 't.jsonl'),
+            JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-4-8', role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }) + '\n'
+        );
+        // Session state as the give-up path leaves it: idleSince far beyond
+        // max_idle_hours (default 12h). The teardown turn's Stop must not
+        // re-emit the schedule directive.
+        const idleStart = Date.now() - 13 * 3600_000;
+        fs.writeFileSync(
+            path.join(home, '.cache', 'cc-pacekeeper', 'session-state.json'),
+            JSON.stringify({
+                'ka-wiring': {
+                    sessionStartedAt: idleStart - 60_000,
+                    lastEventAt: Date.now() - 60_000,
+                    keepalive: { idleSince: idleStart }
+                }
+            })
+        );
+
+        const out = runStopTick(home);
+        fs.rmSync(home, { recursive: true, force: true });
+
+        expect(out).not.toContain('[pacekeeper-keepalive]');
+    });
 });

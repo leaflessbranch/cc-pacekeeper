@@ -61,11 +61,12 @@ async function main(): Promise<void> {
             const maxIdleMs = cfg.keepalive.max_idle_hours * 3600_000;
             if (idleMs > maxIdleMs) {
                 const hours = Math.floor(idleMs / 3600_000);
+                const idleLabel = hours >= 1 ? `${hours} hours` : `${Math.floor(idleMs / 60_000)} minutes`;
                 const state = stdin.transcript_path ? scanKeepaliveState(stdin.transcript_path) : { hasPending: false };
                 const jobRef = state.pendingTaskId
                     ? `the keepalive cron job with id ${state.pendingTaskId}`
                     : `the keepalive cron job whose prompt contains ${KEEPALIVE_MARKER} (use CronList to find it)`;
-                const guidance = `${KEEPALIVE_MARKER} User has been idle over ${hours} hours. Delete ${jobRef} via CronDelete, then reply with a single word.`;
+                const guidance = `${KEEPALIVE_MARKER} User has been idle over ${idleLabel}. Delete ${jobRef} via CronDelete, then reply with a single word.`;
                 emitAdditionalContext(event, guidance);
                 return;
             }
@@ -196,7 +197,16 @@ async function main(): Promise<void> {
         // shows up in the transcript), keepaliveDirective alone would re-emit on
         // every single Stop forever, so also gate on time since the last actual
         // emission.
-        if (stdin.transcript_path) {
+        // Don't re-arm a job that the give-up path just tore down: while
+        // keepalive.idleSince shows idleness past max_idle_hours, the teardown
+        // turn's own Stop would otherwise immediately re-emit the schedule
+        // directive (hasPending is false right after the CronDelete), looping
+        // schedule → give-up → reschedule for as long as the user is away.
+        // The next real prompt clears idleSince and re-enables keepalive.
+        const idleSince = sessionEntry.keepalive?.idleSince;
+        const gaveUp = idleSince !== undefined
+            && nowMs - idleSince > cfg.keepalive.max_idle_hours * 3600_000;
+        if (stdin.transcript_path && !gaveUp) {
             const lastDirectiveAt = sessionEntry.lastKeepaliveDirectiveAt ?? 0;
             const debounceDue = nowMs - lastDirectiveAt >= cfg.keepalive.interval_min * 60_000;
             if (debounceDue) {

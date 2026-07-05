@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5]
+
+### Fixed
+- **Give-up teardown now sticks.** After the `max_idle_hours` give-up deleted
+  the recurring keepalive job, the teardown turn's own `Stop` saw no pending
+  job and immediately re-emitted the schedule directive, looping
+  schedule → give-up → reschedule for as long as the user stayed away
+  (caught in live validation of 0.2.4). The `Stop` branch now skips the
+  directive while `keepalive.idleSince` shows idleness past `max_idle_hours`;
+  the next real prompt clears the anchor and re-enables keepalive.
+- Give-up guidance renders minutes instead of "idle over 0 hours" when the
+  idle window is under an hour.
+
 ## [0.2.4]
 
 ### Changed
