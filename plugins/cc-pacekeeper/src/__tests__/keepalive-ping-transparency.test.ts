@@ -10,8 +10,8 @@ const TICK = path.join(import.meta.dir, '..', 'tick.ts');
  * A keepalive ping arrives as a UserPromptSubmit carrying the marker. It is a
  * system event, not user activity: it must not overwrite lastEventAt (which
  * would destroy the real idle-start time), must not surface a "you were away"
- * line, and must not emit a keepalive-cancel directive. The tick short-circuits
- * on such pings and emits nothing.
+ * line. While the user is active, the ping is blocked hook-side (a `block`
+ * decision) at zero context cost; while idle, guidance is passed through.
  */
 const MARKER = '[pacekeeper-keepalive]';
 
@@ -45,7 +45,7 @@ function seedSandbox(): string {
 }
 
 describe('keepalive ping transparency', () => {
-    test('a keepalive ping emits continuation guidance without touching idle state', () => {
+    test('an idle ping passes through guidance without touching idle state', () => {
         const home = seedSandbox();
         // Establish an idle-start: a prior Stop stamped lastEventAt well in the past.
         const idleStart = Date.now() - 40 * 60_000;
@@ -60,24 +60,27 @@ describe('keepalive ping transparency', () => {
             prompt: `${MARKER} Cache-warming ping. Reply with a single word.`
         });
 
-        // No AFK line, no heartbeat, no cancel directive. The ping emits only
-        // continuation guidance based on measured idle — here 40m idle → reschedule.
+        // No AFK line, no heartbeat, no cron mutation guidance. The ping passes
+        // through idle guidance — here 40m idle → passthrough, not blocked.
         expect(out).not.toContain('were away');
-        expect(out).not.toContain('CronDelete');
+        expect(out).not.toContain('"decision":"block"');
         expect(out).toContain(MARKER);
-        expect(out).toContain('still idle');
-        expect(out).toContain('schedule another');
+        expect(out).toContain('idle');
+        expect(out).toContain('do NOT create or delete any cron jobs');
 
         // lastEventAt is preserved: the ping did not overwrite the idle-start.
+        // The passthrough stamps keepalive.idleSince so idle time accumulates
+        // across ping turns (whose Stops bump lastEventAt).
         const state = JSON.parse(fs.readFileSync(stateFile(home), 'utf8'));
         expect(state['sess-1'].lastEventAt).toBe(idleStart);
+        expect(state['sess-1'].keepalive.idleSince).toBe(idleStart);
 
         fs.rmSync(home, { recursive: true, force: true });
     });
 
-    test('a ping with a small idle gap tells the chain to stop', () => {
+    test('a ping with a small idle gap is blocked hook-side, no state mutation', () => {
         const home = seedSandbox();
-        // lastEventAt only 30s ago → user active again → do not reschedule.
+        // lastEventAt only 30s ago → user active again → block.
         const recent = Date.now() - 30_000;
         fs.writeFileSync(stateFile(home), JSON.stringify({
             'sess-1': { sessionStartedAt: recent - 60_000, lastEventAt: recent }
@@ -90,11 +93,41 @@ describe('keepalive ping transparency', () => {
             prompt: `${MARKER} Cache-warming ping.`
         });
 
-        expect(out).toContain('active again');
-        expect(out).toContain('do NOT reschedule');
+        const parsed = JSON.parse(out);
+        expect(parsed.decision).toBe('block');
+        expect(parsed.reason).toContain('user active');
         // Still no state mutation.
         const state = JSON.parse(fs.readFileSync(stateFile(home), 'utf8'));
         expect(state['sess-1'].lastEventAt).toBe(recent);
+
+        fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    test('a ping after max_idle_hours tells Claude to delete the cron job', () => {
+        const home = seedSandbox();
+        // Realistic long-idle shape: earlier ping turns kept bumping lastEventAt
+        // (only 40m ago), but idleSince — stamped by the first passthrough ping —
+        // is 13 hours old, exceeding the default max_idle_hours (12).
+        const idleStart = Date.now() - 13 * 3600_000;
+        const lastPingTurn = Date.now() - 40 * 60_000;
+        fs.writeFileSync(stateFile(home), JSON.stringify({
+            'sess-1': {
+                sessionStartedAt: idleStart - 60_000,
+                lastEventAt: lastPingTurn,
+                keepalive: { idleSince: idleStart }
+            }
+        }));
+
+        const out = runTick(home, {
+            session_id: 'sess-1',
+            hook_event_name: 'UserPromptSubmit',
+            cwd: path.join(home, 'proj'),
+            prompt: `${MARKER} Cache-warming ping.`
+        });
+
+        expect(out).toContain(MARKER);
+        expect(out).toContain('CronDelete');
+        expect(out).toMatch(/idle over \d+ hours/);
 
         fs.rmSync(home, { recursive: true, force: true });
     });
@@ -116,6 +149,30 @@ describe('keepalive ping transparency', () => {
         const state = JSON.parse(fs.readFileSync(stateFile(home), 'utf8'));
         // A real prompt advances lastEventAt past the old idle-start.
         expect(state['sess-1'].lastEventAt).toBeGreaterThan(idleStart);
+
+        fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    test('a real prompt clears keepalive.idleSince', () => {
+        const home = seedSandbox();
+        const idleStart = Date.now() - 40 * 60_000;
+        fs.writeFileSync(stateFile(home), JSON.stringify({
+            'sess-1': {
+                sessionStartedAt: idleStart - 60_000,
+                lastEventAt: idleStart,
+                keepalive: { idleSince: idleStart }
+            }
+        }));
+
+        runTick(home, {
+            session_id: 'sess-1',
+            hook_event_name: 'UserPromptSubmit',
+            cwd: path.join(home, 'proj'),
+            prompt: 'back at the keyboard'
+        });
+
+        const state = JSON.parse(fs.readFileSync(stateFile(home), 'utf8'));
+        expect(state['sess-1'].keepalive?.idleSince).toBeUndefined();
 
         fs.rmSync(home, { recursive: true, force: true });
     });

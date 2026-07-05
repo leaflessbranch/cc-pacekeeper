@@ -2,7 +2,7 @@
 
 A Claude Code plugin that hands monitoring of context window, 5-hour session block, and weekly usage limits over to Claude itself — so it can pace, warn, and checkpoint work before hitting a wall.
 
-**Status:** v0.2.3 — time & AFK awareness, cross-session budget awareness, worktree-aware checkpoints, a worktree lifecycle skill, and AFK cache keepalive. See the [changelog](CHANGELOG.md).
+**Status:** v0.2.4 — time & AFK awareness, cross-session budget awareness, worktree-aware checkpoints, a worktree lifecycle skill, and AFK cache keepalive. See the [changelog](CHANGELOG.md).
 
 ![cc-pacekeeper in action](docs/demo.gif)
 
@@ -25,7 +25,7 @@ Plus **extra-usage credits** state, so when limits approach Claude can ask wheth
 - **5-hour block-reset bridge** — when the 5h block is nearly full but resets soon, Claude is told to wait it out rather than checkpoint-and-resume.
 - **Weekly model-family arbitrage** — when one family's weekly limit is stressed but the other has headroom, Claude is nudged to consider switching models.
 - **Worktree-aware checkpoints** — checkpoints saved from a linked git worktree anchor to the main repo and record provenance, so resuming re-enters the originating worktree.
-- **AFK cache keepalive** — while you're idle, Claude can schedule a tiny self-rescheduling one-shot to keep the prompt cache warm (auto-disabled when drawing on usage credits, where the cache TTL is short anyway).
+- **AFK cache keepalive** — Claude schedules a single recurring cron job (once per session) to keep the prompt cache warm. Pings are suppressed hook-side while you're active (zero context cost) and pass through only while you're actually idle; after `keepalive.max_idle_hours` (default 12) of continuous idleness the job is torn down. Auto-disabled when drawing on usage credits, where the cache TTL is short anyway.
 
 ## Install
 

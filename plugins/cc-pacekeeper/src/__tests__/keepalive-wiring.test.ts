@@ -58,6 +58,34 @@ describe('Stop hook keepalive wiring', () => {
 
         expect(out).toContain('[pacekeeper-keepalive]');
         expect(out).toContain('CronCreate');
+        expect(out).toContain('recurring: true');
         expect(out).toContain('idle');
+    });
+
+    test('a second Stop within interval_min emits nothing, even with no marker CronCreate in transcript', () => {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-ka-'));
+        fs.mkdirSync(path.join(home, '.cache', 'cc-pacekeeper'), { recursive: true });
+        fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+        fs.writeFileSync(
+            path.join(home, '.cache', 'cc-pacekeeper', 'usage.json'),
+            JSON.stringify({
+                sessionUsage: 45,
+                sessionResetAt: new Date(Date.now() + 3 * 3600_000).toISOString(),
+                weeklyUsage: 40,
+                fetchedAt: Date.now()
+            })
+        );
+        fs.writeFileSync(
+            path.join(home, 't.jsonl'),
+            JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-4-8', role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }) + '\n'
+        );
+
+        const first = runStopTick(home);
+        expect(first).toContain('[pacekeeper-keepalive]');
+
+        const second = runStopTick(home);
+        fs.rmSync(home, { recursive: true, force: true });
+
+        expect(second).not.toContain('[pacekeeper-keepalive]');
     });
 });

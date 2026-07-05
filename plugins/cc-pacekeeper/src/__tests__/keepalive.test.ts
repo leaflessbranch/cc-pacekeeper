@@ -90,41 +90,31 @@ describe('onUsageCredits', () => {
 describe('keepaliveDirective', () => {
     const base = snapWith([{ meter: 'five_hour', percent: 40, level: 'none' }]);
 
-    // The directive ensures a keepalive chain exists (schedule once, idempotent).
-    // It never cancels — the chain self-terminates at ping-fire time. So the only
-    // outputs are "schedule" or null.
+    // The directive ensures a single recurring keepalive job exists. There is
+    // no staleness/freshness window any more: hasPending is the only signal,
+    // reconstructed from the transcript (create not yet deleted).
 
-    test('no pending → schedule directive', () => {
+    test('no pending → schedule directive (recurring)', () => {
         const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: false }, nowMs: 0 });
         expect(d.directive).toContain('CronCreate');
+        expect(d.directive).toContain('recurring: true');
         expect(d.directive).toContain(KEEPALIVE_MARKER);
     });
 
-    test('fresh pending → nothing (idempotent)', () => {
+    test('pending → nothing, regardless of age (no staleness escape)', () => {
         const now = Date.parse('2026-07-04T10:00:00Z');
-        // interval_min=30 default → freshness window 35m. Created 2m ago → fresh.
         const d = keepaliveDirective({
             cfg: DEFAULT_CONFIG, snap: base,
-            state: { hasPending: true, pendingTaskId: 'abc12345', createdAt: '2026-07-04T09:58:00Z' },
+            // Deliberately very old createdAt — must still suppress; there is no
+            // staleness window that re-triggers a schedule directive.
+            state: { hasPending: true, pendingTaskId: 'abc12345', createdAt: '2020-01-01T00:00:00Z' },
             nowMs: now
         });
         expect(d.directive).toBeNull();
     });
 
-    test('stale pending (older than interval+5m) → re-schedule', () => {
+    test('pending with unrecoverable id/createdAt → still nothing', () => {
         const now = Date.parse('2026-07-04T10:00:00Z');
-        // 40m old > 35m window → stale → re-emit.
-        const d = keepaliveDirective({
-            cfg: DEFAULT_CONFIG, snap: base,
-            state: { hasPending: true, pendingTaskId: 'abc12345', createdAt: '2026-07-04T09:20:00Z' },
-            nowMs: now
-        });
-        expect(d.directive).toContain('CronCreate');
-    });
-
-    test('pending with unrecoverable id → treated as fresh (fail quiet)', () => {
-        const now = Date.parse('2026-07-04T10:00:00Z');
-        // hasPending but no createdAt/id: do NOT re-emit forever.
         const d = keepaliveDirective({
             cfg: DEFAULT_CONFIG, snap: base,
             state: { hasPending: true },
@@ -133,9 +123,18 @@ describe('keepaliveDirective', () => {
         expect(d.directive).toBeNull();
     });
 
+    test('deleted job id → hasPending false → directive emitted', () => {
+        const d = keepaliveDirective({
+            cfg: DEFAULT_CONFIG, snap: base,
+            state: { hasPending: false },
+            nowMs: Date.now()
+        });
+        expect(d.directive).toContain('CronCreate');
+    });
+
     test('never emits a cancel directive', () => {
         const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: true, pendingTaskId: 'abc12345', createdAt: new Date().toISOString() }, nowMs: Date.now() });
-        // fresh → null; and even when it does emit, it's a schedule, never a delete.
+        // pending → null; and even when it does emit, it's a schedule, never a delete.
         if (d.directive) expect(d.directive).not.toContain('CronDelete');
     });
 

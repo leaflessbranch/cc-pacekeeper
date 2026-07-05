@@ -47,3 +47,10 @@ export function emitAdditionalContext(eventName: string, text: string): void {
 export function emitEmpty(): void {
     process.stdout.write('{}');
 }
+
+export function emitBlock(reason: string): void {
+    process.stdout.write(JSON.stringify({
+        decision: 'block',
+        reason
+    }));
+}

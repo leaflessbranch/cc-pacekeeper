@@ -65,6 +65,21 @@ describe('loadConfig', () => {
         expect(errs.some(e => e.includes('thresholds.context.notify'))).toBe(true);
     });
 
+    test('keepalive.max_idle_hours defaults to 12', async () => {
+        const { loadConfig } = await import('../config');
+        expect(loadConfig().keepalive.max_idle_hours).toBe(12);
+    });
+
+    test('keepalive.max_idle_hours can be overridden', async () => {
+        const { configFile, loadConfig } = await import('../config');
+        const file = configFile();
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({ keepalive: { max_idle_hours: 2 } }));
+        const cfg = loadConfig();
+        expect(cfg.keepalive.max_idle_hours).toBe(2);
+        expect(cfg.keepalive.interval_min).toBe(30);
+    });
+
     test('bootstrapConfigIfMissing creates default file', async () => {
         const { bootstrapConfigIfMissing, configFile } = await import('../config');
         const file = configFile();

@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4]
+
+### Changed
+- **Keepalive schedules one recurring job per session instead of a one-shot
+  chain.** The old design rescheduled a fresh one-shot from each ping; if
+  Claude ignored the reschedule instruction the chain silently died, and if it
+  ignored the *original* schedule directive, `Stop` re-emitted it every single
+  turn forever. Claude now schedules a single `recurring: true` CronCreate once
+  per session — nothing to reschedule, nothing to re-emit.
+- **Pings are blocked hook-side while the user is active — zero context
+  cost.** `pingGate` replaces `pingContinuation`: instead of asking Claude to
+  decide (and spend a turn on) whether to continue, the hook itself returns a
+  `block` decision when the idle gap is under threshold, so an active-user ping
+  never reaches the model at all.
+- **Directive emission is debounced hook-side.** The `Stop` branch now tracks
+  `lastKeepaliveDirectiveAt` and only re-emits the schedule directive once per
+  `interval_min`, so an ignored directive no longer costs context on every
+  turn.
+
+### Added
+- `keepalive.max_idle_hours` config (default `12`): once a ping measures idle
+  time beyond this, the guidance tells Claude to tear down the recurring job
+  via `CronDelete` instead of continuing to ping indefinitely. Total idle is
+  anchored to a persisted `idleSince` (cleared by the next real prompt) — each
+  ping turn's own `Stop` bumps `lastEventAt`, so the raw gap alone could never
+  accumulate past one interval.
+
 ## [0.2.3]
 
 ### Changed
