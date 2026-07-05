@@ -34,7 +34,10 @@ const ConfigSchema = z.object({
     // ENABLE_PROMPT_CACHING_1H), the TTL is 5m — lower interval_min accordingly.
     keepalive: z.object({
         enabled: z.boolean(),
-        interval_min: z.number().int().positive()
+        interval_min: z.number().int().positive(),
+        // After this many hours of continuous idleness, tick.ts tells Claude to
+        // tear down the recurring keepalive job rather than keep pinging forever.
+        max_idle_hours: z.number().positive()
     }),
     bridge: z.object({
         enabled: z.boolean(),
@@ -67,7 +70,8 @@ export const DEFAULT_CONFIG: Config = {
     },
     keepalive: {
         enabled: true,
-        interval_min: 30
+        interval_min: 30,
+        max_idle_hours: 12
     },
     bridge: {
         enabled: true,

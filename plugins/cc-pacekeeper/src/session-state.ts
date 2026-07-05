@@ -16,7 +16,12 @@ const AfkSchema = z.object({
 
 const KeepaliveSchema = z.object({
     pendingTaskId: z.string().optional(),
-    scheduledAt: z.number().optional()
+    scheduledAt: z.number().optional(),
+    // Idle-start anchor for the give-up check. Each passthrough ping turn ends
+    // with a Stop that bumps lastEventAt, so `now - lastEventAt` alone never
+    // grows past ~interval_min; this survives across ping turns and is cleared
+    // by the next real user prompt.
+    idleSince: z.number().optional()
 });
 
 const SessionEntrySchema = z.object({
@@ -24,7 +29,10 @@ const SessionEntrySchema = z.object({
     lastEventAt: z.number(),
     lastTimestampInjectedAt: z.number().optional(),
     afk: AfkSchema.optional(),
-    keepalive: KeepaliveSchema.optional()
+    keepalive: KeepaliveSchema.optional(),
+    // Last time the Stop branch actually emitted a keepalive schedule directive.
+    // Debounces re-emission so an ignored directive doesn't re-fire every turn.
+    lastKeepaliveDirectiveAt: z.number().optional()
 });
 
 export type SessionEntry = z.infer<typeof SessionEntrySchema>;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { bootstrapConfigIfMissing, isProjectDenied, loadConfig } from './config';
 import { contextPercent, readContextTokens, readMostRecentModel, resolveUsableContextWindow } from './ctx-tokens';
-import { emitAdditionalContext, emitEmpty, readStdinJson } from './hook-io';
+import { emitAdditionalContext, emitBlock, emitEmpty, readStdinJson } from './hook-io';
 import { listActive } from './checkpoint';
 import {
     computeSnapshot,
@@ -11,7 +11,7 @@ import {
     formatMeterSegment,
     formatStatusLine
 } from './thresholds';
-import { keepaliveDirective, scanKeepaliveState, pingContinuation, KEEPALIVE_MARKER } from './keepalive';
+import { keepaliveDirective, scanKeepaliveState, pingGate, KEEPALIVE_MARKER } from './keepalive';
 import { peekLevel, shouldInjectAndRecord, type Level, type Meter } from './state';
 import { touchSession, updateSession, getSessionEntry, type SessionEntry } from './session-state';
 import { detectAfkReturn, formatTimeSegment } from './timeline';
@@ -36,23 +36,42 @@ async function main(): Promise<void> {
 
     // ── Keepalive pings are system events, not user activity. A ping arrives as
     //    a UserPromptSubmit carrying the marker; if we let it fall through it
-    //    would overwrite lastEventAt (destroying the real idle-start time),
-    //    surface a bogus "you were away" line, and emit a cancel directive that
-    //    fights the ping's own reschedule instruction. Short-circuit before any
-    //    state mutation so the ping is transparent to idle tracking. ──
+    //    would overwrite lastEventAt (destroying the real idle-start time) and
+    //    surface a bogus "you were away" line. Short-circuit before any state
+    //    mutation so the ping is transparent to idle tracking. ──
     if (event === 'UserPromptSubmit' && (stdin.prompt ?? '').includes(KEEPALIVE_MARKER)) {
         // The ping is where idle is actually measurable. Read (don't mutate) the
-        // session entry: gap = now - lastEventAt is the true idle time. Tell the
-        // chain to reschedule (still idle) or stop (user active again). This is
-        // the one place with real data — Stop can't know future idleness.
+        // session entry: gap = now - lastEventAt is the true idle time.
         const entry = getSessionEntry(sessionId);
         if (entry) {
             const gapMs = Date.now() - entry.lastEventAt;
-            const { reschedule } = pingContinuation(gapMs, cfg);
+            const gate = pingGate(gapMs, cfg);
+            if (gate === 'block') {
+                // User is active — suppress the ping hook-side. Zero context cost.
+                // The recurring job persists; nothing to reschedule or delete.
+                emitBlock('[pacekeeper] keepalive ping suppressed — user active');
+                return;
+            }
+            // Total idle accumulates across ping turns: each passthrough ping
+            // ends in a Stop that bumps lastEventAt, so gapMs alone tops out
+            // around interval_min. Anchor to the first idle moment instead.
+            const idleSince = entry.keepalive?.idleSince ?? entry.lastEventAt;
+            const idleMs = Date.now() - idleSince;
+            updateSession(sessionId, Date.now(), { keepalive: { ...entry.keepalive, idleSince } });
+            const maxIdleMs = cfg.keepalive.max_idle_hours * 3600_000;
+            if (idleMs > maxIdleMs) {
+                const hours = Math.floor(idleMs / 3600_000);
+                const state = stdin.transcript_path ? scanKeepaliveState(stdin.transcript_path) : { hasPending: false };
+                const jobRef = state.pendingTaskId
+                    ? `the keepalive cron job with id ${state.pendingTaskId}`
+                    : `the keepalive cron job whose prompt contains ${KEEPALIVE_MARKER} (use CronList to find it)`;
+                const guidance = `${KEEPALIVE_MARKER} User has been idle over ${hours} hours. Delete ${jobRef} via CronDelete, then reply with a single word.`;
+                emitAdditionalContext(event, guidance);
+                return;
+            }
             const mins = cfg.keepalive.interval_min;
-            const guidance = reschedule
-                ? `${KEEPALIVE_MARKER} User still idle. Reply with a single word, then schedule another ${mins}-minute one-shot via CronCreate whose prompt contains ${KEEPALIVE_MARKER}.`
-                : `${KEEPALIVE_MARKER} User is active again. Reply with a single word and do NOT reschedule.`;
+            const idleMin = Math.floor(idleMs / 60_000);
+            const guidance = `${KEEPALIVE_MARKER} User idle ${idleMin}m. Reply with a single word; the recurring keepalive job stays scheduled every ~${mins}m — do NOT create or delete any cron jobs.`;
             emitAdditionalContext(event, guidance);
             return;
         }
@@ -133,7 +152,11 @@ async function main(): Promise<void> {
         const arb = formatArbitrageNudge(snap, model);
         if (arb) extras.push(arb);
         injection = composeLine(nowMs, sessionEntry, snap, cfg, afk, directive, extras);
-        updateSession(sessionId, nowMs, { lastTimestampInjectedAt: nowMs });
+        // A real prompt ends the idle window: drop the keepalive idle anchor.
+        const keepalive = sessionEntry.keepalive?.idleSince !== undefined
+            ? { ...sessionEntry.keepalive, idleSince: undefined }
+            : sessionEntry.keepalive;
+        updateSession(sessionId, nowMs, { lastTimestampInjectedAt: nowMs, keepalive });
     } else if (event === 'PreToolUse') {
         // Inject the time+status line only once per `time.tool_tick_min` to keep
         // tool-loop overhead minimal; warn/critical directives still fire on
@@ -167,18 +190,25 @@ async function main(): Promise<void> {
                 );
             }
         }
-        // Stop fires at every turn-end. Rather than guess idleness (impossible
-        // here), just ensure a keepalive chain exists — idempotently, so it emits
-        // at most once per interval, not every turn. The chain decides at ping-fire
-        // time (with real idle data) whether to continue or stop.
+        // Stop fires at every turn-end. Ensure a keepalive job exists —
+        // idempotently, so it emits at most once per interval, not every turn.
+        // Debounced hook-side too: if Claude ignores the directive (no CronCreate
+        // shows up in the transcript), keepaliveDirective alone would re-emit on
+        // every single Stop forever, so also gate on time since the last actual
+        // emission.
         if (stdin.transcript_path) {
-            const ka = keepaliveDirective({
-                cfg, snap, state: scanKeepaliveState(stdin.transcript_path),
-                nowMs
-            });
-            if (ka.directive) {
-                if (stopLines.length > 0) stopLines.push('');
-                stopLines.push(ka.directive);
+            const lastDirectiveAt = sessionEntry.lastKeepaliveDirectiveAt ?? 0;
+            const debounceDue = nowMs - lastDirectiveAt >= cfg.keepalive.interval_min * 60_000;
+            if (debounceDue) {
+                const ka = keepaliveDirective({
+                    cfg, snap, state: scanKeepaliveState(stdin.transcript_path),
+                    nowMs
+                });
+                if (ka.directive) {
+                    if (stopLines.length > 0) stopLines.push('');
+                    stopLines.push(ka.directive);
+                    updateSession(sessionId, nowMs, { lastKeepaliveDirectiveAt: nowMs });
+                }
             }
         }
         if (stopLines.length > 0) injection = stopLines.join('\n');
