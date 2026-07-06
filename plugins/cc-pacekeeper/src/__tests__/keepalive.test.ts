@@ -101,6 +101,15 @@ describe('keepaliveDirective', () => {
         expect(d.directive).toContain(KEEPALIVE_MARKER);
     });
 
+    test('directive instructs CronList-first dedupe (jobs outlive /clear)', () => {
+        const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: base, state: { hasPending: false }, nowMs: 0 });
+        expect(d.directive).toContain('CronList');
+        expect(d.directive).toContain('do NOT create another');
+        expect(d.directive).toContain('CronDelete');
+        // */N minute steps fire at uneven wall-clock gaps — steer to fixed marks.
+        expect(d.directive).toContain('fixed minute marks');
+    });
+
     test('pending → nothing, regardless of age (no staleness escape)', () => {
         const now = Date.parse('2026-07-04T10:00:00Z');
         const d = keepaliveDirective({
