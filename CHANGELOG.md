@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6]
+
+### Fixed
+- **Keepalive jobs no longer accumulate across `/clear`.** Recurring keepalive
+  cron jobs live in the CLI process and survive `/clear`, while the
+  transcript-based pending scan and the per-session directive debounce both
+  reset — so orphaned jobs kept firing alongside a freshly armed one (observed
+  live as three overlapping schedules). The schedule directive now instructs a
+  CronList-first check: skip creation when a marker job already exists, and
+  delete extras, making dedupe self-healing regardless of hook-side state.
+- Directive steers cron syntax to fixed minute marks: a `*/N` minute step
+  fires at minutes 0/29/58, not every N minutes (observed live as a
+  `*/29 * * * *` job).
+
 ## [0.2.5]
 
 ### Fixed
