@@ -2,7 +2,7 @@
 import { bootstrapConfigIfMissing, isProjectDenied, loadConfig } from './config';
 import { contextPercent, readContextTokens, readMostRecentModel, resolveUsableContextWindow } from './ctx-tokens';
 import { emitAdditionalContext, emitBlock, emitEmpty, readStdinJson } from './hook-io';
-import { listActive } from './checkpoint';
+import { laneOf, listActive } from './checkpoint';
 import {
     computeSnapshot,
     formatArbitrageNudge,
@@ -346,33 +346,56 @@ function hasStaleReset(usage: UsageData | null): boolean {
     return false;
 }
 
-function buildSessionStartContext(cwd: string, checkpointDirName: string): string {
+/** First line of a checkpoint body's Goal section, or undefined if absent. */
+function firstGoalLine(body: string): string | undefined {
+    const goalMatch = /(^|\n)## Goal\s*\n([\s\S]*?)(?=\n## |\n*$)/.exec(body);
+    if (!goalMatch) return undefined;
+    const goal = (goalMatch[2] ?? '').trim();
+    return goal ? goal.split('\n')[0] : undefined;
+}
+
+function ageLabel(createdAt: string): string {
+    const created = Date.parse(createdAt);
+    if (Number.isNaN(created)) return '';
+    const days = (Date.now() - created) / (24 * 60 * 60 * 1000);
+    return `${days.toFixed(1)}d`;
+}
+
+export function buildSessionStartContext(cwd: string, checkpointDirName: string): string {
     const active = listActive(cwd, checkpointDirName);
     if (active.length === 0) return '';
-    const newest = active[0]!;
     const lines: string[] = [];
-    lines.push(`📌 Active checkpoint found in ${cwd}/${checkpointDirName}/:`);
-    lines.push(`   ${newest.path}`);
-    lines.push(`   Created: ${newest.frontmatter.created_at}`);
-    // Pull the Goal section out of the body if present.
-    const goalMatch = /(^|\n)## Goal\s*\n([\s\S]*?)(?=\n## |\n*$)/.exec(newest.body);
-    if (goalMatch) {
-        const goal = (goalMatch[2] ?? '').trim();
-        if (goal) lines.push(`   Goal: ${goal.split('\n')[0]}`);
-    }
-    lines.push('');
+
     if (active.length === 1) {
+        const newest = active[0]!;
+        lines.push(`📌 Active checkpoint found in ${cwd}/${checkpointDirName}/:`);
+        lines.push(`   ${newest.path}`);
+        lines.push(`   Created: ${newest.frontmatter.created_at}`);
+        const goal = firstGoalLine(newest.body);
+        if (goal) lines.push(`   Goal: ${goal}`);
+        lines.push('');
         lines.push('Run `/cc-pacekeeper:checkpoint resume` to orient from it, or carry on.');
     } else {
-        lines.push(`${active.length - 1} additional active checkpoint(s) exist. Use \`/cc-pacekeeper:checkpoint list\` to review or \`/cc-pacekeeper:checkpoint cleanup\` to tidy.`);
+        lines.push(`📌 ${active.length} active checkpoint lanes found in ${cwd}/${checkpointDirName}/:`);
+        for (const ckpt of active) {
+            const name = laneOf(ckpt.frontmatter);
+            const branch = ckpt.frontmatter.git_branch ?? '?';
+            const goal = firstGoalLine(ckpt.body) ?? '(no goal)';
+            lines.push(`   ${name} · ${branch} · ${ageLabel(ckpt.frontmatter.created_at)} · ${goal}`);
+        }
+        lines.push('');
+        lines.push('Run `pacekeeper-checkpoint resume <name>` (or `/cc-pacekeeper:checkpoint resume <name>`) to orient from a specific lane.');
     }
     return lines.join('\n');
 }
 
-main().catch((err) => {
-    // Never break Claude's workflow on hook error; emit empty + write debug log.
-    try {
-        process.stderr.write(`pacekeeper-tick error: ${err instanceof Error ? err.message : String(err)}\n`);
-    } catch { /* ignore */ }
-    emitEmpty();
-});
+// Guarded so tests can import buildSessionStartContext without triggering a live run.
+if (import.meta.main) {
+    main().catch((err) => {
+        // Never break Claude's workflow on hook error; emit empty + write debug log.
+        try {
+            process.stderr.write(`pacekeeper-tick error: ${err instanceof Error ? err.message : String(err)}\n`);
+        } catch { /* ignore */ }
+        emitEmpty();
+    });
+}

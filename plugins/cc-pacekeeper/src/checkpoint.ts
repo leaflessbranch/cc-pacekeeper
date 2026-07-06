@@ -7,6 +7,8 @@ export type CheckpointStatus = 'active' | 'resumed' | 'superseded' | 'stale';
 export interface CheckpointFrontmatter {
     status: CheckpointStatus;
     created_at: string;
+    /** Lane this checkpoint belongs to — see resolveLaneName(). */
+    name?: string;
     session_id?: string;
     trigger?: string;
     meters?: Record<string, unknown>;
@@ -17,6 +19,8 @@ export interface CheckpointFrontmatter {
     worktree?: string;
     files_touched?: string[];
     discard_reason?: string;
+    resumed_at?: string;
+    resumed_by_session?: string;
 }
 
 export interface Checkpoint {
@@ -161,6 +165,40 @@ function buildFile(fm: CheckpointFrontmatter, body: string): string {
     return `---\n${emitYaml(fm as unknown as Record<string, unknown>)}\n---\n\n${body.trimEnd()}\n`;
 }
 
+const DEFAULT_LANE = 'default';
+
+/**
+ * Sanitize a raw name (branch or explicit --name) into a lane slug: lowercase,
+ * any run of non [a-z0-9] chars collapsed to a single '-', leading/trailing
+ * '-' trimmed. Falls back to DEFAULT_LANE if that leaves nothing usable.
+ */
+export function sanitizeLaneName(raw: string): string {
+    const slug = raw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    return slug || DEFAULT_LANE;
+}
+
+/**
+ * Resolve the lane name for a save: explicit --name wins, else the current
+ * git branch (sanitized), else DEFAULT_LANE (detached HEAD or non-repo).
+ */
+export function resolveLaneName(explicitName: string | undefined, cwd: string): string {
+    if (explicitName) return sanitizeLaneName(explicitName);
+    const branch = gitInfo(cwd).branch;
+    if (branch && branch !== 'HEAD') return sanitizeLaneName(branch);
+    return DEFAULT_LANE;
+}
+
+/**
+ * Lane for a checkpoint that may predate the `name` field: use frontmatter
+ * `name` if present, else derive from `git_branch`, else DEFAULT_LANE. Never
+ * throws — legacy files without either field just land in the default lane.
+ */
+export function laneOf(fm: CheckpointFrontmatter): string {
+    if (fm.name) return sanitizeLaneName(fm.name);
+    if (fm.git_branch) return sanitizeLaneName(fm.git_branch);
+    return DEFAULT_LANE;
+}
+
 function gitInfo(cwd: string): { branch?: string; head?: string } {
     const exec = (args: string[]): string | undefined => {
         try {
@@ -179,11 +217,13 @@ export function saveCheckpoint(input: CheckpointSaveInput): { path: string; supe
     const dir = checkpointDir(input.cwd, input.checkpointDirName);
     ensureDir(dir);
 
-    // Demote any existing active checkpoints to superseded.
+    const lane = resolveLaneName(input.frontmatter.name, input.cwd);
+
+    // Demote prior actives in THIS lane only to superseded — other lanes untouched.
     const supersededPaths: string[] = [];
     const existing = listLive(input.cwd, input.checkpointDirName);
     for (const ckpt of existing) {
-        if (ckpt.frontmatter.status === 'active') {
+        if (ckpt.frontmatter.status === 'active' && laneOf(ckpt.frontmatter) === lane) {
             const moved = archiveCheckpoint(ckpt, 'superseded', input.cwd, input.checkpointDirName);
             if (moved) supersededPaths.push(moved);
         }
@@ -200,16 +240,17 @@ export function saveCheckpoint(input: CheckpointSaveInput): { path: string; supe
         ...input.frontmatter,
         status,
         created_at: createdAt,
+        name: lane,
         project_root: projectRoot,
         ...(gitBranch !== undefined ? { git_branch: gitBranch } : {}),
         ...(gitHead !== undefined ? { git_head: gitHead } : {})
     };
 
-    let filename = `${isoTimestampForFilename(new Date(fm.created_at))}.md`;
+    let filename = `${lane}-${isoTimestampForFilename(new Date(fm.created_at))}.md`;
     let target = path.join(dir, filename);
     let n = 1;
     while (fs.existsSync(target)) {
-        filename = `${isoTimestampForFilename(new Date(fm.created_at))}-${n}.md`;
+        filename = `${lane}-${isoTimestampForFilename(new Date(fm.created_at))}-${n}.md`;
         target = path.join(dir, filename);
         n++;
     }

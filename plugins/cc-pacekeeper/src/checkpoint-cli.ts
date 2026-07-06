@@ -2,8 +2,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { bootstrapConfigIfMissing, loadConfig } from './config';
+import { execFileSync } from 'child_process';
 import {
     archiveCheckpoint,
+    laneOf,
     listActive,
     listArchive,
     listLive,
@@ -22,7 +24,7 @@ interface Args {
     positional: string[];
 }
 
-function parseArgs(argv: string[]): Args {
+export function parseArgs(argv: string[]): Args {
     const [verb = 'help', ...rest] = argv;
     const flags: Record<string, string | true> = {};
     const positional: string[] = [];
@@ -118,6 +120,7 @@ function verbSave(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): 
     const trigger = (typeof args.flags.trigger === 'string' ? args.flags.trigger : 'user_invoked');
     const sessionId = typeof args.flags['session-id'] === 'string' ? args.flags['session-id'] : undefined;
     const transcriptPath = typeof args.flags['transcript-path'] === 'string' ? args.flags['transcript-path'] : undefined;
+    const name = typeof args.flags.name === 'string' ? args.flags.name : undefined;
 
     return (async () => {
         let body = bodyFromFlag ?? bodyFromFile;
@@ -148,6 +151,7 @@ function verbSave(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): 
             cwd,
             checkpointDirName: cfg.checkpoint_dir_name,
             frontmatter: {
+                name,
                 session_id: sessionId,
                 trigger,
                 meters: Object.keys(meters).length > 0 ? meters : undefined,
@@ -164,7 +168,7 @@ function verbSave(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): 
     })();
 }
 
-function verbList(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): void {
+export function verbList(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): void {
     const archived = args.flags.archived === true;
     const items: Checkpoint[] = archived
         ? listArchive(cwd, cfg.checkpoint_dir_name)
@@ -178,58 +182,152 @@ function verbList(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): 
         const age = ageDays(c).toFixed(1);
         const status = c.frontmatter.status;
         const goal = shortGoal(c.body);
-        return `[${i + 1}] ${status.padEnd(11)} ${fmt(c.frontmatter.created_at)}  (${age}d)  ${path.basename(c.path)}\n     ${goal}`;
+        const name = laneOf(c.frontmatter);
+        const branch = c.frontmatter.git_branch ?? '-';
+        const worktree = c.frontmatter.worktree ?? '-';
+        return `[${i + 1}] ${name.padEnd(20)} ${status.padEnd(11)} branch=${branch}  worktree=${worktree}  (${age}d)  ${path.basename(c.path)}\n     ${goal}`;
     });
     process.stdout.write(rows.join('\n') + '\n');
 }
 
-function verbResume(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): void {
-    const n = args.positional[0] ? parseInt(args.positional[0], 10) : 1;
-    const active = listActive(cwd, cfg.checkpoint_dir_name);
+/**
+ * Resolve which active checkpoint `resume`/`peek`/`discard` operate on: a lane
+ * name, a numeric index from `list`, or (bare) the sole active lane. Prints
+ * its own guidance and returns null when the caller should stop (ambiguous or
+ * out of range) — the exit code is left to the caller since `peek`/`discard`
+ * treat failures slightly differently in practice, but today all agree on 1.
+ */
+function resolveTarget(selector: string | undefined, active: Checkpoint[]): Checkpoint | null {
     if (active.length === 0) {
-        process.stdout.write('No active checkpoints to resume.\n');
-        return;
+        process.stdout.write('No active checkpoints.\n');
+        return null;
     }
-    if (n < 1 || n > active.length) {
-        process.stdout.write(`Index ${n} out of range. Use \`list\` to see available checkpoints (1..${active.length}).\n`);
-        process.exitCode = 1;
-        return;
+    if (!selector) {
+        if (active.length === 1) return active[0]!;
+        process.stdout.write(`${active.length} active checkpoints — pick one:\n\n`);
+        for (const [i, c] of active.entries()) {
+            process.stdout.write(`[${i + 1}] ${laneOf(c.frontmatter).padEnd(20)} ${shortGoal(c.body)}\n`);
+        }
+        process.stdout.write('\nRe-run with a lane name or index, e.g. `resume <name>` or `resume 2`.\n');
+        return null;
     }
-    const ckpt = active[n - 1]!;
+    const n = parseInt(selector, 10);
+    if (!Number.isNaN(n) && String(n) === selector) {
+        if (n < 1 || n > active.length) {
+            process.stdout.write(`Index ${n} out of range. Use \`list\` to see available checkpoints (1..${active.length}).\n`);
+            return null;
+        }
+        return active[n - 1]!;
+    }
+    const found = active.find(c => laneOf(c.frontmatter) === selector);
+    if (!found) {
+        process.stdout.write(`No active checkpoint in lane "${selector}". Use \`list\` to see available lanes.\n`);
+        return null;
+    }
+    return found;
+}
+
+function printOrientation(ckpt: Checkpoint): void {
     process.stdout.write('=== Checkpoint orientation ===\n');
     process.stdout.write(`File: ${ckpt.path}\n`);
+    process.stdout.write(`Lane: ${laneOf(ckpt.frontmatter)}\n`);
     process.stdout.write(`Created: ${ckpt.frontmatter.created_at}\n`);
     if (ckpt.frontmatter.git_branch) process.stdout.write(`Git: ${ckpt.frontmatter.git_branch} @ ${ckpt.frontmatter.git_head ?? '?'}\n`);
     process.stdout.write('\n');
     process.stdout.write(ckpt.body + '\n');
     process.stdout.write('\n=== End checkpoint ===\n');
+}
 
-    // Move to archive with status=resumed.
-    const moved = archiveCheckpoint(ckpt, 'resumed', cwd, cfg.checkpoint_dir_name);
-    if (moved) {
-        process.stdout.write(`\nCheckpoint marked resumed and moved to: ${moved}\n`);
+/** Sanitize a branch name into a filesystem-safe worktree directory segment. */
+function sanitizeForPath(raw: string): string {
+    return raw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'branch';
+}
+
+function repoRoot(cwd: string): string | undefined {
+    try {
+        return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch {
+        return undefined;
     }
 }
 
-function verbDiscard(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): void {
-    const n = args.positional[0] ? parseInt(args.positional[0], 10) : 1;
+/**
+ * Handle `resume --worktree`: point the caller at a directory to re-enter.
+ * Prefers the checkpoint's recorded worktree path if it still exists; else
+ * tries to create one for its git branch; else reports why it couldn't.
+ */
+function handleWorktreeFlag(ckpt: Checkpoint, cwd: string): void {
+    const wt = ckpt.frontmatter.worktree;
+    if (wt && fs.existsSync(wt)) {
+        process.stdout.write(`\nWorktree: ${wt}\n`);
+        return;
+    }
+    const branch = ckpt.frontmatter.git_branch;
+    if (!branch) {
+        process.stdout.write('\nNo worktree or git branch recorded on this checkpoint — nothing to re-enter.\n');
+        return;
+    }
+    const root = repoRoot(cwd);
+    if (!root) {
+        process.stdout.write(`\nCould not locate a git repo at ${cwd} to create a worktree for "${branch}".\n`);
+        return;
+    }
+    const target = path.join(root, '.worktrees', sanitizeForPath(branch));
+    try {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        execFileSync('git', ['worktree', 'add', target, branch], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+        process.stdout.write(`\nWorktree: ${target}\n`);
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/already (checked out|used by worktree)/i.test(message)) {
+            process.stdout.write(`\nBranch "${branch}" is already checked out elsewhere; git refused to create a new worktree.\n${message}\n`);
+        } else {
+            process.stdout.write(`\nCould not create a worktree for "${branch}": ${message}\n`);
+        }
+    }
+}
+
+export function verbPeek(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): void {
+    const active = listActive(cwd, cfg.checkpoint_dir_name);
+    const ckpt = resolveTarget(args.positional[0], active);
+    if (!ckpt) { process.exitCode = active.length === 0 ? 0 : 1; return; }
+    printOrientation(ckpt);
+}
+
+export function verbResume(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): void {
+    const active = listActive(cwd, cfg.checkpoint_dir_name);
+    const ckpt = resolveTarget(args.positional[0], active);
+    if (!ckpt) { process.exitCode = active.length === 0 ? 0 : (args.positional[0] ? 1 : 0); return; }
+
+    printOrientation(ckpt);
+
+    const sessionId = typeof args.flags['session-id'] === 'string' ? args.flags['session-id'] : undefined;
+    const moved = archiveCheckpoint(ckpt, 'resumed', cwd, cfg.checkpoint_dir_name, {
+        resumed_at: new Date().toISOString(),
+        ...(sessionId ? { resumed_by_session: sessionId } : {})
+    });
+    if (moved) {
+        process.stdout.write(`\nCheckpoint marked resumed and moved to: ${moved}\n`);
+    }
+
+    if (args.flags.worktree === true) {
+        handleWorktreeFlag(ckpt, cwd);
+    }
+}
+
+export function verbDiscard(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): void {
     const reason = typeof args.flags.reason === 'string' ? args.flags.reason : '(no reason given)';
     const active = listActive(cwd, cfg.checkpoint_dir_name);
-    if (active.length === 0) {
-        process.stdout.write('No active checkpoints to discard.\n');
-        return;
-    }
-    if (n < 1 || n > active.length) {
-        process.stdout.write(`Index ${n} out of range (1..${active.length}).\n`);
-        process.exitCode = 1;
-        return;
-    }
-    const ckpt = active[n - 1]!;
+    // Discard has always defaulted to the newest active (index 1) rather than
+    // requiring a selector; preserve that when nothing is given.
+    const selector = args.positional[0] ?? (active.length > 0 ? '1' : undefined);
+    const ckpt = resolveTarget(selector, active);
+    if (!ckpt) { process.exitCode = active.length === 0 ? 0 : 1; return; }
     const moved = archiveCheckpoint(ckpt, 'superseded', cwd, cfg.checkpoint_dir_name, { discard_reason: reason });
     process.stdout.write(moved ? `Discarded → ${moved}\n` : 'Discard failed.\n');
 }
 
-function verbCleanup(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): void {
+export function verbCleanup(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): void {
     const apply = args.flags.apply === true;
     const olderThanFlag = typeof args.flags['older-than'] === 'string' ? args.flags['older-than'] as string : null;
     const liveThresholdDays = olderThanFlag ? parseDays(olderThanFlag) : cfg.checkpoint.stale_after_days;
@@ -238,7 +336,18 @@ function verbCleanup(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>
     const live = listLive(cwd, cfg.checkpoint_dir_name);
     const arc = listArchive(cwd, cfg.checkpoint_dir_name);
 
-    const liveStale = live.filter(c => c.frontmatter.status === 'active' && ageDays(c) > liveThresholdDays);
+    // listLive is sorted newest-first, so the first active seen per lane is
+    // that lane's newest — never a stale candidate even past the threshold.
+    const newestPerLane = new Set<string>();
+    const liveStale = live.filter(c => {
+        if (c.frontmatter.status !== 'active') return false;
+        const lane = laneOf(c.frontmatter);
+        if (!newestPerLane.has(lane)) {
+            newestPerLane.add(lane);
+            return false;
+        }
+        return ageDays(c) > liveThresholdDays;
+    });
     const archiveExpired = arc.filter(c => ageDays(c) > archiveThresholdDays);
 
     if (liveStale.length === 0 && archiveExpired.length === 0) {
@@ -286,17 +395,32 @@ function verbHelp(): void {
         'omitted, the root is resolved from --transcript-path, then the git repo',
         'root, then the process cwd; transient dirs (/tmp, $HOME, /) are refused.',
         '',
-        'Verbs:',
-        '  save [--body <text> | --body-file <path>] [--trigger <kind>]',
-        '       [--session-id <id>] [--transcript-path <path>] [--cwd <path>]',
-        '       Write a new active checkpoint. Body may also be piped on stdin.',
-        '       If no body is provided, emits a template and exits 2.',
+        'Checkpoints are organized into named "lanes" — parallel active checkpoints',
+        'that don\'t supersede each other. A lane defaults to the sanitized current',
+        'git branch name (or "default" outside a repo / detached HEAD).',
         '',
-        '  resume [N]            Show checkpoint #N (default: newest active) and archive it as resumed.',
-        '  list [--archived]     List live (or archived) checkpoints for this cwd.',
-        '  discard [N] [--reason <text>]  Move active checkpoint #N to archive without resuming.',
+        'Verbs:',
+        '  save [--body <text> | --body-file <path>] [--trigger <kind>] [--name <slug>]',
+        '       [--session-id <id>] [--transcript-path <path>] [--cwd <path>]',
+        '       Write a new active checkpoint in the given lane (default: current',
+        '       branch, sanitized). Only prior actives in the SAME lane are',
+        '       superseded. Body may also be piped on stdin. If no body is',
+        '       provided, emits a template and exits 2.',
+        '',
+        '  resume [name|N] [--session-id <id>] [--worktree]',
+        '                        Show a checkpoint by lane name or list index, archive it as',
+        '                        resumed. Bare `resume` resumes the sole active lane, or lists',
+        '                        all active lanes and asks you to pick if there are several',
+        '                        (nothing is archived in that case). --worktree prints (or',
+        '                        creates) a worktree directory to re-enter afterward.',
+        '  peek <name|N>         Print a checkpoint\'s body without archiving or mutating it.',
+        '  list [--archived]     List live (or archived) checkpoints: index, lane, branch,',
+        '                        worktree, age, and first Goal line.',
+        '  discard [name|N] [--reason <text>]  Move an active checkpoint to archive without resuming.',
         '  cleanup [--older-than Nd] [--apply]',
-        '                        Show stale live files + expired archive files. Dry-run by default.',
+        '                        Show stale live files + expired archive files, lane-aware —',
+        '                        the newest checkpoint in each lane is never marked stale.',
+        '                        Dry-run by default.',
         '',
         '  help                  Show this message.',
         ''
@@ -327,6 +451,7 @@ async function main(): Promise<void> {
     switch (args.verb) {
         case 'save': await verbSave(args, cwd, cfg); return;
         case 'resume': verbResume(args, cwd, cfg); return;
+        case 'peek': verbPeek(args, cwd, cfg); return;
         case 'list': verbList(args, cwd, cfg); return;
         case 'discard': verbDiscard(args, cwd, cfg); return;
         case 'cleanup': verbCleanup(args, cwd, cfg); return;
@@ -337,7 +462,10 @@ async function main(): Promise<void> {
     }
 }
 
-main().catch((err) => {
-    process.stderr.write(`pacekeeper-checkpoint error: ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exitCode = 1;
-});
+// Guarded so tests can import verb functions without triggering a live run.
+if (import.meta.main) {
+    main().catch((err) => {
+        process.stderr.write(`pacekeeper-checkpoint error: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.exitCode = 1;
+    });
+}
