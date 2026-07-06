@@ -7,15 +7,24 @@ description: Save, resume, list, or clean up cc-pacekeeper checkpoint files. Use
 
 Persistent resumable handoff files for cc-pacekeeper. All operations run via the shim `pacekeeper-checkpoint` (added to PATH while the plugin is enabled).
 
+## Lanes
+
+Checkpoints are organized into named **lanes** — parallel active checkpoints that don't supersede one another. A lane defaults to the sanitized current git branch name (lowercase, non-`[a-z0-9]` runs collapsed to `-`), or `default` outside a repo / on detached HEAD. Pass `--name <slug>` to `save` to pick a lane explicitly.
+
+Saving into a lane only supersedes the *previous active checkpoint in that same lane* — actives in other lanes are left untouched. This is what lets you keep a checkpoint alive on `main` while iterating on a feature branch in a worktree, for instance.
+
+Legacy checkpoints saved before lanes existed have no `name` in frontmatter; they're treated as belonging to the lane derived from their `git_branch` (or `default` if that's also absent) — never a hard error.
+
 ## Verbs
 
 | Verb | When to use |
 |---|---|
-| `save` | User wants to preserve current state. Limits nearing critical. Before `PreCompact`. End of a working session. |
-| `resume [N]` | New session in a project that has active checkpoints. Pick the newest unless the user specifies otherwise. |
-| `list [--archived]` | User asks "what checkpoints do I have here?" or wants to choose a non-default to resume. |
-| `discard [N] [--reason …]` | User says a checkpoint is no longer relevant; mark superseded without resuming. |
-| `cleanup [--older-than Nd] [--apply]` | Periodic tidy. Dry-run first; only pass `--apply` after user confirms. |
+| `save [--name <slug>]` | User wants to preserve current state. Limits nearing critical. Before `PreCompact`. End of a working session. Lane defaults to the current branch. |
+| `resume [name\|N] [--worktree]` | New session in a project that has active checkpoints. Bare `resume` picks the sole active lane, or lists all lanes and asks you to choose if there are several (nothing is archived in that case). `--worktree` re-enters (or creates) a worktree for the resumed checkpoint afterward. |
+| `peek <name\|N>` | Preview a checkpoint's body without archiving or mutating anything — use when checking a lane before committing to resume it. |
+| `list [--archived]` | User asks "what checkpoints do I have here?" or wants to choose a non-default lane to resume. Shows index, lane name, branch, worktree, age, and first Goal line. |
+| `discard [name\|N] [--reason …]` | User says a checkpoint is no longer relevant; mark superseded without resuming. |
+| `cleanup [--older-than Nd] [--apply]` | Periodic tidy, lane-aware: the newest checkpoint in each lane is never marked stale, even past the threshold. Dry-run first; only pass `--apply` after user confirms. |
 
 ## Save flow
 
@@ -34,11 +43,11 @@ The body temp file's location does **not** affect where the checkpoint is writte
 
 ## Resume flow
 
-**Always resume via the CLI — never by reading the `.md` file yourself.** `pacekeeper-checkpoint resume` prints the body of the newest active checkpoint **and archives it** (status `resumed`, moved to `archive/`). Reading the file directly gives you the same text but skips the archival, so the checkpoint stays `active` and gets re-surfaced on the next SessionStart as if it were never picked up. If the SessionStart banner shows an active checkpoint, run `resume` to orient — do not Read the path it prints. After running it, you have full orientation — proceed from "Next" unless the user redirects.
+**Always resume via the CLI — never by reading the `.md` file yourself.** `pacekeeper-checkpoint resume` prints the body of the target active checkpoint **and archives it** (status `resumed`, moved to `archive/`, with `resumed_at` and — if `--session-id` was passed — `resumed_by_session` recorded). Reading the file directly gives you the same text but skips the archival, so the checkpoint stays `active` and gets re-surfaced on the next SessionStart as if it were never picked up. If the SessionStart banner shows an active checkpoint, run `resume` to orient — do not Read the path it prints. After running it, you have full orientation — proceed from "Next" unless the user redirects.
 
-If multiple actives exist and the user wants an older one, run `list` first, then `resume N` with the index from the list.
+If a single lane is active, bare `resume` picks it. If multiple lanes are active, bare `resume` lists them and asks the user to pick — nothing is archived until you re-run `resume <name>` or `resume N` with a specific lane. Use `peek <name|N>` first if you just want to preview a lane without committing to resuming it.
 
-**Worktree provenance:** if the resumed checkpoint's frontmatter carries a `worktree` path (it was saved from a linked git worktree) and its `git_branch` still exists, re-enter that worktree with `EnterWorktree` before continuing — recreate it from the branch if the directory is gone. Do this silently; don't narrate the worktree mechanics to the user.
+**Worktree provenance:** run `resume <name> --worktree` when the user wants to switch into the checkpoint's original working tree. It prints the checkpoint's recorded `worktree` path if that directory still exists; otherwise it creates a fresh worktree for the checkpoint's `git_branch` (under `.worktrees/<branch>` at the repo root) and prints that path, or explains why it couldn't (e.g. the branch is checked out elsewhere already). Re-enter the printed path with `EnterWorktree`. Do this silently; don't narrate the worktree mechanics to the user.
 
 ## Cleanup safety
 

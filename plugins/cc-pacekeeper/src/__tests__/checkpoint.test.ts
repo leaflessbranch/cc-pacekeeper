@@ -3,12 +3,17 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { execFileSync } from 'child_process';
+
 import {
     archiveCheckpoint,
+    laneOf,
     listActive,
     listArchive,
     listLive,
     readCheckpoint,
+    resolveLaneName,
+    sanitizeLaneName,
     saveCheckpoint
 } from '../checkpoint';
 
@@ -147,6 +152,98 @@ describe('listLive / listActive', () => {
         const active = listActive(CWD, CHECKPOINT_DIR);
         expect(active).toHaveLength(1);
         expect(active[0]?.body).toContain('B');
+    });
+});
+
+describe('sanitizeLaneName', () => {
+    test('lowercases and collapses non-alphanumeric runs to a single dash', () => {
+        expect(sanitizeLaneName('Feature/Foo_Bar 123')).toBe('feature-foo-bar-123');
+    });
+
+    test('trims leading/trailing dashes', () => {
+        expect(sanitizeLaneName('--weird--')).toBe('weird');
+    });
+
+    test('falls back to default when nothing usable remains', () => {
+        expect(sanitizeLaneName('___')).toBe('default');
+    });
+});
+
+describe('resolveLaneName', () => {
+    test('explicit name wins over branch', () => {
+        execFileSync('git', ['init', '-q'], { cwd: CWD });
+        expect(resolveLaneName('My Lane', CWD)).toBe('my-lane');
+    });
+
+    test('falls back to sanitized current branch when no name given', () => {
+        execFileSync('git', ['init', '-q', '-b', 'Feature/Thing'], { cwd: CWD });
+        execFileSync('git', ['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '--allow-empty', '-q', '-m', 'init'], { cwd: CWD });
+        expect(resolveLaneName(undefined, CWD)).toBe('feature-thing');
+    });
+
+    test('falls back to default outside a git repo', () => {
+        expect(resolveLaneName(undefined, CWD)).toBe('default');
+    });
+});
+
+describe('laneOf (legacy compatibility)', () => {
+    test('uses frontmatter name when present', () => {
+        expect(laneOf({ status: 'active', created_at: '2026-01-01T00:00:00Z', name: 'My Lane' })).toBe('my-lane');
+    });
+
+    test('derives from git_branch when name is absent (legacy files)', () => {
+        expect(laneOf({ status: 'active', created_at: '2026-01-01T00:00:00Z', git_branch: 'Feature/X' })).toBe('feature-x');
+    });
+
+    test('falls back to default when neither name nor git_branch present', () => {
+        expect(laneOf({ status: 'active', created_at: '2026-01-01T00:00:00Z' })).toBe('default');
+    });
+});
+
+describe('lane-scoped supersede', () => {
+    test('saving in a new lane leaves other lanes active', () => {
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'lane-a' }, body: '## Goal\nA1\n'
+        });
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'lane-b' }, body: '## Goal\nB1\n'
+        });
+        const active = listActive(CWD, CHECKPOINT_DIR);
+        expect(active).toHaveLength(2);
+        const lanes = active.map(c => laneOf(c.frontmatter)).sort();
+        expect(lanes).toEqual(['lane-a', 'lane-b']);
+    });
+
+    test('saving again in the same lane supersedes only that lane', () => {
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'lane-a' }, body: '## Goal\nA1\n'
+        });
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'lane-b' }, body: '## Goal\nB1\n'
+        });
+        const second = saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'lane-a' }, body: '## Goal\nA2\n'
+        });
+        expect(second.supersededPaths).toHaveLength(1);
+        const active = listActive(CWD, CHECKPOINT_DIR);
+        expect(active).toHaveLength(2);
+        const laneA = active.find(c => laneOf(c.frontmatter) === 'lane-a');
+        const laneB = active.find(c => laneOf(c.frontmatter) === 'lane-b');
+        expect(laneA?.body).toContain('A2');
+        expect(laneB?.body).toContain('B1');
+    });
+
+    test('filename is prefixed with the lane name', () => {
+        const { path: written } = saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'My Lane' }, body: '## Goal\nX\n'
+        });
+        expect(path.basename(written).startsWith('my-lane-')).toBe(true);
     });
 });
 
