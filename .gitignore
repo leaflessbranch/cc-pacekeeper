@@ -4,3 +4,4 @@ dist/
 .DS_Store
 bun.lockb
 .claude-checkpoints/
+notes/
