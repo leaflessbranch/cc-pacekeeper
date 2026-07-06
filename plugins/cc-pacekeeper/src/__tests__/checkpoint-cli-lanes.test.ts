@@ -53,6 +53,15 @@ describe('resume by lane name / index', () => {
         expect(archived[0]?.frontmatter.resumed_at).toBeDefined();
     });
 
+    test('unsanitized selector (raw branch name) matches its lane', () => {
+        saveCheckpoint({ cwd: CWD, checkpointDirName: CHECKPOINT_DIR, frontmatter: { name: 'feat/some-thing' }, body: '## Goal\nX\n' });
+        saveCheckpoint({ cwd: CWD, checkpointDirName: CHECKPOINT_DIR, frontmatter: { name: 'lane-b' }, body: '## Goal\nB\n' });
+
+        const out = captureStdout(() => verbResume(parseArgs(['resume', 'feat/some-thing']), CWD, cfg));
+        expect(out).toContain('X');
+        expect(listActive(CWD, CHECKPOINT_DIR)).toHaveLength(1);
+    });
+
     test('resumes by numeric index and records resumed_by_session', () => {
         saveCheckpoint({ cwd: CWD, checkpointDirName: CHECKPOINT_DIR, frontmatter: { name: 'lane-a' }, body: '## Goal\nA\n' });
 

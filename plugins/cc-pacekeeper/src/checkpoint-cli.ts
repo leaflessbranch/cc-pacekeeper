@@ -6,6 +6,7 @@ import { execFileSync } from 'child_process';
 import {
     archiveCheckpoint,
     laneOf,
+    sanitizeLaneName,
     listActive,
     listArchive,
     listLive,
@@ -219,9 +220,11 @@ function resolveTarget(selector: string | undefined, active: Checkpoint[]): Chec
         }
         return active[n - 1]!;
     }
-    const found = active.find(c => laneOf(c.frontmatter) === selector);
+    // Sanitize the selector so a raw branch name (e.g. "feat/x") matches its lane.
+    const lane = sanitizeLaneName(selector);
+    const found = active.find(c => laneOf(c.frontmatter) === lane);
     if (!found) {
-        process.stdout.write(`No active checkpoint in lane "${selector}". Use \`list\` to see available lanes.\n`);
+        process.stdout.write(`No active checkpoint in lane "${lane}". Use \`list\` to see available lanes.\n`);
         return null;
     }
     return found;
