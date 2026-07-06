@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0]
+
+### Added
+- **Named, lane-aware checkpoints.** Checkpoints are organized into parallel
+  "lanes" keyed by a name — defaulting to the sanitized current git branch
+  (`save --name <slug>` overrides). Saving supersedes only the prior active
+  checkpoint in the *same* lane; other lanes stay active, so multiple efforts
+  (including across git worktrees) keep independent resumable checkpoints.
+  Legacy checkpoints without a `name` derive their lane from `git_branch`.
+- `resume`, `peek`, and `discard` accept a lane name or a numeric index;
+  selectors are sanitized, so raw branch names match their lane. Bare `resume`
+  with multiple active lanes lists them and asks — nothing is archived until a
+  specific lane is chosen.
+- `peek <name|N>` — print a lane's body without archiving or mutating it.
+- `resume --worktree` — re-enters the checkpoint's recorded worktree, or
+  creates one for its `git_branch` under `.worktrees/` at the repo root.
+- Resuming stamps `resumed_at` and (with `--session-id`) `resumed_by_session`
+  into the archived frontmatter.
+- `cleanup` is lane-aware: the newest active per lane is never marked stale.
+- The SessionStart banner lists each active lane (name · branch · age · goal)
+  when several exist, instead of "newest + N additional".
+
 ## [0.2.6]
 
 ### Fixed
