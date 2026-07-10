@@ -43,6 +43,13 @@ const ConfigSchema = z.object({
         enabled: z.boolean(),
         max_wait_min: z.number().int().positive()
     }),
+    // Autonomous block renewal + subagent budget pause. See agent-budget.ts.
+    auto: z.object({
+        enabled: z.boolean(),
+        five_hour_pct: z.number().min(0).max(100),
+        subagent_pause_pct: z.number().min(0).max(100),
+        wake_delay_min: z.number().int().positive()
+    }),
     share_ccstatusline_cache: z.boolean()
 });
 
@@ -76,6 +83,12 @@ export const DEFAULT_CONFIG: Config = {
     bridge: {
         enabled: true,
         max_wait_min: 60
+    },
+    auto: {
+        enabled: true,
+        five_hour_pct: 85,
+        subagent_pause_pct: 75,
+        wake_delay_min: 3
     },
     share_ccstatusline_cache: false
 };

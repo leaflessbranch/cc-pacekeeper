@@ -16,6 +16,18 @@ export function levelGt(a: Level, b: Level): boolean {
     return LEVEL_ORDER[a] > LEVEL_ORDER[b];
 }
 
+/**
+ * Composite key for per-session-or-agent state: `sid` for the main thread,
+ * `sid:agentId` for a subagent. All hook state was previously keyed by
+ * session_id alone, shared by main + every subagent under it — the main
+ * thread's ticks starved subagent injections since they shared one debounce
+ * entry. Keys are opaque to callers (state.ts, session-state.ts); the existing
+ * 7-day prune in session-state.ts bounds agent entries same as session ones.
+ */
+export function stateKey(sessionId: string, agentId?: string): string {
+    return agentId ? `${sessionId}:${agentId}` : sessionId;
+}
+
 const MeterStateSchema = z.object({
     lastLevel: z.enum(['none', 'notify', 'warn', 'critical']),
     lastInjectedAt: z.number()
