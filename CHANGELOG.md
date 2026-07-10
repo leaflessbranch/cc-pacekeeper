@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3]
+
+### Fixed
+- **Auto-renewal no longer re-fires on resetsAt jitter.** The once-per-block
+  idempotency compared the exact resetsAt ISO string, but the usage API
+  jitters the same block's reset time at sub-second precision between
+  fetches — observed live as six duplicate directives in one block. The key
+  is now resetsAt rounded to the minute.
+
 ## [0.4.2]
 
 ### Fixed

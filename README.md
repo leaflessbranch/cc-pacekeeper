@@ -2,7 +2,7 @@
 
 A Claude Code plugin that hands monitoring of context window, 5-hour session block, and weekly usage limits over to Claude itself — so it can pace, warn, and checkpoint work before hitting a wall.
 
-**Status:** v0.4.2 — budget-aware subagent trees with pause/handoff files, autonomous 5h-block renewal (auto-save + scheduled auto-wake), context auto-save, plus everything from 0.3: named checkpoint lanes, time & AFK awareness, cross-session budget awareness, worktree-aware checkpoints, and AFK cache keepalive. See the [changelog](CHANGELOG.md).
+**Status:** v0.4.3 — budget-aware subagent trees with pause/handoff files, autonomous 5h-block renewal (auto-save + scheduled auto-wake), context auto-save, plus everything from 0.3: named checkpoint lanes, time & AFK awareness, cross-session budget awareness, worktree-aware checkpoints, and AFK cache keepalive. See the [changelog](CHANGELOG.md).
 
 ![cc-pacekeeper in action](docs/demo.gif)
 

@@ -80,6 +80,27 @@ describe('auto-loop (main thread)', () => {
         expect(second).not.toContain('auto-renewal');
     });
 
+    test('does not re-fire on sub-minute resetsAt jitter within the same block', () => {
+        const sid = newSid();
+        // Same block, but the usage API jitters resetsAt at sub-second
+        // precision between fetches (observed live: 6 re-fires in one block).
+        // Pin base to mid-minute so the jittered offsets below never cross
+        // a minute boundary and the test stays deterministic.
+        const base = Math.floor((Date.now() + 10 * 60_000) / 60_000) * 60_000 + 30_000;
+        const writeJittered = (pct: number, offsetMs: number): void => {
+            fs.writeFileSync(
+                path.join(HOME, '.cache', 'cc-pacekeeper', 'usage.json'),
+                JSON.stringify({ sessionUsage: pct, sessionResetAt: new Date(base + offsetMs).toISOString(), weeklyUsage: 40, fetchedAt: Date.now() })
+            );
+        };
+        writeJittered(86, 287);
+        expect(runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read' })).toContain('auto-renewal');
+        writeJittered(91, -912); // different second, same minute
+        expect(runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read' })).not.toContain('auto-renewal');
+        writeJittered(93, 485);
+        expect(runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read' })).not.toContain('auto-renewal');
+    });
+
     test('re-fires when the block resetsAt changes (new block)', () => {
         writeUsage(86, 10 * 60_000);
         const sid = newSid();

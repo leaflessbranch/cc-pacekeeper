@@ -193,10 +193,15 @@ async function main(): Promise<void> {
     let autoDirective: string | null = null;
     if (isMainThread && cfg.auto.enabled) {
         const five = snap.readings.find(r => r.meter === 'five_hour');
-        if (five && five.percent >= cfg.auto.five_hour_pct && five.resetsAt
-            && sessionEntry.lastAutoFireResetAt !== five.resetsAt) {
-            autoDirective = formatAutoLoopDirective(snap, cfg, five.resetsAt);
-            updateSession(key, nowMs, { lastAutoFireResetAt: five.resetsAt, ctxAutoSaveArmed: true });
+        // Idempotency key is resetsAt rounded to the minute: the usage API
+        // jitters the same block's resetsAt at sub-second precision across
+        // fetches, and an exact-string compare re-fires the directive on
+        // every jitter (observed live: 6 re-fires in one block).
+        const resetKey = five?.resetsAt ? String(Math.floor(Date.parse(five.resetsAt) / 60_000)) : undefined;
+        if (five && five.percent >= cfg.auto.five_hour_pct && resetKey
+            && sessionEntry.lastAutoFireResetAt !== resetKey) {
+            autoDirective = formatAutoLoopDirective(snap, cfg, five.resetsAt!);
+            updateSession(key, nowMs, { lastAutoFireResetAt: resetKey, ctxAutoSaveArmed: true });
             ctxAutoSaveDirective = null; // combined into autoDirective already
         }
     }
