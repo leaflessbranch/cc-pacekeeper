@@ -208,9 +208,9 @@ export function formatSubagentContract(
         `[pacekeeper] Budget contract for this subagent (agent_id ${agentId}${agentType ? `, type ${agentType}` : ''}):`,
         `Pause at ${pause.toFixed(0)}% of the 5-hour block (spawned at ~${blockPctAtStart.toFixed(0)}%), or immediately if any meter reaches critical.`,
         `At that point: finish the current small step (do not start a new one), then write a handoff file via ` +
-            `\`${checkpointCliPath()} handoffs write ${agentId}\` (use that exact path — do not search the filesystem for the command; ` +
-            `frontmatter agent_id/agent_type/created_at/trigger; ` +
-            `body sections Goal/Done/Next/Files touched), and return immediately with the literal text ` +
+            `\`${checkpointCliPath()} handoffs write ${agentId} --agent-type <your type>\` (use that exact path — do not search the filesystem for the command; ` +
+            `pipe ONLY the body on stdin, sections Goal/Done/Next/Files touched — frontmatter is added automatically, do not write your own), ` +
+            `and return immediately with the literal text ` +
             `PAUSED-BUDGET ${agentId} as (or in) your final message.`,
         `If you dispatch child agents, they receive their own contract automatically — do not relay this text to them.`,
         `Cascade clause: if a child agent returns PAUSED-BUDGET, do not re-dispatch it or attempt its work yourself — ` +

@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2]
+
+### Fixed
+- **No more doubled frontmatter in handoff files.** The budget contract now
+  tells the pausing agent to pipe only the body sections on stdin (and pass
+  `--agent-type`) — the CLI adds frontmatter itself, but the old wording
+  ("frontmatter agent_id/…") led agents to write their own frontmatter into
+  the body, producing files with two frontmatter blocks (observed live).
+
 ## [0.4.1]
 
 ### Fixed
