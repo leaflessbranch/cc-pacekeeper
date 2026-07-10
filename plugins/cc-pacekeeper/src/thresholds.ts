@@ -7,6 +7,10 @@ export interface MeterReading {
     percent: number;          // 0-100
     level: Level;
     resetsAt?: string;        // ISO datetime for windowed meters
+    /** The cached reset time is in the past — the block rolled over but no
+     * fresh data has landed. percent is the LAST-KNOWN value from the ended
+     * block, not current usage: display-only, never feed it into decisions. */
+    stale?: boolean;
 }
 
 export interface Snapshot {
@@ -64,6 +68,16 @@ export function computeSnapshot(inputs: ComputeInputs, cfg: Config, now: number 
                 percent: u.sessionUsage,
                 level: levelFor(u.sessionUsage, cfg.thresholds.five_hour),
                 resetsAt: u.sessionResetAt
+            });
+        } else if (u.sessionUsage !== undefined) {
+            // Post-rollover, cache not yet refreshed: keep the field visible
+            // as last-known instead of dropping it for however long the fetch
+            // lags (observed: ~an hour). level none so it drives no decisions.
+            readings.push({
+                meter: 'five_hour',
+                percent: u.sessionUsage,
+                level: 'none',
+                stale: true
             });
         }
         if (u.weeklyUsage !== undefined && !isResetInPast(u.weeklyResetAt, now)) {
@@ -157,6 +171,7 @@ export function formatMeterSegment(snap: Snapshot): string {
         .filter(r => r.meter === 'context' || r.meter === 'five_hour' || r.meter === 'weekly')
         .map(r => {
             const label = METER_LABELS[r.meter];
+            if (r.stale) return `${label} rolled over (was ${r.percent.toFixed(0)}%, awaiting fresh data)`;
             const reset = formatResetCountdown(r.resetsAt);
             return reset ? `${label} ${r.percent.toFixed(0)}% (${reset})` : `${label} ${r.percent.toFixed(0)}%`;
         });

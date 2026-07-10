@@ -41,6 +41,9 @@ const SessionEntrySchema = z.object({
     // parallel subagent deltas overlap in wall-clock time.
     agentBurnPct: z.number().optional(),
     agentRuns: z.number().optional(),
+    // Which block (blockResetKey in tick.ts) the burn accumulators belong to:
+    // the sum restarts on rollover and display is gated on a match.
+    agentBurnResetAt: z.string().optional(),
     // Auto-loop (main only) idempotency: the block resetsAt value that was
     // active the last time the auto directive fired. Fire only when the
     // current block's resetsAt differs from this.

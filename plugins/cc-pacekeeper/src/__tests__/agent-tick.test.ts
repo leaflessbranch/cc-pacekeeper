@@ -101,6 +101,35 @@ describe('auto-loop (main thread)', () => {
         expect(runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read' })).not.toContain('auto-renewal');
     });
 
+    test('suppresses the legacy ask-style 5h nudge after the auto directive fired this block', () => {
+        writeUsage(86, 2 * 3600_000);
+        const sid = newSid();
+        expect(runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read' })).toContain('auto-renewal');
+        // Usage climbs in the same block: no re-fire (idempotent) AND no
+        // legacy "ask the user whether to save" nudge — the save already
+        // happened without asking.
+        writeUsage(92, 2 * 3600_000);
+        const out = runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read' });
+        expect(out).not.toContain('auto-renewal');
+        expect(out).not.toContain('ask the user');
+        const stop = runTick({ session_id: sid, hook_event_name: 'Stop' });
+        expect(stop).not.toContain('limits remain elevated');
+    });
+
+    test('ignores a stale five_hour reading (rollover, cache not refreshed)', () => {
+        const sid = newSid();
+        // resetsAt in the past: percent is the ENDED block's value.
+        writeUsage(94, -5 * 60_000);
+        const out = runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read' });
+        expect(out).not.toContain('auto-renewal');
+        expect(out).toContain('5h rolled over (was 94%');
+        // Subagents spawned against stale data get the default pause floor,
+        // not an instant pause at the ended block's 94%.
+        runTick({ session_id: sid, hook_event_name: 'SubagentStart', agent_id: 'ag-st' });
+        const sub = runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read', agent_id: 'ag-st' });
+        expect(sub).not.toContain('PAUSED-BUDGET');
+    });
+
     test('re-fires when the block resetsAt changes (new block)', () => {
         writeUsage(86, 10 * 60_000);
         const sid = newSid();
@@ -250,6 +279,26 @@ describe('subagent branches', () => {
         runTick({ session_id: sid, hook_event_name: 'SubagentStop', agent_id: 'ag-w' });
         const out = runTick({ session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: 'carry on' });
         expect(out).toContain('agents ~7%');
+    });
+
+    test('burn accumulator resets on block rollover and stale totals are not displayed', () => {
+        writeUsage(45);
+        const sid = newSid();
+        runTick({ session_id: sid, hook_event_name: 'SubagentStart', agent_id: 'ag-x' });
+        writeUsage(52);
+        runTick({ session_id: sid, hook_event_name: 'SubagentStop', agent_id: 'ag-x' });
+        expect(sessionState()[sid]?.agentBurnPct).toBe(7);
+
+        // New block (different resetsAt minute): the old total must neither
+        // display nor seed the next accumulation.
+        writeUsage(3, 4 * 3600_000);
+        const line = runTick({ session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: 'carry on' });
+        expect(line).not.toContain('agents ~');
+        runTick({ session_id: sid, hook_event_name: 'SubagentStart', agent_id: 'ag-y' });
+        writeUsage(8, 4 * 3600_000);
+        runTick({ session_id: sid, hook_event_name: 'SubagentStop', agent_id: 'ag-y' });
+        expect(sessionState()[sid]?.agentBurnPct).toBe(5);
+        expect(sessionState()[sid]?.agentRuns).toBe(1);
     });
 
     test('SubagentStop notes an existing handoff for the agent', () => {

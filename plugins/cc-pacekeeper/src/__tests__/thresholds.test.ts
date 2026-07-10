@@ -63,7 +63,7 @@ describe('computeSnapshot', () => {
         expect(snap.maxLevel).toBe('none');
     });
 
-    test('drops five_hour reading when sessionResetAt is in the past (stale cache)', () => {
+    test('keeps five_hour as a stale display-only reading when sessionResetAt is past', () => {
         const pastIso = new Date(Date.now() - 60 * 60 * 1000).toISOString();
         const futureIso = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
         const snap = computeSnapshot({
@@ -75,7 +75,13 @@ describe('computeSnapshot', () => {
                 weeklyResetAt: futureIso
             }
         }, DEFAULT_CONFIG);
-        expect(snap.readings.find(r => r.meter === 'five_hour')).toBeUndefined();
+        // Rollover: kept as a stale, decision-inert reading instead of being
+        // dropped (the field used to vanish from the line for ~an hour).
+        const five = snap.readings.find(r => r.meter === 'five_hour');
+        expect(five).toBeDefined();
+        expect(five!.stale).toBe(true);
+        expect(five!.level).toBe('none');
+        expect(five!.resetsAt).toBeUndefined();
         expect(snap.readings.find(r => r.meter === 'weekly')).toBeDefined();
         expect(snap.maxLevel).toBe('none');
     });

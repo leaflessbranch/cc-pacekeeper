@@ -193,12 +193,8 @@ async function main(): Promise<void> {
     let autoDirective: string | null = null;
     if (isMainThread && cfg.auto.enabled) {
         const five = snap.readings.find(r => r.meter === 'five_hour');
-        // Idempotency key is resetsAt rounded to the minute: the usage API
-        // jitters the same block's resetsAt at sub-second precision across
-        // fetches, and an exact-string compare re-fires the directive on
-        // every jitter (observed live: 6 re-fires in one block).
-        const resetKey = five?.resetsAt ? String(Math.floor(Date.parse(five.resetsAt) / 60_000)) : undefined;
-        if (five && five.percent >= cfg.auto.five_hour_pct && resetKey
+        const resetKey = blockResetKey(five?.resetsAt);
+        if (five && !five.stale && five.percent >= cfg.auto.five_hour_pct && resetKey
             && sessionEntry.lastAutoFireResetAt !== resetKey) {
             autoDirective = formatAutoLoopDirective(snap, cfg, five.resetsAt!);
             updateSession(key, nowMs, { lastAutoFireResetAt: resetKey, ctxAutoSaveArmed: true });
@@ -225,7 +221,7 @@ async function main(): Promise<void> {
             // and any debounced warn/critical directive. This is the per-prompt
             // heartbeat: the user sees where time and budget stand every turn.
             const afk = afkLine(key, previousEventAt, sessionEntry, nowMs, cfg);
-            const directive = autoDirective ?? ctxAutoSaveDirective ?? directiveIfEscalated(key, snap, nowSec, cfg);
+            const directive = autoDirective ?? ctxAutoSaveDirective ?? directiveIfEscalated(key, snap, nowSec, cfg, sessionEntry);
             const extras: string[] = [];
             // No keepalive handling on a real prompt: the chain self-terminates at
             // ping-fire time, so there is nothing to cancel here.
@@ -252,7 +248,7 @@ async function main(): Promise<void> {
             // fire on their own debounce regardless of the tick gate.
             const lastInj = sessionEntry.lastTimestampInjectedAt ?? 0;
             const tickDue = nowMs - lastInj >= cfg.time.tool_tick_min * 60000;
-            const directive = autoDirective ?? ctxAutoSaveDirective ?? directiveIfEscalated(key, snap, nowSec, cfg);
+            const directive = autoDirective ?? ctxAutoSaveDirective ?? directiveIfEscalated(key, snap, nowSec, cfg, sessionEntry);
             if (tickDue) {
                 injection = composeLine(nowMs, sessionEntry, snap, cfg, null, directive);
                 updateSession(key, nowMs, { lastTimestampInjectedAt: nowMs });
@@ -269,8 +265,10 @@ async function main(): Promise<void> {
             const blockPctAtStart = sessionEntry.blockPctAtStart;
             const five = snap.readings.find(r => r.meter === 'five_hour');
             const pausePct = blockPctAtStart !== undefined ? effectivePause(cfg, blockPctAtStart) : cfg.auto.subagent_pause_pct;
+            // A stale reading carries the ENDED block's percent — pausing on
+            // it would kill fresh-block agents at what is really ~0% usage.
             const shouldEscalate = snap.maxLevel === 'critical'
-                || (five !== undefined && five.percent >= pausePct);
+                || (five !== undefined && !five.stale && five.percent >= pausePct);
             const lastInj = sessionEntry.lastTimestampInjectedAt ?? 0;
             const tickDue = nowMs - lastInj >= cfg.time.tool_tick_min * 60000;
             if (shouldEscalate) {
@@ -287,8 +285,12 @@ async function main(): Promise<void> {
         // If any meter is currently at warn+ AND last-injected level for any meter
         // shows an escalation persisted, give a soft end-of-turn reminder. Don't
         // re-fire every turn — debounce same-level.
+        // Post-auto-fire, the 5h meter no longer warrants the end-of-turn
+        // "consider saving" reminder — the save already happened this block.
+        const autoFired = autoFiredThisBlock(sessionEntry, snap);
         const escalated = snap.readings.some(r => {
             if (r.level !== 'warn' && r.level !== 'critical') return false;
+            if (r.meter === 'five_hour' && autoFired) return false;
             // The level is already recorded in debounce state by earlier hooks this turn.
             return peekLevel(key, r.meter) === r.level;
         });
@@ -366,8 +368,14 @@ function composeLine(
     const count = liveSessionCount();
     const live = (count !== null && count > 1) ? ` · ${count} live sessions sharing budget` : '';
     // Cumulative subagent burn this block, if any — approximate (parallel
-    // subagent deltas overlap in wall-clock time), hence the tilde.
-    const burn = (entry.agentBurnPct ?? 0) > 0 ? ` · agents ~${Math.round(entry.agentBurnPct!)}%` : '';
+    // subagent deltas overlap in wall-clock time), hence the tilde. Gated on
+    // the accumulator belonging to the CURRENT block: a total carried across
+    // a rollover describes the ended block (observed live: "agents ~54%"
+    // still showing at 5h 3%).
+    const five = snap.readings.find(r => r.meter === 'five_hour');
+    const sameBlock = !five?.stale && blockResetKey(five?.resetsAt) !== undefined
+        && entry.agentBurnResetAt === blockResetKey(five?.resetsAt);
+    const burn = sameBlock && (entry.agentBurnPct ?? 0) > 0 ? ` · agents ~${Math.round(entry.agentBurnPct!)}%` : '';
     const head = meters ? `[pacekeeper] ${time} · ${meters}${burn}${live}` : `[pacekeeper] ${time}${burn}${live}`;
     const lines: string[] = [];
     if (afk) lines.push(afk);
@@ -400,6 +408,28 @@ function afkLine(
 }
 
 /**
+ * Idempotency key for "once per 5h block": resetsAt rounded to the minute.
+ * The usage API jitters the same block's resetsAt at sub-second precision
+ * across fetches (observed live: 6 directive re-fires in one block), so any
+ * per-block state must key on this, never the raw ISO string.
+ */
+function blockResetKey(resetsAt: string | undefined): string | undefined {
+    if (!resetsAt) return undefined;
+    const t = Date.parse(resetsAt);
+    return Number.isFinite(t) ? String(Math.floor(t / 60_000)) : undefined;
+}
+
+/** True once the auto-renewal directive has fired for the CURRENT block —
+ * the legacy ask-style checkpoint nudge is redundant noise after that (the
+ * save already happened without asking). */
+function autoFiredThisBlock(entry: SessionEntry, snap: ReturnType<typeof computeSnapshot>): boolean {
+    const five = snap.readings.find(r => r.meter === 'five_hour');
+    if (!five || five.stale) return false;
+    const key = blockResetKey(five.resetsAt);
+    return key !== undefined && entry.lastAutoFireResetAt === key;
+}
+
+/**
  * Return the warn/critical directive for this event if the debounce fires and
  * the level warrants it; otherwise null. Mirrors the prior PreToolUse gate.
  */
@@ -407,11 +437,16 @@ function directiveIfEscalated(
     sessionId: string,
     snap: ReturnType<typeof computeSnapshot>,
     nowSec: number,
-    cfg: ReturnType<typeof loadConfig>
+    cfg: ReturnType<typeof loadConfig>,
+    entry?: SessionEntry
 ): string | null {
     const fired = applyDebounce(sessionId, snap, nowSec, cfg.debounce_seconds);
     if (fired.length === 0) return null;
     if (snap.maxLevel !== 'warn' && snap.maxLevel !== 'critical') return null;
+    // Post-auto-fire, a 5h-driven ask-style nudge contradicts the full-auto
+    // save that already happened this block; stay quiet unless another meter
+    // is the driver.
+    if (entry && snap.driver?.meter === 'five_hour' && autoFiredThisBlock(entry, snap)) return null;
     // Prefer the 5h block-reset bridge over the checkpoint directive when a
     // short reset is imminent: waiting it out beats a checkpoint/resume cycle.
     if (cfg.bridge.enabled) {
@@ -543,7 +578,8 @@ async function buildSubagentStartContext(
     const snap = computeSnapshot({ contextPercent: ctxPct, usage }, cfg);
 
     const five = snap.readings.find(r => r.meter === 'five_hour');
-    const blockPctAtStart = five?.percent ?? 0;
+    // A stale reading is the ENDED block's percent — treat as fresh-block 0.
+    const blockPctAtStart = five && !five.stale ? five.percent : 0;
     updateSession(key, nowMs, { blockPctAtStart });
 
     return formatSubagentContract(snap, cfg, agentId, agentType, blockPctAtStart);
@@ -571,12 +607,17 @@ function buildSubagentStopContext(
     const snap = computeSnapshot({ contextPercent: null, usage }, cfg);
     const five = snap.readings.find(r => r.meter === 'five_hour');
 
-    if (five && blockPctAtStart !== undefined) {
+    if (five && !five.stale && blockPctAtStart !== undefined) {
         const delta = Math.max(0, five.percent - blockPctAtStart);
         const mainEntry = getSessionEntry(sessionId);
-        const agentBurnPct = (mainEntry?.agentBurnPct ?? 0) + delta;
-        const agentRuns = (mainEntry?.agentRuns ?? 0) + 1;
-        updateSession(sessionId, nowMs, { agentBurnPct, agentRuns });
+        // Burn attribution is per-block: on rollover start the sum fresh
+        // instead of carrying a stale total into the new block (observed
+        // live: "agents ~54%" still displayed at 5h 3%).
+        const resetKey = blockResetKey(five.resetsAt);
+        const sameBlock = mainEntry?.agentBurnResetAt === resetKey;
+        const agentBurnPct = (sameBlock ? (mainEntry?.agentBurnPct ?? 0) : 0) + delta;
+        const agentRuns = (sameBlock ? (mainEntry?.agentRuns ?? 0) : 0) + 1;
+        updateSession(sessionId, nowMs, { agentBurnPct, agentRuns, agentBurnResetAt: resetKey });
     }
 
     const hasHandoffFile = hasHandoff(cwd, cfg.checkpoint_dir_name, agentId);

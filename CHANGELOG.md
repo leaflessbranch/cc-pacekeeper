@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4]
+
+### Fixed
+- **Subagent burn attribution resets on block rollover.** `agentBurnPct` was
+  a session-lifetime sum, so `agents ~N%` kept describing the previous block
+  (observed live: "agents ~54%" at 5h 3%). The accumulator is now keyed to
+  the block and restarts on rollover; display is gated on the key matching.
+- **Legacy checkpoint nudge silenced after the auto-renewal fires.** Once the
+  auto directive saved this block's checkpoint, the ask-style "consider
+  saving" warn/critical nudges for the 5h meter (tick and end-of-turn) were
+  contradictory noise; they are now suppressed for the rest of the block.
+- **5h meter no longer vanishes after rollover (roadmap #9).** When the
+  cached reset time is past but no fresh data has landed, the line now shows
+  `5h rolled over (was N%, awaiting fresh data)` instead of dropping the
+  field for however long the fetch lags. The stale reading is display-only:
+  auto-renewal, subagent pause points, and burn deltas all ignore it.
+
 ## [0.4.3]
 
 ### Fixed
