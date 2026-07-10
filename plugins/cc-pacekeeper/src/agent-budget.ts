@@ -20,6 +20,19 @@ import { formatStatusLine } from './thresholds';
 
 export const RESUME_MARKER = '[pacekeeper-resume]';
 
+/**
+ * Absolute path to the checkpoint CLI for embedding in subagent-facing text.
+ * The `pacekeeper-checkpoint` PATH shim is not visible inside a subagent's
+ * Bash (verified live in a headless session), so a contract that names the
+ * bare command sends the agent hunting the filesystem for it — which the
+ * permission classifier then denies as suspicious. Hooks always run with
+ * CLAUDE_PLUGIN_ROOT set; fall back to the bare name only outside hooks.
+ */
+export function checkpointCliPath(): string {
+    const root = process.env.CLAUDE_PLUGIN_ROOT;
+    return root ? path.join(root, 'bin', 'pacekeeper-checkpoint') : 'pacekeeper-checkpoint';
+}
+
 export interface HandoffFrontmatter {
     agent_id: string;
     agent_type?: string;
@@ -195,7 +208,8 @@ export function formatSubagentContract(
         `[pacekeeper] Budget contract for this subagent (agent_id ${agentId}${agentType ? `, type ${agentType}` : ''}):`,
         `Pause at ${pause.toFixed(0)}% of the 5-hour block (spawned at ~${blockPctAtStart.toFixed(0)}%), or immediately if any meter reaches critical.`,
         `At that point: finish the current small step (do not start a new one), then write a handoff file via ` +
-            `\`pacekeeper-checkpoint handoffs write ${agentId}\` (frontmatter agent_id/agent_type/created_at/trigger; ` +
+            `\`${checkpointCliPath()} handoffs write ${agentId}\` (use that exact path — do not search the filesystem for the command; ` +
+            `frontmatter agent_id/agent_type/created_at/trigger; ` +
             `body sections Goal/Done/Next/Files touched), and return immediately with the literal text ` +
             `PAUSED-BUDGET ${agentId} as (or in) your final message.`,
         `If you dispatch child agents, they receive their own contract automatically — do not relay this text to them.`,
@@ -217,7 +231,8 @@ export function formatPauseDirective(snap: Snapshot, agentId: string, pausePct: 
         status,
         '',
         `🛑 Subagent budget pause point reached (${pausePct.toFixed(0)}%). Finish only the current small step, ` +
-            `then write a handoff via \`pacekeeper-checkpoint handoffs write ${agentId}\` and return ` +
+            `then write a handoff via \`${checkpointCliPath()} handoffs write ${agentId}\` (use that exact path — ` +
+            `do not search the filesystem for the command) and return ` +
             `PAUSED-BUDGET ${agentId} as your final message. Do not start new work.`
     ].join('\n');
 }

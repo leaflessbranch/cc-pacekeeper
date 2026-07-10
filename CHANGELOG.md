@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1]
+
+### Fixed
+- **Subagent handoff writes actually work.** The budget contract and pause
+  directive now embed the absolute path to the checkpoint CLI
+  (`$CLAUDE_PLUGIN_ROOT/bin/pacekeeper-checkpoint`) instead of the bare
+  `pacekeeper-checkpoint` shim name: the PATH shim is not visible inside a
+  subagent's Bash (verified live), so a pausing agent could not write its
+  handoff — and the bare name sent it filesystem-hunting for the binary,
+  which the permission classifier denies. The text now also says "do not
+  search the filesystem for the command".
+
 ## [0.4.0]
 
 ### Added

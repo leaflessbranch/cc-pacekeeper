@@ -96,6 +96,21 @@ describe('formatSubagentContract', () => {
         expect(text).toContain('do not relay');
     });
 
+    test('embeds the absolute CLI path when CLAUDE_PLUGIN_ROOT is set (subagent Bash has no PATH shim)', () => {
+        const prev = process.env.CLAUDE_PLUGIN_ROOT;
+        process.env.CLAUDE_PLUGIN_ROOT = '/opt/pk-root';
+        try {
+            const text = formatSubagentContract(snapWithFive(30), CFG, 'ag-5', undefined, 30);
+            expect(text).toContain('/opt/pk-root/bin/pacekeeper-checkpoint handoffs write ag-5');
+            expect(text).toContain('do not search the filesystem');
+            const pause = formatPauseDirective(snapWithFive(90), 'ag-5', 85);
+            expect(pause).toContain('/opt/pk-root/bin/pacekeeper-checkpoint handoffs write ag-5');
+        } finally {
+            if (prev === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+            else process.env.CLAUDE_PLUGIN_ROOT = prev;
+        }
+    });
+
     test('omits any ctx clause (step 0: transcript is shared with the parent)', () => {
         const text = formatSubagentContract(snapWithFive(30), CFG, 'ag-4', undefined, 30);
         expect(text).not.toContain('ctx');
