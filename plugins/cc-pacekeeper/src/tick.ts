@@ -59,7 +59,7 @@ async function main(): Promise<void> {
     }
 
     if (event === 'SubagentStop') {
-        emitAdditionalContext(event, buildSubagentStopContext(cfg, sessionId, agentId));
+        emitAdditionalContext(event, buildSubagentStopContext(cfg, sessionId, agentId, cwd));
         return;
     }
 
@@ -360,7 +360,10 @@ function composeLine(
     const meters = formatMeterSegment(snap);
     const count = liveSessionCount();
     const live = (count !== null && count > 1) ? ` · ${count} live sessions sharing budget` : '';
-    const head = meters ? `[pacekeeper] ${time} · ${meters}${live}` : `[pacekeeper] ${time}${live}`;
+    // Cumulative subagent burn this block, if any — approximate (parallel
+    // subagent deltas overlap in wall-clock time), hence the tilde.
+    const burn = (entry.agentBurnPct ?? 0) > 0 ? ` · agents ~${Math.round(entry.agentBurnPct!)}%` : '';
+    const head = meters ? `[pacekeeper] ${time} · ${meters}${burn}${live}` : `[pacekeeper] ${time}${burn}${live}`;
     const lines: string[] = [];
     if (afk) lines.push(afk);
     lines.push(head);
@@ -550,7 +553,8 @@ async function buildSubagentStartContext(
 function buildSubagentStopContext(
     cfg: ReturnType<typeof loadConfig>,
     sessionId: string,
-    agentId: string | undefined
+    agentId: string | undefined,
+    cwd: string
 ): string {
     if (!agentId) return '';
     const nowMs = Date.now();
@@ -570,8 +574,7 @@ function buildSubagentStopContext(
         updateSession(sessionId, nowMs, { agentBurnPct, agentRuns });
     }
 
-    const cwdCandidate = process.cwd();
-    const hasHandoffFile = hasHandoff(cwdCandidate, cfg.checkpoint_dir_name, agentId);
+    const hasHandoffFile = hasHandoff(cwd, cfg.checkpoint_dir_name, agentId);
     if (hasHandoffFile) {
         return `[pacekeeper] Subagent ${agentId} paused on budget — handoff at ${cfg.checkpoint_dir_name}/handoffs/${agentId}.md`;
     }

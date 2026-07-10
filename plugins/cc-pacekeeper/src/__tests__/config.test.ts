@@ -80,6 +80,29 @@ describe('loadConfig', () => {
         expect(cfg.keepalive.interval_min).toBe(30);
     });
 
+    test('auto block defaults are upgraded into pre-0.4 configs', async () => {
+        const { configFile, loadConfig } = await import('../config');
+        const file = configFile();
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        // A config written before the auto block existed.
+        fs.writeFileSync(file, JSON.stringify({ debounce_seconds: 45 }));
+        const cfg = loadConfig();
+        expect(cfg.auto).toEqual({ enabled: true, five_hour_pct: 85, subagent_pause_pct: 75, wake_delay_min: 3 });
+        expect(cfg.debounce_seconds).toBe(45);
+    });
+
+    test('auto block partial override merges with defaults', async () => {
+        const { configFile, loadConfig } = await import('../config');
+        const file = configFile();
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({ auto: { enabled: false, subagent_pause_pct: 60 } }));
+        const cfg = loadConfig();
+        expect(cfg.auto.enabled).toBe(false);
+        expect(cfg.auto.subagent_pause_pct).toBe(60);
+        expect(cfg.auto.five_hour_pct).toBe(85);
+        expect(cfg.auto.wake_delay_min).toBe(3);
+    });
+
     test('bootstrapConfigIfMissing creates default file', async () => {
         const { bootstrapConfigIfMissing, configFile } = await import('../config');
         const file = configFile();
