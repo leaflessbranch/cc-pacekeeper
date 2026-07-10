@@ -4,6 +4,67 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0]
+
+### Added
+- **Budget-aware subagent trees.** Hook state is now keyed per agent
+  (`session:agent_id`), so subagents at any nesting depth get their own meter
+  ticks instead of being starved by the main thread's debounce. On
+  `SubagentStart` each spawned agent receives a budget contract with a
+  spawn-relative pause point (`min(max(subagent_pause_pct, spawn%+5),
+  five_hour_pct)` — an agent spawned late in the block still gets working
+  room): at that point it finishes the current small step, writes a handoff
+  file, and returns `PAUSED-BUDGET <agent_id>`. A cascade clause makes a
+  parent record (not re-attempt) a paused child's work. Subagent `PreToolUse`
+  gets a compact `5h X% · pause at P%` tick line.
+- **Handoff registry.** Paused-agent handoffs live in
+  `.claude-checkpoints/handoffs/<agent_id>.md` (files are the registry). New
+  CLI verbs: `handoffs list`, `handoffs write <agent_id>`,
+  `handoffs archive <agent_id>` — never raw `mv`. The SessionStart banner and
+  auto-wake orientation list pending handoffs; `SubagentStop` notes when the
+  finishing agent left one.
+- **Burn accounting.** `SubagentStop` accumulates each agent's 5h-block burn
+  delta into the main session; the heartbeat line shows `agents ~N%`
+  (approximate — parallel deltas overlap).
+- **Autonomous block renewal (full auto).** When the 5h block crosses
+  `auto.five_hour_pct` (default 85), the tick fires once per block: save a
+  checkpoint NOW without asking (with `--wake-at`/`--wake-prompt`), schedule a
+  one-shot `[pacekeeper-resume]` cron at reset + `auto.wake_delay_min`, and
+  keep to small steps until renewal. The directive opens with a precedence
+  line so it beats the keepalive "single word" instruction when fired from a
+  keepalive turn, and it takes precedence over the bridge directive.
+  Resume-marker `CronCreate` is auto-approved on the main thread only.
+- **Auto-wake orientation.** A `[pacekeeper-resume]` prompt is a real work
+  trigger (never suppressed): it injects fresh meters, active lanes, pending
+  handoffs, and instructions to `resume` the checkpoint (consuming/archiving
+  it even in-session) and re-dispatch + archive handoffs.
+- **Context auto-save with crossing-based re-arm.** At ctx critical the tick
+  directs an immediate no-asking checkpoint save, once per climb: it re-arms
+  only after a later tick sees ctx back below warn (compaction happened). When
+  5h and ctx would both fire on one tick, a single combined directive is
+  emitted (one save covers both; only the 5h path arms a wake).
+- **Dispatch advisory.** `PreToolUse` on `Agent`/`Task` at 5h warn+ adds a
+  one-line caution (advisory only — never denies).
+- Checkpoint frontmatter gains optional `wake_at`/`wake_prompt`; `resume`
+  prints re-arm guidance when `wake_at` is still in the future.
+- Config: new `auto` block (`enabled`, `five_hour_pct`, `subagent_pause_pct`,
+  `wake_delay_min`), upgraded into existing configs automatically.
+- Hooks: `SubagentStart` + `SubagentStop` wired to the tick.
+
+### Changed
+- `scanKeepaliveState` generalized to `scanMarkerCreates(transcript, marker)`
+  (keepalive keeps a thin wrapper; behavior unchanged) so the resume marker
+  reuses the same create→result→delete correlation.
+
+### Known limitations
+- `transcript_path` inside subagent hook calls was runtime-verified to be the
+  *parent's* transcript (same session file), so subagent tick lines and the
+  contract deliberately omit any per-agent context-window clause.
+- `PreCompact` supports only `decision:"block"` — the existing
+  `precompact.ts` `additionalContext` injection is not delivered by the
+  harness. It is left in place; the ctx auto-save on normal ticks (above) is
+  the effective replacement.
+
 ## [0.3.0]
 
 ### Added

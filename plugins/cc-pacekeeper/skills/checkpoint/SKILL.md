@@ -25,6 +25,17 @@ Legacy checkpoints saved before lanes existed have no `name` in frontmatter; the
 | `list [--archived]` | User asks "what checkpoints do I have here?" or wants to choose a non-default lane to resume. Shows index, lane name, branch, worktree, age, and first Goal line. |
 | `discard [name\|N] [--reason …]` | User says a checkpoint is no longer relevant; mark superseded without resuming. |
 | `cleanup [--older-than Nd] [--apply]` | Periodic tidy, lane-aware: the newest checkpoint in each lane is never marked stale, even past the threshold. Dry-run first; only pass `--apply` after user confirms. |
+| `handoffs list` | Show pending subagent budget-pause handoffs (agent_id, type, trigger, age). |
+| `handoffs write <agent_id>` | Used by a paused subagent to write its handoff file (Goal / Done / Next / Files touched). |
+| `handoffs archive <agent_id>` | After re-dispatching (or explicitly dropping) a paused handoff's work, archive it so it isn't re-surfaced. Never `mv` handoff files by hand. |
+
+## Auto-save (no asking)
+
+When the 5-hour block crosses the configured auto buffer (`auto.five_hour_pct`, default 85) or context hits critical, the pacekeeper tick injects a directive to **save immediately without asking the user** — full-auto is the design. Follow it: compose the body and run `save` right away (with `--wake-at`/`--wake-prompt` when the directive supplies them), then keep to small steps until the block renews. The wake one-shot it schedules delivers a `[pacekeeper-resume]` prompt after reset; on that prompt, run `resume` (this consumes/archives the checkpoint even in-session) and re-dispatch any pending handoffs, archiving each once absorbed.
+
+## Handoffs
+
+Paused-subagent handoff files live in `<project-root>/.claude-checkpoints/handoffs/` (archived ones in `handoffs/archive/`), named `<agent_id>.md`. A subagent that hits its budget pause point writes one and returns `PAUSED-BUDGET <agent_id>`. The files are the registry — always operate on them via the `handoffs` verbs above, never with raw file moves. The SessionStart banner and the auto-wake orientation both list pending handoffs so nothing dangles.
 
 ## Save flow
 

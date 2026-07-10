@@ -2,7 +2,7 @@
 
 A Claude Code plugin that hands monitoring of context window, 5-hour session block, and weekly usage limits over to Claude itself — so it can pace, warn, and checkpoint work before hitting a wall.
 
-**Status:** v0.3.0 — named checkpoint lanes, time & AFK awareness, cross-session budget awareness, worktree-aware checkpoints, a worktree lifecycle skill, and AFK cache keepalive. See the [changelog](CHANGELOG.md).
+**Status:** v0.4.0 — budget-aware subagent trees with pause/handoff files, autonomous 5h-block renewal (auto-save + scheduled auto-wake), context auto-save, plus everything from 0.3: named checkpoint lanes, time & AFK awareness, cross-session budget awareness, worktree-aware checkpoints, and AFK cache keepalive. See the [changelog](CHANGELOG.md).
 
 ![cc-pacekeeper in action](docs/demo.gif)
 
@@ -30,6 +30,13 @@ Plus **extra-usage credits** state, so when limits approach Claude can ask wheth
 
 - **Named checkpoint lanes** — checkpoints are keyed by a lane name (default: the sanitized git branch; `save --name` overrides). Saving supersedes only the same lane, so parallel efforts — including in separate worktrees — each keep an active, independently resumable checkpoint. `resume <name>` / `peek <name>` (non-mutating preview) / `resume --worktree` to re-enter or recreate the lane's worktree.
 - **AFK cache keepalive** — Claude schedules a single recurring cron job (once per session) to keep the prompt cache warm. Pings are suppressed hook-side while you're active (zero context cost) and pass through only while you're actually idle; after `keepalive.max_idle_hours` (default 12) of continuous idleness the job is torn down. Jobs are deduped via a CronList-first check, since cron jobs survive `/clear`. Auto-disabled when drawing on usage credits, where the cache TTL is short anyway.
+
+### New in v0.4
+
+- **Budget-aware subagent trees** — hook state is keyed per agent, so subagents at any depth see their own compact meter ticks (`5h X% · pause at P%`). Each spawned agent gets a budget contract with a spawn-relative pause point: instead of burning the block invisibly, it finishes the current small step, writes a handoff to `.claude-checkpoints/handoffs/<agent_id>.md`, and returns `PAUSED-BUDGET`. Parents record (never re-attempt) paused children's work and pause too. Manage handoffs via `pacekeeper-checkpoint handoffs list|write|archive`.
+- **Autonomous block renewal** — full auto, no asking: at `auto.five_hour_pct` (default 85) of the 5h block, Claude saves a checkpoint immediately and schedules a one-shot wake cron for just after the block resets. The wake prompt re-orients from the checkpoint (consuming it) and re-dispatches paused handoffs. Works even when the trigger tick arrives on an AFK keepalive turn.
+- **Context auto-save** — at ctx critical, an immediate no-asking checkpoint save, re-armed per compaction cycle. Combined with the 5h directive when both fire at once.
+- **Dispatch advisory** — a one-line caution (never a denial) before spawning agent trees when the 5h block is already tight.
 
 ## Install
 

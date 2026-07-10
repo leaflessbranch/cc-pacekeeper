@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { loadConfig, bootstrapConfigIfMissing } from './config';
 import { KEEPALIVE_MARKER, scanKeepaliveState } from './keepalive';
+import { RESUME_MARKER } from './agent-budget';
 import { z } from 'zod';
 
 async function readRawStdin(): Promise<unknown> {
@@ -20,7 +21,11 @@ async function readRawStdin(): Promise<unknown> {
 const ToolInputSchema = z.object({
     tool_name: z.string().optional(),
     tool_input: z.record(z.string(), z.unknown()).optional(),
-    transcript_path: z.string().optional()
+    transcript_path: z.string().optional(),
+    // Present only inside subagent hook calls. [G7] Wake-arming (RESUME_MARKER
+    // auto-approval) is exclusively the main loop's job — a subagent CronCreate
+    // carrying the marker falls through to normal permissions instead.
+    agent_id: z.string().optional()
 });
 
 function allow(reason: string): void {
@@ -53,6 +58,11 @@ async function main(): Promise<void> {
         const prompt = input.prompt;
         if (typeof prompt === 'string' && prompt.includes(KEEPALIVE_MARKER)) {
             return allow('pacekeeper keepalive one-shot');
+        }
+        // [G7] Auto-approve the auto-loop's wake one-shot, but only when this
+        // is the main thread — subagent marker CronCreate falls through.
+        if (typeof prompt === 'string' && prompt.includes(RESUME_MARKER) && !data.agent_id) {
+            return allow('pacekeeper auto-wake one-shot');
         }
         return passthrough();
     }

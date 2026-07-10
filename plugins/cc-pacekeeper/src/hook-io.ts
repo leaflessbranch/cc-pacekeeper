@@ -12,7 +12,12 @@ const HookStdinSchema = z.object({
     prompt: z.string().optional(),
     // SessionStart includes the active model id directly. Other events don't,
     // so we fall back to reading it from the transcript.
-    model: z.string().optional()
+    model: z.string().optional(),
+    // Present only inside subagent hook calls (any tool event at any nesting
+    // depth). Absent on the main thread — that absence is how tick.ts tells
+    // main-thread vs. subagent branches apart.
+    agent_id: z.string().optional(),
+    agent_type: z.string().optional()
 });
 
 export type HookStdin = z.infer<typeof HookStdinSchema>;

@@ -32,7 +32,23 @@ const SessionEntrySchema = z.object({
     keepalive: KeepaliveSchema.optional(),
     // Last time the Stop branch actually emitted a keepalive schedule directive.
     // Debounces re-emission so an ignored directive doesn't re-fire every turn.
-    lastKeepaliveDirectiveAt: z.number().optional()
+    lastKeepaliveDirectiveAt: z.number().optional(),
+    // Snapshot of the 5h block % at SubagentStart, stashed on the AGENT's own
+    // (session:agentId) keyed entry so SubagentStop can compute the burn delta.
+    blockPctAtStart: z.number().optional(),
+    // Accumulated on the MAIN entry: sum of per-agent burn deltas across all
+    // subagent runs this block, and how many runs contributed. Approximate —
+    // parallel subagent deltas overlap in wall-clock time.
+    agentBurnPct: z.number().optional(),
+    agentRuns: z.number().optional(),
+    // Auto-loop (main only) idempotency: the block resetsAt value that was
+    // active the last time the auto directive fired. Fire only when the
+    // current block's resetsAt differs from this.
+    lastAutoFireResetAt: z.string().optional(),
+    // [G4] ctx auto-save crossing-based re-arm: armed once the ctx-critical
+    // directive fires; cleared once a later tick observes ctx below warn
+    // (i.e. compaction happened), allowing the next climb to re-fire.
+    ctxAutoSaveArmed: z.boolean().optional()
 });
 
 export type SessionEntry = z.infer<typeof SessionEntrySchema>;

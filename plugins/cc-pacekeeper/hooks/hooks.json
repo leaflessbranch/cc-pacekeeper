@@ -77,6 +77,28 @@
           }
         ]
       }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/pacekeeper-tick",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/pacekeeper-tick",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
