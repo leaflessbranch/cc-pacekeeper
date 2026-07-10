@@ -18,6 +18,7 @@ import {
 import { contextPercent, readContextTokens, resolveUsableContextWindow } from './ctx-tokens';
 import { readUsageCacheFile } from './vendor/usage-fetch';
 import { projectRootFromTranscript, resolveProjectRoot, worktreeInfo } from './resolve-root';
+import { archiveHandoff, listHandoffs, writeHandoff } from './agent-budget';
 
 interface Args {
     verb: string;
@@ -122,6 +123,8 @@ function verbSave(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): 
     const sessionId = typeof args.flags['session-id'] === 'string' ? args.flags['session-id'] : undefined;
     const transcriptPath = typeof args.flags['transcript-path'] === 'string' ? args.flags['transcript-path'] : undefined;
     const name = typeof args.flags.name === 'string' ? args.flags.name : undefined;
+    const wakeAt = typeof args.flags['wake-at'] === 'string' ? args.flags['wake-at'] : undefined;
+    const wakePrompt = typeof args.flags['wake-prompt'] === 'string' ? args.flags['wake-prompt'] : undefined;
 
     return (async () => {
         let body = bodyFromFlag ?? bodyFromFile;
@@ -158,7 +161,9 @@ function verbSave(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): 
                 meters: Object.keys(meters).length > 0 ? meters : undefined,
                 project_root: cwd,
                 ...(worktreeProvenance ? { worktree: worktreeProvenance } : {}),
-                ...(wt?.isWorktree && wt.branch ? { git_branch: wt.branch } : {})
+                ...(wt?.isWorktree && wt.branch ? { git_branch: wt.branch } : {}),
+                ...(wakeAt ? { wake_at: wakeAt } : {}),
+                ...(wakePrompt ? { wake_prompt: wakePrompt } : {})
             },
             body
         });
@@ -239,6 +244,18 @@ function printOrientation(ckpt: Checkpoint): void {
     process.stdout.write('\n');
     process.stdout.write(ckpt.body + '\n');
     process.stdout.write('\n=== End checkpoint ===\n');
+    // Auto-loop wake re-arming: if the block-reset wake time is still ahead,
+    // the checkpoint being resumed manually (e.g. in-session) means whatever
+    // wake one-shot was scheduled at save time may no longer exist or may fire
+    // into a session that's already active — tell the resuming agent to
+    // re-arm explicitly rather than assume the original schedule survived.
+    const wakeAt = ckpt.frontmatter.wake_at;
+    if (wakeAt && ckpt.frontmatter.wake_prompt) {
+        const t = Date.parse(wakeAt);
+        if (Number.isFinite(t) && t > Date.now()) {
+            process.stdout.write(`\nWake scheduled for ${wakeAt} — if no CronCreate for it is confirmed pending (CronList), re-arm via CronCreate (one-shot) at that time with this prompt:\n${ckpt.frontmatter.wake_prompt}\n`);
+        }
+    }
 }
 
 /** Sanitize a branch name into a filesystem-safe worktree directory segment. */
@@ -382,6 +399,63 @@ export function verbCleanup(args: Args, cwd: string, cfg: ReturnType<typeof load
     process.stdout.write(`\nApplied: moved ${movedCount}, deleted ${deletedCount}.\n`);
 }
 
+/** [G3] `handoffs list` / `handoffs write <agent_id>` / `handoffs archive <agent_id>`
+ * — thin wrappers over agent-budget.ts so the model never does raw `mv` on
+ * the handoff registry. */
+function verbHandoffs(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): Promise<void> | void {
+    const sub = args.positional[0];
+    if (sub === 'list') {
+        const items = listHandoffs(cwd, cfg.checkpoint_dir_name);
+        if (items.length === 0) {
+            process.stdout.write('No pending handoffs.\n');
+            return;
+        }
+        for (const h of items) {
+            process.stdout.write(`${h.frontmatter.agent_id}  ${h.frontmatter.agent_type ?? '?'}  ${h.frontmatter.trigger}  ${h.frontmatter.created_at}  ${path.basename(h.path)}\n`);
+        }
+        return;
+    }
+    if (sub === 'write') {
+        const agentId = args.positional[1];
+        if (!agentId) {
+            process.stdout.write('Usage: pacekeeper-checkpoint handoffs write <agent_id> [--body <text> | --body-file <path>] [--trigger <kind>] [--agent-type <type>]\n');
+            process.exitCode = 1;
+            return;
+        }
+        const agentType = typeof args.flags['agent-type'] === 'string' ? args.flags['agent-type'] : undefined;
+        const trigger = typeof args.flags.trigger === 'string' ? args.flags.trigger : 'budget_pause';
+        return (async () => {
+            const bodyFromFlag = typeof args.flags.body === 'string' ? args.flags.body : null;
+            const bodyFromFile = typeof args.flags['body-file'] === 'string' ? fs.readFileSync(args.flags['body-file'] as string, 'utf8') : null;
+            let body = bodyFromFlag ?? bodyFromFile;
+            if (body === null && !process.stdin.isTTY) {
+                const stdin = await readAllStdin();
+                if (stdin.trim() !== '') body = stdin;
+            }
+            if (body === null || body.trim() === '') {
+                process.stdout.write('## Goal\n<what this agent was doing>\n\n## Done\n<completed so far>\n\n## Next\n<remaining work>\n\n## Files touched\n- <path>\n');
+                process.exitCode = 2;
+                return;
+            }
+            const written = writeHandoff({ cwd, checkpointDirName: cfg.checkpoint_dir_name, agentId, agentType, trigger, body });
+            process.stdout.write(`Wrote handoff: ${written}\n`);
+        })();
+    }
+    if (sub === 'archive') {
+        const agentId = args.positional[1];
+        if (!agentId) {
+            process.stdout.write('Usage: pacekeeper-checkpoint handoffs archive <agent_id>\n');
+            process.exitCode = 1;
+            return;
+        }
+        const moved = archiveHandoff(cwd, cfg.checkpoint_dir_name, agentId);
+        process.stdout.write(moved ? `Archived → ${moved}\n` : `No pending handoff for agent_id "${agentId}".\n`);
+        return;
+    }
+    process.stdout.write('Usage: pacekeeper-checkpoint handoffs <list|write|archive> ...\n');
+    process.exitCode = 1;
+}
+
 function parseDays(s: string): number {
     const m = /^(\d+)([dD]?)$/.exec(s.trim());
     if (!m) return Number(s) || 0;
@@ -405,10 +479,12 @@ function verbHelp(): void {
         'Verbs:',
         '  save [--body <text> | --body-file <path>] [--trigger <kind>] [--name <slug>]',
         '       [--session-id <id>] [--transcript-path <path>] [--cwd <path>]',
+        '       [--wake-at <iso>] [--wake-prompt <text>]',
         '       Write a new active checkpoint in the given lane (default: current',
         '       branch, sanitized). Only prior actives in the SAME lane are',
         '       superseded. Body may also be piped on stdin. If no body is',
-        '       provided, emits a template and exits 2.',
+        '       provided, emits a template and exits 2. --wake-at/--wake-prompt',
+        '       record when + with what prompt the auto-loop scheduled a wake.',
         '',
         '  resume [name|N] [--session-id <id>] [--worktree]',
         '                        Show a checkpoint by lane name or list index, archive it as',
@@ -424,6 +500,12 @@ function verbHelp(): void {
         '                        Show stale live files + expired archive files, lane-aware —',
         '                        the newest checkpoint in each lane is never marked stale.',
         '                        Dry-run by default.',
+        '',
+        '  handoffs list         List pending subagent budget-pause handoffs.',
+        '  handoffs write <agent_id> [--body <text> | --body-file <path>] [--trigger <kind>] [--agent-type <type>]',
+        '                        Write (or overwrite) a handoff file for a paused subagent.',
+        '  handoffs archive <agent_id>',
+        '                        Move a handoff to handoffs/archive/ once its work is absorbed.',
         '',
         '  help                  Show this message.',
         ''
@@ -458,6 +540,7 @@ async function main(): Promise<void> {
         case 'list': verbList(args, cwd, cfg); return;
         case 'discard': verbDiscard(args, cwd, cfg); return;
         case 'cleanup': verbCleanup(args, cwd, cfg); return;
+        case 'handoffs': await verbHandoffs(args, cwd, cfg); return;
         default:
             process.stdout.write(`Unknown verb: ${args.verb}\n\n`);
             verbHelp();

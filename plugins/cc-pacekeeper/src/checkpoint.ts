@@ -21,6 +21,10 @@ export interface CheckpointFrontmatter {
     discard_reason?: string;
     resumed_at?: string;
     resumed_by_session?: string;
+    /** ISO time the auto-loop scheduled a wake one-shot for (block reset + wake_delay_min). */
+    wake_at?: string;
+    /** Prompt text (starting with RESUME_MARKER) the wake one-shot should re-arm with. */
+    wake_prompt?: string;
 }
 
 export interface Checkpoint {

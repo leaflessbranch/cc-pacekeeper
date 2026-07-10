@@ -81,21 +81,24 @@ function extractJobId(text: string): string | undefined {
 }
 
 /**
- * Reconstruct keepalive state from the transcript (forward in time). A keepalive
- * job is "pending" when the newest marker-carrying CronCreate has not been
- * followed by a CronDelete of the job id it returned.
+ * Reconstruct marker-scoped cron state from the transcript (forward in time).
+ * A job is "pending" when the newest marker-carrying CronCreate has not been
+ * followed by a CronDelete of the job id it returned. Generalized from the
+ * keepalive-only version so the same forward-scan logic serves both the
+ * keepalive marker and RESUME_MARKER (auto-loop wake scheduling) without
+ * duplicating the create→result→delete correlation dance.
  *
  * NOTE: CronCreate's INPUT has no id — the id is only in its tool_result — so we
  * best-effort correlate create→result→delete. When the id can't be recovered we
  * still report hasPending=true (marker present) but leave pendingTaskId unset.
  */
-export function scanKeepaliveState(transcriptPath: string): KeepaliveState {
+export function scanMarkerCreates(transcriptPath: string, marker: string): KeepaliveState {
     let raw: string;
     try { raw = fs.readFileSync(transcriptPath, 'utf8'); } catch { return { hasPending: false }; }
 
-    // First pass forward: collect keepalive CronCreate tool_use ids, and map
-    // every tool_use_id → its result text, and every deleted job id.
-    const keepaliveCreates: { toolUseId?: string; createdAt?: string }[] = [];
+    // First pass forward: collect marker-carrying CronCreate tool_use ids, and
+    // map every tool_use_id → its result text, and every deleted job id.
+    const markerCreates: { toolUseId?: string; createdAt?: string }[] = [];
     const resultByUseId = new Map<string, string>();
     const deletedJobIds = new Set<string>();
 
@@ -108,8 +111,8 @@ export function scanKeepaliveState(transcriptPath: string): KeepaliveState {
         for (const use of uses) {
             if (use.name === 'CronCreate') {
                 const prompt = use.input.prompt;
-                if (typeof prompt === 'string' && prompt.includes(KEEPALIVE_MARKER)) {
-                    keepaliveCreates.push({ toolUseId: use.id, createdAt: ts });
+                if (typeof prompt === 'string' && prompt.includes(marker)) {
+                    markerCreates.push({ toolUseId: use.id, createdAt: ts });
                 }
             } else if (use.name === 'CronDelete') {
                 const id = use.input.id;
@@ -121,14 +124,20 @@ export function scanKeepaliveState(transcriptPath: string): KeepaliveState {
         }
     }
 
-    if (keepaliveCreates.length === 0) return { hasPending: false };
+    if (markerCreates.length === 0) return { hasPending: false };
 
-    // The most recent keepalive create wins.
-    const latest = keepaliveCreates[keepaliveCreates.length - 1]!;
+    // The most recent marker create wins.
+    const latest = markerCreates[markerCreates.length - 1]!;
     const jobId = latest.toolUseId ? extractJobId(resultByUseId.get(latest.toolUseId) ?? '') : undefined;
     if (jobId && deletedJobIds.has(jobId)) return { hasPending: false };
 
     return { hasPending: true, pendingTaskId: jobId, createdAt: latest.createdAt };
+}
+
+/** Keepalive-specific wrapper over scanMarkerCreates, kept for callers/tests
+ * that only care about the keepalive marker. */
+export function scanKeepaliveState(transcriptPath: string): KeepaliveState {
+    return scanMarkerCreates(transcriptPath, KEEPALIVE_MARKER);
 }
 
 /** True when the account is drawing on usage credits and the cache TTL is short
