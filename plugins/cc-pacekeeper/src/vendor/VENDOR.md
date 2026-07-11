@@ -9,10 +9,13 @@ MIT-licensed.
 
 **Modifications from upstream:**
 
-- `usage-fetch.ts`: removed macOS keychain branch (`readUsageTokenFromMacKeychain*`
-  functions and the platform check in `getUsageToken`). cc-pacekeeper targets
-  Linux; falling back to `~/.claude/.credentials.json` is the only path. Cache
-  paths changed from `~/.cache/ccstatusline/` to `~/.cache/cc-pacekeeper/`.
+- `usage-fetch.ts`: macOS keychain support restored (upstream removed during
+  original vendoring, re-added 2026-07 with an injectable `exec` for tests —
+  reads service `Claude Code-credentials`, falls back after the credentials
+  file). Cache paths changed from `~/.cache/ccstatusline/` to
+  `~/.cache/cc-pacekeeper/`. `readUsageCacheFile` gained an optional
+  `verifyTokenHash` option (cc-pacekeeper addition, see Task 6 of the
+  2026-07-11 plan).
 - `usage-types.ts`: copied verbatim.
 - `claude-config-dir.ts`: extracted just `getClaudeConfigDir` from upstream's
   `claude-settings.ts` (rest of that file is install/uninstall TUI logic we
