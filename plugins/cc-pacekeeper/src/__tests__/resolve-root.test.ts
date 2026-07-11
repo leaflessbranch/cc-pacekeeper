@@ -42,6 +42,11 @@ describe('isUnsafeRoot', () => {
         expect(isUnsafeRoot('/tmp/')).toBe(true);
         expect(isUnsafeRoot('/tmp/./sub/..')).toBe(true);
     });
+
+    test('symlinked tmp (e.g. macOS /tmp → /private/tmp) is still unsafe', () => {
+        expect(isUnsafeRoot(fs.realpathSync(os.tmpdir()))).toBe(true);
+        expect(isUnsafeRoot(fs.realpathSync('/tmp'))).toBe(true);
+    });
 });
 
 describe('projectRootFromTranscript', () => {

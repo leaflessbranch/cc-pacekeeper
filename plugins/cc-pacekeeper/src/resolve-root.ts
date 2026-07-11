@@ -26,13 +26,26 @@ import * as path from 'path';
  * too broad to be a real project. Matches the dir itself and anything beneath
  * the tmp roots.
  */
+function realOrResolve(p: string): string {
+    try { return fs.realpathSync(p); } catch {
+        const parent = path.dirname(p);
+        if (parent !== p) {
+            try {
+                const parentReal = fs.realpathSync(parent);
+                return path.join(parentReal, path.basename(p));
+            } catch { /* continue to fallback */ }
+        }
+        return path.resolve(p);
+    }
+}
+
 export function isUnsafeRoot(dir: string): boolean {
-    const resolved = path.resolve(dir);
-    const tmpRoots = [os.tmpdir(), '/tmp'].map(d => path.resolve(d));
+    const resolved = realOrResolve(dir);
+    const tmpRoots = [os.tmpdir(), '/tmp'].map(realOrResolve);
     for (const t of tmpRoots) {
         if (resolved === t || resolved.startsWith(t + path.sep)) return true;
     }
-    const exact = [os.homedir(), path.parse(resolved).root].map(d => path.resolve(d));
+    const exact = [os.homedir(), path.parse(resolved).root].map(realOrResolve);
     return exact.includes(resolved);
 }
 
