@@ -155,6 +155,28 @@ export function loadConfig(): Config {
     return parsed.data;
 }
 
+/**
+ * Validation issues for the on-disk config, for doctor.
+ * null = no config file (defaults in use); non-empty = unparseable or invalid
+ * (defaults in use); [] = file valid after defaults merge.
+ */
+export function configValidationIssues(): string[] | null {
+    let rawText: string;
+    try {
+        rawText = fs.readFileSync(configFile(), 'utf8');
+    } catch {
+        return null; // no config file — defaults in use
+    }
+    let raw: unknown;
+    try {
+        raw = JSON.parse(rawText);
+    } catch {
+        return ['file exists but is not valid JSON'];
+    }
+    const parsed = ConfigSchema.safeParse(deepMergeDefaults(raw, DEFAULT_CONFIG));
+    return parsed.success ? [] : parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`);
+}
+
 export function bootstrapConfigIfMissing(): void {
     const file = configFile();
     if (fs.existsSync(file)) return;

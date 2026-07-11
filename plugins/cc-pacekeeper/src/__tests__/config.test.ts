@@ -114,6 +114,40 @@ describe('loadConfig', () => {
     });
 });
 
+describe('configValidationIssues', () => {
+    test('returns null when no config file exists', async () => {
+        const { configValidationIssues } = await import('../config');
+        expect(configValidationIssues()).toBeNull();
+    });
+
+    test('returns a single issue for invalid JSON', async () => {
+        const { configFile, configValidationIssues } = await import('../config');
+        const file = configFile();
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, '{not json');
+        expect(configValidationIssues()).toEqual(['file exists but is not valid JSON']);
+    });
+
+    test('returns issues for valid JSON with an invalid value', async () => {
+        const { configFile, configValidationIssues } = await import('../config');
+        const file = configFile();
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({ debounce_seconds: -5 }));
+        const issues = configValidationIssues();
+        expect(issues).not.toBeNull();
+        expect(issues).toHaveLength(1);
+        expect(issues?.[0]).toContain('debounce_seconds');
+    });
+
+    test('returns empty array for valid JSON', async () => {
+        const { configFile, configValidationIssues } = await import('../config');
+        const file = configFile();
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({}));
+        expect(configValidationIssues()).toEqual([]);
+    });
+});
+
 describe('isProjectDenied', () => {
     test('matches exact and prefix', async () => {
         const { isProjectDenied, DEFAULT_CONFIG } = await import('../config');

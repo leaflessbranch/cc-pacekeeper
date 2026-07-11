@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { MODEL_INFO_CACHE_FILE, readCachedMaxInputTokens } from '../model-info';
+import { MODEL_INFO_CACHE_FILE, readCachedMaxInputTokens, authHeaders, resolveModelInfoAuth, cachedEntryAgeDays } from '../model-info';
 
 const CACHE_DIR = path.dirname(MODEL_INFO_CACHE_FILE);
 let backupPath: string | null = null;
@@ -52,4 +52,49 @@ describe('readCachedMaxInputTokens', () => {
         }));
         expect(readCachedMaxInputTokens('claude-opus-4-7')).toBeNull();
     });
+});
+
+describe('model-info auth', () => {
+    test('oauth token wins over ANTHROPIC_API_KEY', () => {
+        const auth = resolveModelInfoAuth({ ANTHROPIC_API_KEY: 'sk-ant-test' } as NodeJS.ProcessEnv, () => 'tok-oauth');
+        expect(auth).toEqual({ kind: 'oauth', token: 'tok-oauth' });
+    });
+
+    test('falls back to ANTHROPIC_API_KEY when no oauth token', () => {
+        const auth = resolveModelInfoAuth({ ANTHROPIC_API_KEY: ' sk-ant-test ' } as NodeJS.ProcessEnv, () => null);
+        expect(auth).toEqual({ kind: 'api-key', key: 'sk-ant-test' });
+    });
+
+    test('null when neither oauth token nor api key exists', () => {
+        expect(resolveModelInfoAuth({} as NodeJS.ProcessEnv, () => null)).toBeNull();
+    });
+
+    test('authHeaders shapes', () => {
+        expect(authHeaders({ kind: 'oauth', token: 't' })).toEqual({
+            'Authorization': 'Bearer t',
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': 'oauth-2025-04-20'
+        });
+        expect(authHeaders({ kind: 'api-key', key: 'k' })).toEqual({
+            'x-api-key': 'k',
+            'anthropic-version': '2023-06-01'
+        });
+    });
+});
+
+test('cachedEntryAgeDays reports age from fetched_at', () => {
+    const dir = path.join(os.homedir(), '.cache', 'cc-pacekeeper');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'model-info.json');
+    const backup = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+    try {
+        fs.writeFileSync(file, JSON.stringify({
+            'test-model-x': { max_input_tokens: 200000, fetched_at: new Date(Date.now() - 40 * 86_400_000).toISOString() }
+        }));
+        const age = cachedEntryAgeDays('test-model-x');
+        expect(age).toBeGreaterThan(39);
+        expect(cachedEntryAgeDays('absent-model')).toBeNull();
+    } finally {
+        if (backup !== null) fs.writeFileSync(file, backup); else fs.rmSync(file, { force: true });
+    }
 });

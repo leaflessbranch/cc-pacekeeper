@@ -2,5 +2,10 @@
 # cc-pacekeeper checkpoint CLI: invoked by the /cc-pacekeeper:checkpoint skill.
 # Verbs: save | resume [N] | list [--archived] | cleanup [--older-than Nd] [--apply] | discard [N]
 set -euo pipefail
+if ! command -v bun >/dev/null 2>&1; then
+  echo "cc-pacekeeper: this command needs the Bun runtime, which was not found on PATH." >&2
+  echo "Install it from https://bun.sh (macOS: 'brew install oven-sh/bun/bun'), then re-run." >&2
+  exit 1
+fi
 DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 exec bun run --silent "$DIR/../src/checkpoint-cli.ts" "$@"

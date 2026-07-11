@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_CONFIG } from '../config';
 import { computeSnapshot, formatArbitrageNudge, formatBridgeDirective, formatDirective, formatStatusLine } from '../thresholds';
+import { formatUsageErrorNote, usageErrorNoteToSurface } from '../thresholds';
 
 describe('computeSnapshot', () => {
     test('all meters none when below thresholds', () => {
@@ -218,5 +219,28 @@ describe('formatArbitrageNudge', () => {
 
     test('null for unknown model family', () => {
         expect(formatArbitrageNudge(nudgeable, 'some-other-model')).toBeNull();
+    });
+});
+
+describe('usage error surfacing', () => {
+    test('fires for no-credentials when not yet surfaced this session', () => {
+        expect(usageErrorNoteToSurface({ error: 'no-credentials' }, undefined)).toBe('no-credentials');
+    });
+
+    test('suppressed once surfaced for the same error kind', () => {
+        const entry = { sessionStartedAt: 0, lastEventAt: 0, usageErrorSurfaced: 'no-credentials' };
+        expect(usageErrorNoteToSurface({ error: 'no-credentials' }, entry)).toBeNull();
+    });
+
+    test('a different error kind re-fires despite an earlier surfaced kind', () => {
+        const entry = { sessionStartedAt: 0, lastEventAt: 0, usageErrorSurfaced: 'no-credentials' };
+        expect(usageErrorNoteToSurface({ error: 'timeout' }, entry)).toBe('timeout');
+    });
+
+    test('note text names the failure and preserves the ctx meter promise', () => {
+        const note = formatUsageErrorNote('no-credentials');
+        expect(note).toContain('[pacekeeper]');
+        expect(note).toContain('credentials');
+        expect(note).toContain('context meter still works');
     });
 });

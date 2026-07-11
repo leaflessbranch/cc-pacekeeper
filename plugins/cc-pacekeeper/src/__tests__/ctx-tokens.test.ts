@@ -101,6 +101,25 @@ describe('readMostRecentModel', () => {
     test('returns null when file missing', () => {
         expect(readMostRecentModel('/nonexistent/file.jsonl')).toBeNull();
     });
+
+    test('sidechain assistant rows are skipped — main-thread usage wins', () => {
+        const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-ctx-'));
+        const tp = path.join(tmp, 't.jsonl');
+        const mainRow = JSON.stringify({
+            type: 'assistant',
+            message: { model: 'claude-fable-5', usage: { input_tokens: 100, cache_read_input_tokens: 900 } }
+        });
+        const sidechainRow = JSON.stringify({
+            type: 'assistant', isSidechain: true,
+            message: { model: 'claude-haiku-4-5', usage: { input_tokens: 5 } }
+        });
+        fs.writeFileSync(tp, mainRow + '\n' + sidechainRow + '\n');
+        const r = readContextTokens(tp);
+        expect(r?.contextLength).toBe(1000);
+        expect(r?.model).toBe('claude-fable-5');
+        expect(readMostRecentModel(tp)).toBe('claude-fable-5');
+        fs.rmSync(tmp, { recursive: true, force: true });
+    });
 });
 
 describe('resolveUsableContextWindow', () => {

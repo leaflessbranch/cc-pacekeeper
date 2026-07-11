@@ -1,6 +1,7 @@
 import type { Config, ThresholdLevels } from './config';
 import type { Level, Meter } from './state';
-import type { UsageData } from './vendor/usage-types';
+import type { UsageData, UsageError } from './vendor/usage-types';
+import { modelFamily } from './model-family';
 
 export interface MeterReading {
     meter: Meter;
@@ -231,10 +232,11 @@ const KEEPALIVE_MARKER_HINT = '[pacekeeper-keepalive]';
  * `modelId` picks the current family. Returns null when it doesn't apply.
  */
 export function formatArbitrageNudge(snap: Snapshot, modelId: string | undefined): string | null {
-    if (!modelId) return null;
-    const family: 'sonnet' | 'opus' | null =
-        /opus/i.test(modelId) ? 'opus' : /sonnet/i.test(modelId) ? 'sonnet' : null;
-    if (!family) return null;
+    // Only opus/sonnet have their own weekly bucket to arbitrage against —
+    // haiku/fable/mythos ids now resolve to a family (instead of accidentally
+    // matching nothing) but correctly get no nudge.
+    const family = modelFamily(modelId);
+    if (family !== 'opus' && family !== 'sonnet') return null;
 
     const all = snap.readings.find(r => r.meter === 'weekly');
     const cur = snap.readings.find(r => r.meter === (family === 'opus' ? 'weekly_opus' : 'weekly_sonnet'));
@@ -290,4 +292,33 @@ export function formatDirective(snap: Snapshot): string {
         '  (b) save a checkpoint via /cc-pacekeeper:checkpoint save and resume after reset,',
         '  (c) keep going if confident the next step is small.'
     ].join('\n');
+}
+
+export const USAGE_ERROR_HINTS: Record<UsageError, string> = {
+    'no-credentials': 'no OAuth credentials found (checked ~/.claude/.credentials.json'
+        + (process.platform === 'darwin' ? ' and the macOS Keychain — if a Keychain prompt appeared, choose Always Allow' : '')
+        + "). 5h/weekly meters are off; the context meter still works. Diagnose via the /cc-pacekeeper:checkpoint skill's doctor verb.",
+    'timeout': 'usage API timed out; 5h/weekly meters resume when a fetch succeeds. The context meter still works.',
+    'rate-limited': 'usage API rate-limited; 5h/weekly meters resume after backoff. The context meter still works.',
+    'api-error': 'usage API returned an error; 5h/weekly meters resume when a fetch succeeds. The context meter still works.',
+    'parse-error': 'usage API response was unparsable; 5h/weekly meters may lag. The context meter still works.'
+};
+
+export function formatUsageErrorNote(err: UsageError): string {
+    return `[pacekeeper] usage meters unavailable: ${USAGE_ERROR_HINTS[err]}`;
+}
+
+/**
+ * Once-per-session gate for the usage-error note. usage.error can only be
+ * non-null on a SessionStart tick (the disk cache is written only on
+ * success), so this fires at most once per session key per error kind —
+ * repeat SessionStarts in one session (resume, compact) stay suppressed.
+ */
+export function usageErrorNoteToSurface(
+    usage: UsageData | null,
+    entry: { usageErrorSurfaced?: string } | undefined
+): UsageError | null {
+    if (!usage?.error) return null;
+    if (entry?.usageErrorSurfaced === usage.error) return null;
+    return usage.error;
 }

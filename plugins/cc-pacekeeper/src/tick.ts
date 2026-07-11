@@ -10,6 +10,8 @@ import {
     formatDirective,
     formatMeterSegment,
     formatStatusLine,
+    formatUsageErrorNote,
+    usageErrorNoteToSurface,
     type Snapshot
 } from './thresholds';
 import { keepaliveDirective, scanKeepaliveState, scanMarkerCreates, pingGate, KEEPALIVE_MARKER } from './keepalive';
@@ -150,11 +152,14 @@ async function main(): Promise<void> {
     const usableWindow = resolveUsableContextWindow(model, cfg.context_window_size);
     const ctxPct = ctxTokens ? contextPercent(ctxTokens.contextLength, usableWindow) : null;
 
-    let usage: UsageData | null = readUsageCacheFile();
-    if (event === 'SessionStart' && hasStaleReset(usage)) {
+    let usage: UsageData | null = readUsageCacheFile({ verifyTokenHash: event === 'SessionStart' });
+    if (event === 'SessionStart' && (usage === null || hasStaleReset(usage))) {
         // Last block ended while no Claude session was running, so nothing
         // refreshed the cache. Force a synchronous refetch before computing
         // the snapshot — SessionStart fires once, latency is acceptable.
+        // For users with no credentials the cache never exists, so this
+        // re-runs each SessionStart — bounded by the fetch timeout and
+        // acceptable at session granularity.
         try {
             usage = await fetchUsageData();
         } catch {
@@ -163,6 +168,21 @@ async function main(): Promise<void> {
     }
 
     const snap = computeSnapshot({ contextPercent: ctxPct, usage }, cfg);
+
+    // ── [Improvement 2] Once-per-session usage-unavailability note.
+    //    usage.error can only be non-null on the SessionStart tick that ran
+    //    the synchronous fetch above (the disk cache is never written
+    //    error-shaped), so this is SessionStart-only by construction; the
+    //    session-state gate additionally debounces repeat SessionStarts
+    //    (resume/compact). Main thread only. ──
+    let usageErrorNote: string | null = null;
+    if (isMainThread && event === 'SessionStart') {
+        const errKind = usageErrorNoteToSurface(usage, sessionEntry);
+        if (errKind) {
+            usageErrorNote = formatUsageErrorNote(errKind);
+            updateSession(key, nowMs, { usageErrorSurfaced: errKind });
+        }
+    }
 
     // ── Decide injection based on event type. ──
     const nowSec = Math.floor(Date.now() / 1000);
@@ -208,6 +228,9 @@ async function main(): Promise<void> {
             injection = formatStatusLine(snap);
             // Update debounce state without spamming.
             updateAllDebounce(key, snap, nowSec, cfg.debounce_seconds);
+        }
+        if (usageErrorNote) {
+            injection = [injection, usageErrorNote].filter(s => s !== '').join('\n\n');
         }
     } else if (event === 'UserPromptSubmit') {
         // RESUME_MARKER prompts are the real work trigger after an auto-wake:

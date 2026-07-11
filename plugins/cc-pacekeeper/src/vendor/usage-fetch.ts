@@ -4,10 +4,10 @@
 // Upstream: src/utils/usage-fetch.ts @ 151521ca6e
 //
 // Modifications:
-//   - Removed macOS keychain branch (cc-pacekeeper targets Linux).
-//     `getUsageToken` only reads ~/.claude/.credentials.json.
+//   - macOS keychain branch restored (re-added 2026-07; see VENDOR.md).
 //   - CACHE_DIR moved to ~/.cache/cc-pacekeeper/.
 
+import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as https from 'https';
@@ -243,8 +243,46 @@ function readUsageTokenFromCredentialsFile(): string | null {
     }
 }
 
+/**
+ * cc-pacekeeper modification: restored macOS Keychain support (upstream had
+ * it; the original vendoring stripped it). Claude Code on macOS stores the
+ * OAuth credential blob under the Keychain service "Claude Code-credentials"
+ * instead of ~/.claude/.credentials.json. `exec` is injectable for tests.
+ * NOTE: the first read may show a macOS prompt asking to allow `bun` access
+ * to the item — the user should click "Always Allow" once.
+ */
+export function readUsageTokenFromMacKeychain(
+    exec: (cmd: string, args: string[], opts: object) => string | Buffer = execFileSync
+): string | null {
+    try {
+        const out = exec('security',
+            ['find-generic-password', '-a', os.userInfo().username, '-w', '-s', 'Claude Code-credentials'],
+            { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+        return parseUsageAccessToken(String(out).trim());
+    } catch {
+        return null;
+    }
+}
+
+// Memoized per process: hook processes handle exactly one tick and then
+// exit, so caching the first read is always correct at runtime, and it caps
+// the keychain `security` subprocess at one run per tick.
+let usageTokenCache: { value: string | null } | null = null;
+
 export function getUsageToken(): string | null {
-    return readUsageTokenFromCredentialsFile();
+    if (usageTokenCache) return usageTokenCache.value;
+    const fromFile = readUsageTokenFromCredentialsFile();
+    const value = fromFile ? fromFile : (process.platform === 'darwin' ? readUsageTokenFromMacKeychain() : null);
+    usageTokenCache = { value };
+    return value;
+}
+
+/**
+ * Test-only: clears the memoized token so a test can force a fresh read.
+ * Runtime never needs this — each hook process dies after one tick.
+ */
+export function clearUsageTokenCacheForTests(): void {
+    usageTokenCache = null;
 }
 
 function readStaleUsageCache(currentTokenHash: string | null): UsageData | null {
@@ -494,9 +532,14 @@ export async function fetchUsageData(options: FetchUsageDataOptions = {}): Promi
  * hot paths where we never want to block on the network. Returns null if the
  * cache is missing or unparseable.
  */
-export function readUsageCacheFile(): UsageData | null {
+export function readUsageCacheFile(opts: { verifyTokenHash?: boolean } = {}): UsageData | null {
     try {
         const raw = fs.readFileSync(CACHE_FILE, 'utf8');
+        if (opts.verifyTokenHash) {
+            const token = getUsageToken();
+            const currentHash = token ? fingerprintUsageToken(token) : null;
+            if (!tokenHashMatches(readCachedTokenHash(raw), currentHash)) return null;
+        }
         return parseCachedUsageData(raw);
     } catch {
         return null;

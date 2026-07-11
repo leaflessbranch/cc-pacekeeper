@@ -3,7 +3,7 @@ import { bootstrapConfigIfMissing, loadConfig } from './config';
 import { fetchUsageData, getUsageCacheFileAgeSeconds } from './vendor/usage-fetch';
 import { readStdinJson } from './hook-io';
 import { readMostRecentModel } from './ctx-tokens';
-import { fetchAndCacheMaxInputTokens, readCachedMaxInputTokens } from './model-info';
+import { fetchAndCacheMaxInputTokens, readCachedMaxInputTokens, cachedEntryAgeDays, MODEL_INFO_REFRESH_AFTER_DAYS } from './model-info';
 
 /**
  * Detached refresh script — runs in the background after PostToolUse. Self-gates
@@ -22,7 +22,9 @@ async function main(): Promise<void> {
     const stdin = await readStdinJson();
     const model = stdin.model
         ?? (stdin.transcript_path ? readMostRecentModel(stdin.transcript_path) : null);
-    if (model && readCachedMaxInputTokens(model) === null) {
+    const modelAge = model ? cachedEntryAgeDays(model) : null;
+    if (model && (readCachedMaxInputTokens(model) === null
+        || (modelAge !== null && modelAge > MODEL_INFO_REFRESH_AFTER_DAYS))) {
         try { await fetchAndCacheMaxInputTokens(model); } catch { /* swallow */ }
     }
 
