@@ -47,6 +47,11 @@ describe('isUnsafeRoot', () => {
         expect(isUnsafeRoot(fs.realpathSync(os.tmpdir()))).toBe(true);
         expect(isUnsafeRoot(fs.realpathSync('/tmp'))).toBe(true);
     });
+
+    test('multi-level missing paths under symlinked tmp are still unsafe', () => {
+        expect(isUnsafeRoot('/tmp/pace-missing-a/b/c')).toBe(true);
+        expect(isUnsafeRoot(path.join(os.tmpdir(), 'pace-missing-x', 'y'))).toBe(true);
+    });
 });
 
 describe('projectRootFromTranscript', () => {

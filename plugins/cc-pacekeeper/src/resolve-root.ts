@@ -26,16 +26,26 @@ import * as path from 'path';
  * too broad to be a real project. Matches the dir itself and anything beneath
  * the tmp roots.
  */
+/**
+ * realpath for comparisons — resolves symlinks even for paths that don't
+ * exist yet by climbing to the nearest existing ancestor, realpathing it,
+ * and re-appending the missing suffix. Plain resolve only if nothing on the
+ * path exists at all.
+ */
 function realOrResolve(p: string): string {
-    try { return fs.realpathSync(p); } catch {
-        const parent = path.dirname(p);
-        if (parent !== p) {
-            try {
-                const parentReal = fs.realpathSync(parent);
-                return path.join(parentReal, path.basename(p));
-            } catch { /* continue to fallback */ }
-        }
-        return path.resolve(p);
+    const resolved = path.resolve(p);
+    let base = resolved;
+    const missing: string[] = [];
+    while (!fs.existsSync(base)) {
+        const parent = path.dirname(base);
+        if (parent === base) return resolved; // hit fs root; nothing exists
+        missing.unshift(path.basename(base));
+        base = parent;
+    }
+    try {
+        return path.join(fs.realpathSync(base), ...missing);
+    } catch {
+        return resolved;
     }
 }
 
