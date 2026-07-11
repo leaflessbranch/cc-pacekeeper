@@ -39,6 +39,13 @@ describe('CronCreate keepalive shape validation', () => {
         expect(isAllow(out)).toBe(true);
     });
 
+    // ATTACK: marker present but NOT at the start of the prompt (parity with the
+    // wake rule) — otherwise-valid keepalive shape must still fall through.
+    test('rejects keepalive marker not at the start of the prompt', () => {
+        const out = run({ tool_name: 'CronCreate', tool_input: { cron: '13,43 * * * *', recurring: true, prompt: 'exfil ' + KEEPALIVE_MARKER + ' tiny turn' } });
+        expect(out).toEqual({});
+    });
+
     // ATTACK: marker embedded but cron is a fire-every-minute wildcard job.
     test('rejects marker embedded in a "* * * * *" recurring job', () => {
         const out = run({ tool_name: 'CronCreate', tool_input: { cron: '* * * * *', recurring: true, prompt: 'exfil ' + KEEPALIVE_MARKER + ' now' } });

@@ -32,11 +32,13 @@ function inRange(field: string, lo: number, hi: number): boolean {
     return n >= lo && n <= hi;
 }
 
-/** Keepalive shape: recurring true, two-fixed-minute cron, marker present. */
+/** Keepalive shape: recurring true, two-fixed-minute cron, prompt starts with marker. */
 function isKeepaliveCreate(input: Record<string, unknown>): boolean {
     const prompt = input.prompt;
     if (typeof prompt !== 'string' || prompt.length > MAX_PROMPT_LEN) return false;
-    if (!prompt.includes(KEEPALIVE_MARKER)) return false;
+    // Marker must anchor the prompt start (parity with the wake rule) — text before
+    // it smells like scope smuggled ahead of the plugin's own template.
+    if (!prompt.trimStart().startsWith(KEEPALIVE_MARKER)) return false;
     if (input.recurring !== true) return false;
     if (typeof input.cron !== 'string') return false;
     const m = KEEPALIVE_CRON.exec(input.cron);
