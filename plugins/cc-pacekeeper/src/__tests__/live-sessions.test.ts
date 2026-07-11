@@ -50,4 +50,12 @@ describe('liveSessionCount', () => {
         const { liveSessionCount } = await import('../live-sessions');
         expect(liveSessionCount()).toBe(0);
     });
+
+    test('zero, negative, and fractional pids never count as alive', async () => {
+        const { liveSessionCount } = await import('../live-sessions');
+        write('zero.json', { pid: 0 });
+        write('neg.json', { pid: -5 });
+        write('frac.json', { pid: 1.5 });
+        expect(liveSessionCount()).toBe(0);
+    });
 });
