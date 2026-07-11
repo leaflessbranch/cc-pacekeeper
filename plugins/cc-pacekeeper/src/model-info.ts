@@ -69,8 +69,11 @@ export type ModelInfoAuth = { kind: 'oauth'; token: string } | { kind: 'api-key'
 
 /** OAuth (subscription) first; ANTHROPIC_API_KEY as fallback so API-key-only
  *  setups still resolve real context windows instead of the 200k default. */
-export function resolveModelInfoAuth(env: NodeJS.ProcessEnv = process.env): ModelInfoAuth | null {
-    const token = getUsageToken();
+export function resolveModelInfoAuth(
+    env: NodeJS.ProcessEnv = process.env,
+    getToken: () => string | null = getUsageToken
+): ModelInfoAuth | null {
+    const token = getToken();
     if (token) return { kind: 'oauth', token };
     const key = env.ANTHROPIC_API_KEY?.trim();
     return key ? { kind: 'api-key', key } : null;

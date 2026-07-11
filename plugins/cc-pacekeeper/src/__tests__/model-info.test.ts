@@ -55,16 +55,18 @@ describe('readCachedMaxInputTokens', () => {
 });
 
 describe('model-info auth', () => {
-    test('api-key fallback when no OAuth token and ANTHROPIC_API_KEY set', () => {
-        // No CLAUDE_CONFIG_DIR credentials in this env path
-        process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-noauth-'));
-        const auth = resolveModelInfoAuth({ ANTHROPIC_API_KEY: 'sk-ant-test' } as NodeJS.ProcessEnv);
-        // On darwin the keychain may yield a real token; accept either source
-        if (auth?.kind === 'api-key') {
-            expect(auth.key).toBe('sk-ant-test');
-        } else {
-            expect(auth?.kind).toBe('oauth');
-        }
+    test('oauth token wins over ANTHROPIC_API_KEY', () => {
+        const auth = resolveModelInfoAuth({ ANTHROPIC_API_KEY: 'sk-ant-test' } as NodeJS.ProcessEnv, () => 'tok-oauth');
+        expect(auth).toEqual({ kind: 'oauth', token: 'tok-oauth' });
+    });
+
+    test('falls back to ANTHROPIC_API_KEY when no oauth token', () => {
+        const auth = resolveModelInfoAuth({ ANTHROPIC_API_KEY: ' sk-ant-test ' } as NodeJS.ProcessEnv, () => null);
+        expect(auth).toEqual({ kind: 'api-key', key: 'sk-ant-test' });
+    });
+
+    test('null when neither oauth token nor api key exists', () => {
+        expect(resolveModelInfoAuth({} as NodeJS.ProcessEnv, () => null)).toBeNull();
     });
 
     test('authHeaders shapes', () => {
