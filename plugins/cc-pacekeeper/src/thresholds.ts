@@ -1,6 +1,7 @@
 import type { Config, ThresholdLevels } from './config';
 import type { Level, Meter } from './state';
 import type { UsageData } from './vendor/usage-types';
+import { modelFamily } from './model-family';
 
 export interface MeterReading {
     meter: Meter;
@@ -231,10 +232,11 @@ const KEEPALIVE_MARKER_HINT = '[pacekeeper-keepalive]';
  * `modelId` picks the current family. Returns null when it doesn't apply.
  */
 export function formatArbitrageNudge(snap: Snapshot, modelId: string | undefined): string | null {
-    if (!modelId) return null;
-    const family: 'sonnet' | 'opus' | null =
-        /opus/i.test(modelId) ? 'opus' : /sonnet/i.test(modelId) ? 'sonnet' : null;
-    if (!family) return null;
+    // Only opus/sonnet have their own weekly bucket to arbitrage against —
+    // haiku/fable/mythos ids now resolve to a family (instead of accidentally
+    // matching nothing) but correctly get no nudge.
+    const family = modelFamily(modelId);
+    if (family !== 'opus' && family !== 'sonnet') return null;
 
     const all = snap.readings.find(r => r.meter === 'weekly');
     const cur = snap.readings.find(r => r.meter === (family === 'opus' ? 'weekly_opus' : 'weekly_sonnet'));
