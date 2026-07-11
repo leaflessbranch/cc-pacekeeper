@@ -1,8 +1,8 @@
 /**
- * Model-family detection, shared by the weekly-arbitrage nudge and doctor.
- * One table to extend when Anthropic ships a new family — the usage API's
- * per-family weekly buckets exist only for opus/sonnet today, so families
- * outside FAMILIES_WITH_WEEKLY_BUCKET simply never get an arbitrage nudge.
+ * Model-family detection for the weekly-arbitrage nudge. One table to extend
+ * when Anthropic ships a new family — the usage API's per-family weekly
+ * buckets exist only for opus/sonnet today, so other families resolve here
+ * but never get an arbitrage nudge (thresholds.ts filters to opus/sonnet).
  */
 
 export const MODEL_FAMILIES = ['opus', 'sonnet', 'haiku', 'fable', 'mythos'] as const;
