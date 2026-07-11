@@ -4,6 +4,12 @@
 # The refresh script self-gates on cache staleness (>180s) so spawning every
 # call is harmless.
 set -euo pipefail
+# Hooks must never break Claude's workflow: without Bun, no-op cleanly.
+if ! command -v bun >/dev/null 2>&1; then
+  echo "cc-pacekeeper: Bun not found on PATH — hooks are inert. Install it (https://bun.sh, e.g. 'brew install oven-sh/bun/bun') and restart Claude Code." >&2
+  echo '{}'
+  exit 0
+fi
 DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 # Capture stdin to a temp file so the detached refresh can read the PostToolUse
 # payload (model / transcript_path) to populate the per-model context-window
