@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { MODEL_INFO_CACHE_FILE, readCachedMaxInputTokens, authHeaders, resolveModelInfoAuth } from '../model-info';
+import { MODEL_INFO_CACHE_FILE, readCachedMaxInputTokens, authHeaders, resolveModelInfoAuth, cachedEntryAgeDays } from '../model-info';
 
 const CACHE_DIR = path.dirname(MODEL_INFO_CACHE_FILE);
 let backupPath: string | null = null;
@@ -80,4 +80,21 @@ describe('model-info auth', () => {
             'anthropic-version': '2023-06-01'
         });
     });
+});
+
+test('cachedEntryAgeDays reports age from fetched_at', () => {
+    const dir = path.join(os.homedir(), '.cache', 'cc-pacekeeper');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'model-info.json');
+    const backup = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+    try {
+        fs.writeFileSync(file, JSON.stringify({
+            'test-model-x': { max_input_tokens: 200000, fetched_at: new Date(Date.now() - 40 * 86_400_000).toISOString() }
+        }));
+        const age = cachedEntryAgeDays('test-model-x');
+        expect(age).toBeGreaterThan(39);
+        expect(cachedEntryAgeDays('absent-model')).toBeNull();
+    } finally {
+        if (backup !== null) fs.writeFileSync(file, backup); else fs.rmSync(file, { force: true });
+    }
 });

@@ -152,7 +152,7 @@ async function main(): Promise<void> {
     const usableWindow = resolveUsableContextWindow(model, cfg.context_window_size);
     const ctxPct = ctxTokens ? contextPercent(ctxTokens.contextLength, usableWindow) : null;
 
-    let usage: UsageData | null = readUsageCacheFile();
+    let usage: UsageData | null = readUsageCacheFile({ verifyTokenHash: event === 'SessionStart' });
     if (event === 'SessionStart' && (usage === null || hasStaleReset(usage))) {
         // Last block ended while no Claude session was running, so nothing
         // refreshed the cache. Force a synchronous refetch before computing

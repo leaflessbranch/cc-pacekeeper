@@ -142,4 +142,15 @@ export async function fetchAndCacheMaxInputTokens(modelId: string): Promise<numb
     return result.maxInputTokens;
 }
 
+/** Age in days of a cached entry, or null if absent/undated. Used by the
+ *  background refresh to re-verify "eternal" entries every ~30 days. */
+export function cachedEntryAgeDays(modelId: string): number | null {
+    const entry = readCache()[modelId];
+    if (!entry) return null;
+    const t = Date.parse(entry.fetched_at);
+    return Number.isFinite(t) ? (Date.now() - t) / 86_400_000 : null;
+}
+
+export const MODEL_INFO_REFRESH_AFTER_DAYS = 30;
+
 export const MODEL_INFO_CACHE_FILE = CACHE_FILE;

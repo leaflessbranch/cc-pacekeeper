@@ -518,9 +518,14 @@ export async function fetchUsageData(options: FetchUsageDataOptions = {}): Promi
  * hot paths where we never want to block on the network. Returns null if the
  * cache is missing or unparseable.
  */
-export function readUsageCacheFile(): UsageData | null {
+export function readUsageCacheFile(opts: { verifyTokenHash?: boolean } = {}): UsageData | null {
     try {
         const raw = fs.readFileSync(CACHE_FILE, 'utf8');
+        if (opts.verifyTokenHash) {
+            const token = getUsageToken();
+            const currentHash = token ? fingerprintUsageToken(token) : null;
+            if (!tokenHashMatches(readCachedTokenHash(raw), currentHash)) return null;
+        }
         return parseCachedUsageData(raw);
     } catch {
         return null;
