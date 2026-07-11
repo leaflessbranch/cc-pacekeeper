@@ -2,7 +2,7 @@
 
 A Claude Code plugin that hands monitoring of context window, 5-hour session block, and weekly usage limits over to Claude itself — so it can pace, warn, and checkpoint work before hitting a wall.
 
-**Status:** v0.4.4 — budget-aware subagent trees with pause/handoff files, autonomous 5h-block renewal (auto-save + scheduled auto-wake), context auto-save, plus everything from 0.3: named checkpoint lanes, time & AFK awareness, cross-session budget awareness, worktree-aware checkpoints, and AFK cache keepalive. See the [changelog](CHANGELOG.md).
+**Status:** v0.5.0 — macOS Keychain OAuth reading, self-diagnosis (doctor verb + silent-failure surfacing), graceful degradation (no-op hooks when Bun missing), model-family tracking, plus everything from 0.4: budget-aware subagent trees with pause/handoff files, autonomous 5h-block renewal (auto-save + scheduled auto-wake), context auto-save. See the [changelog](CHANGELOG.md).
 
 ![cc-pacekeeper in action](docs/demo.gif)
 
@@ -38,6 +38,13 @@ Plus **extra-usage credits** state, so when limits approach Claude can ask wheth
 - **Context auto-save** — at ctx critical, an immediate no-asking checkpoint save, re-armed per compaction cycle. Combined with the 5h directive when both fire at once.
 - **Dispatch advisory** — a one-line caution (never a denial) before spawning agent trees when the 5h block is already tight.
 
+### New in v0.5
+
+- **macOS support** — OAuth credentials are now also read from the macOS Keychain, so the 5h/weekly meters work on Macs (previously silently absent).
+- **Self-diagnosis** — if usage meters can't be read, Claude is told *why* once per session instead of the meters just vanishing, and `pacekeeper-checkpoint doctor` checks the whole environment (runtime, credentials, caches, config) with fixes.
+- **Graceful degradation** — hooks no-op cleanly with an install hint if Bun is missing, instead of erroring on every event.
+- **Better model tracking** — model-family detection covers Haiku/Fable/Mythos, per-model context windows resolve via `ANTHROPIC_API_KEY` when no subscription token exists, and subagent transcript rows no longer skew the context meter.
+
 ## Install
 
 ```
@@ -45,7 +52,7 @@ Plus **extra-usage credits** state, so when limits approach Claude can ask wheth
 /plugin install cc-pacekeeper@cc-pacekeeper
 ```
 
-Requires [Claude Code](https://claude.com/claude-code) and [Bun](https://bun.sh) on PATH.
+Requires [Claude Code](https://claude.com/claude-code) and [Bun](https://bun.sh) on PATH. On macOS, the first usage fetch may show a Keychain prompt for `bun` — choose "Always Allow" so the 5h/weekly meters can read Claude Code's OAuth credential.
 
 ## Usage
 
