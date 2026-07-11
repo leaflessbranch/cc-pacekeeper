@@ -46,6 +46,7 @@ describe('getUsageToken source order', () => {
 
 describe('readUsageCacheFile verifyTokenHash', () => {
     test('mismatched tokenHash returns null only when verification requested', () => {
+        const ORIGINAL = process.env.CLAUDE_CONFIG_DIR;
         const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-hash-'));
         process.env.CLAUDE_CONFIG_DIR = tmp;
         fs.writeFileSync(path.join(tmp, '.credentials.json'),
@@ -59,6 +60,8 @@ describe('readUsageCacheFile verifyTokenHash', () => {
             expect(readUsageCacheFile()?.sessionUsage).toBe(42);                       // lenient default
             expect(readUsageCacheFile({ verifyTokenHash: true })).toBeNull();          // strict on request
         } finally {
+            if (ORIGINAL === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+            else process.env.CLAUDE_CONFIG_DIR = ORIGINAL;
             if (backup !== null) fs.writeFileSync(cacheFile, backup); else fs.rmSync(cacheFile, { force: true });
             fs.rmSync(tmp, { recursive: true, force: true });
         }
