@@ -67,6 +67,7 @@ export async function runDoctor(opts: { network?: boolean } = {}): Promise<Docto
             ? { name: 'usage cache', severity: 'warn', detail: `live fetch failed: ${live.error} — ${USAGE_ERROR_HINTS[live.error]}` }
             : { name: 'usage cache', severity: 'ok', detail: `live fetch ok (5h ${live.sessionUsage ?? '?'}%, week ${live.weeklyUsage ?? '?'}%)` });
     } else if (cached && age !== null) {
+        // cached.error is never written to disk today — defensive display only.
         checks.push({ name: 'usage cache', severity: 'ok', detail: `present, ${age}s old${cached.error ? `, last error: ${cached.error}` : ''}` });
     } else {
         checks.push({ name: 'usage cache', severity: token ? 'warn' : 'fail', detail: 'never written — no successful usage fetch yet (run `doctor --network` to try one now)' });

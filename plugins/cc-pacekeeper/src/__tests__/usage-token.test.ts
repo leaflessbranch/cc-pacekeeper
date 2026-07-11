@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { getUsageToken, readUsageTokenFromMacKeychain, readUsageCacheFile } from '../vendor/usage-fetch';
+import { getUsageToken, readUsageTokenFromMacKeychain, readUsageCacheFile, clearUsageTokenCacheForTests } from '../vendor/usage-fetch';
 
 const CRED_BLOB = JSON.stringify({ claudeAiOauth: { accessToken: 'tok-123' } });
 
@@ -28,6 +28,7 @@ describe('getUsageToken source order', () => {
     const ORIGINAL = process.env.CLAUDE_CONFIG_DIR;
 
     beforeEach(() => {
+        clearUsageTokenCacheForTests();
         tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-cred-'));
         process.env.CLAUDE_CONFIG_DIR = tmp;
     });
@@ -44,8 +45,36 @@ describe('getUsageToken source order', () => {
     });
 });
 
+describe('getUsageToken memoization', () => {
+    let tmp: string;
+    const ORIGINAL = process.env.CLAUDE_CONFIG_DIR;
+
+    beforeEach(() => {
+        clearUsageTokenCacheForTests();
+        tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-memo-'));
+        process.env.CLAUDE_CONFIG_DIR = tmp;
+    });
+    afterEach(() => {
+        if (ORIGINAL === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+        else process.env.CLAUDE_CONFIG_DIR = ORIGINAL;
+        fs.rmSync(tmp, { recursive: true, force: true });
+    });
+
+    test('caches the first read for the life of the process', () => {
+        const credFile = path.join(tmp, '.credentials.json');
+        fs.writeFileSync(credFile, JSON.stringify({ claudeAiOauth: { accessToken: 'memo-tok' } }));
+        expect(getUsageToken()).toBe('memo-tok');
+
+        fs.rmSync(credFile);
+        // Memoized: still 'memo-tok' even though the credentials file (and,
+        // on darwin, whatever the keychain would return) is now gone.
+        expect(getUsageToken()).toBe('memo-tok');
+    });
+});
+
 describe('readUsageCacheFile verifyTokenHash', () => {
     test('mismatched tokenHash returns null only when verification requested', () => {
+        clearUsageTokenCacheForTests();
         const ORIGINAL = process.env.CLAUDE_CONFIG_DIR;
         const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-hash-'));
         process.env.CLAUDE_CONFIG_DIR = tmp;

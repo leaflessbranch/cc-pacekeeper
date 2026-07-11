@@ -264,11 +264,25 @@ export function readUsageTokenFromMacKeychain(
     }
 }
 
+// Memoized per process: hook processes handle exactly one tick and then
+// exit, so caching the first read is always correct at runtime, and it caps
+// the keychain `security` subprocess at one run per tick.
+let usageTokenCache: { value: string | null } | null = null;
+
 export function getUsageToken(): string | null {
+    if (usageTokenCache) return usageTokenCache.value;
     const fromFile = readUsageTokenFromCredentialsFile();
-    if (fromFile) return fromFile;
-    if (process.platform === 'darwin') return readUsageTokenFromMacKeychain();
-    return null;
+    const value = fromFile ? fromFile : (process.platform === 'darwin' ? readUsageTokenFromMacKeychain() : null);
+    usageTokenCache = { value };
+    return value;
+}
+
+/**
+ * Test-only: clears the memoized token so a test can force a fresh read.
+ * Runtime never needs this — each hook process dies after one tick.
+ */
+export function clearUsageTokenCacheForTests(): void {
+    usageTokenCache = null;
 }
 
 function readStaleUsageCache(currentTokenHash: string | null): UsageData | null {

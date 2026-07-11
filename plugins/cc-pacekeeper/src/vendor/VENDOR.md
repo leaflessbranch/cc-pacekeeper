@@ -15,7 +15,8 @@ MIT-licensed.
   file). Cache paths changed from `~/.cache/ccstatusline/` to
   `~/.cache/cc-pacekeeper/`. `readUsageCacheFile` gained an optional
   `verifyTokenHash` option (cc-pacekeeper addition, see Task 6 of the
-  2026-07-11 plan).
+  2026-07-11 plan). `getUsageToken` is memoized per process (hook processes
+  are single-tick) to cap keychain probes at one per tick.
 - `usage-types.ts`: copied verbatim.
 - `claude-config-dir.ts`: extracted just `getClaudeConfigDir` from upstream's
   `claude-settings.ts` (rest of that file is install/uninstall TUI logic we

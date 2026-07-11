@@ -297,7 +297,7 @@ export function formatDirective(snap: Snapshot): string {
 export const USAGE_ERROR_HINTS: Record<UsageError, string> = {
     'no-credentials': 'no OAuth credentials found (checked ~/.claude/.credentials.json'
         + (process.platform === 'darwin' ? ' and the macOS Keychain — if a Keychain prompt appeared, choose Always Allow' : '')
-        + '). 5h/weekly meters are off; the context meter still works. Run `pacekeeper-checkpoint doctor` to diagnose.',
+        + "). 5h/weekly meters are off; the context meter still works. Diagnose via the /cc-pacekeeper:checkpoint skill's doctor verb.",
     'timeout': 'usage API timed out; 5h/weekly meters resume when a fetch succeeds. The context meter still works.',
     'rate-limited': 'usage API rate-limited; 5h/weekly meters resume after backoff. The context meter still works.',
     'api-error': 'usage API returned an error; 5h/weekly meters resume when a fetch succeeds. The context meter still works.',

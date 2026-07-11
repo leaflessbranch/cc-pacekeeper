@@ -4,10 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.5.0
+## [0.5.0]
 
 Runs-for-every-user release: portability + self-diagnosis.
 
+### Added
 - **macOS support**: OAuth credentials are now also read from the macOS
   Keychain (service `Claude Code-credentials`) — 5h/weekly meters previously
   never worked on macOS. First access may show a Keychain prompt for `bun`;
@@ -18,6 +19,8 @@ Runs-for-every-user release: portability + self-diagnosis.
   credentials, caches, config validity, and the context-window override.
 - **Graceful degradation**: hook shims no-op cleanly (with an install hint)
   when Bun is missing instead of erroring on every event.
+
+### Fixed
 - **Model tracking**: shared model-family table (opus/sonnet/haiku/fable/
   mythos) behind the weekly arbitrage nudge; `ANTHROPIC_API_KEY` fallback
   for per-model context-window fetches; sidechain transcript rows no longer

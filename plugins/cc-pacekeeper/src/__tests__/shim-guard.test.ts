@@ -3,8 +3,9 @@ import { spawnSync } from 'child_process';
 import * as path from 'path';
 
 const BIN = path.join(import.meta.dir, '..', '..', 'bin');
-// PATH with coreutils but (almost certainly) no bun. If bun IS in /usr/bin
-// on some machine, the guard simply doesn't trigger and we skip.
+// PATH with coreutils but (almost certainly) no bun. If bun ever exists in
+// /usr/bin:/bin on some machine these assertions would fail loudly rather
+// than skip — acceptable: no standard install puts bun there.
 const NO_BUN_PATH = '/usr/bin:/bin';
 
 function run(shim: string) {
