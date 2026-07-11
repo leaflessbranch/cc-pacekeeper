@@ -508,7 +508,8 @@ function verbHelp(): void {
         '  handoffs archive <agent_id>',
         '                        Move a handoff to handoffs/archive/ once its work is absorbed.',
         '',
-        '  doctor [--network]    Check the plugin\'s environment: runtime, credentials,',
+        '  doctor [--network] [--transcript <path>]',
+        '                        Check the plugin\'s environment: runtime, credentials,',
         '                        usage cache, config validity, window override, state dirs.',
         '',
         '  help                  Show this message.',
@@ -529,7 +530,7 @@ async function main(): Promise<void> {
     }
 
     if (args.verb === 'doctor') {
-        const checks = await runDoctor({ network: args.flags.network === true });
+        const checks = await runDoctor({ network: args.flags.network === true, transcript: typeof args.flags.transcript === 'string' ? args.flags.transcript : undefined });
         process.stdout.write(formatDoctorReport(checks) + '\n');
         process.exitCode = checks.some(c => c.severity === 'fail') ? 1 : 0;
         return;
