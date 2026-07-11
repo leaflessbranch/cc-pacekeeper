@@ -4,7 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0]
+
+Hardening release: injection-proof cron auto-approval, macOS bug fixes, CI, richer doctor.
+
+### Security
+
+- **Cron auto-approval validates the full payload, not marker presence** — previously any `CronCreate` whose prompt merely *contained* a pacekeeper marker was auto-approved, so untrusted content the agent ingests could get an attacker-authored scheduled job approved without a prompt. Now keepalive creates must match the exact template (recurring, two-fixed-minute cron, marker at prompt start, length-capped) and wake one-shots must pin minute/hour/day-of-month/month with the resume marker as prompt prefix. `CronDelete` is id-scoped to jobs the plugin itself scheduled (recovered from the transcript); the old "unrecoverable id → approve blind" branch is removed. Everything non-matching falls through to the normal permission prompt — the hook never denies.
 
 ### Fixed
 

@@ -45,6 +45,13 @@ Plus **extra-usage credits** state, so when limits approach Claude can ask wheth
 - **Graceful degradation** — hooks no-op cleanly with an install hint if Bun is missing, instead of erroring on every event.
 - **Better model tracking** — model-family detection covers Haiku/Fable/Mythos, per-model context windows resolve via `ANTHROPIC_API_KEY` when no subscription token exists, and subagent transcript rows no longer skew the context meter.
 
+### New in v0.6
+
+- **Injection-hardened cron auto-approval** — the plugin's own keepalive/wake cron jobs are auto-approved only when the *entire* payload matches the plugin's scheduling templates (cron shape, recurring flag, marker position, length cap), not when a prompt merely mentions a marker; `CronDelete` is auto-approved only for job ids the plugin itself scheduled. Anything else falls through to the normal permission prompt.
+- **Need-based keepalive** — the idle cache-warming cron only schedules while a checkpoint lane or paused handoff is pending (`keepalive.require_pending`, default true).
+- **macOS fixes + CI** — three latent macOS bugs fixed (background refresh, live-session counting, symlinked `/tmp`); the suite is enforced green on ubuntu + macos via GitHub Actions.
+- **Doctor grows** — hook-crash breadcrumbs, version-skew detection, cache format-drift checks, `--transcript` probe.
+
 ## Install
 
 ```

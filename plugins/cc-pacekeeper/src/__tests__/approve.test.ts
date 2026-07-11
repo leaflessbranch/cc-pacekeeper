@@ -56,13 +56,13 @@ function transcriptNoId(): string {
 }
 
 describe('pacekeeper-approve', () => {
-    test('allows marker CronCreate', () => {
-        const out = run({ tool_name: 'CronCreate', tool_input: { prompt: KEEPALIVE_MARKER + ' do a tiny turn' } });
+    test('allows a full-shape keepalive CronCreate', () => {
+        const out = run({ tool_name: 'CronCreate', tool_input: { cron: '13,43 * * * *', recurring: true, prompt: KEEPALIVE_MARKER + ' do a tiny turn' } });
         expect((out.hookSpecificOutput as Record<string, unknown>)?.permissionDecision).toBe('allow');
     });
 
     test('passes through non-marker CronCreate', () => {
-        const out = run({ tool_name: 'CronCreate', tool_input: { prompt: 'deploy to prod' } });
+        const out = run({ tool_name: 'CronCreate', tool_input: { cron: '13,43 * * * *', recurring: true, prompt: 'deploy to prod' } });
         expect(out).toEqual({});
     });
 
@@ -78,10 +78,13 @@ describe('pacekeeper-approve', () => {
         expect(out).toEqual({});
     });
 
-    test('allows CronDelete when a keepalive is pending but its id is unrecoverable', () => {
+    // Hardened contract: id-scoped deletes only. A pending keepalive whose id
+    // could NOT be recovered gives us nothing to match against, so the delete
+    // must fall through to the user rather than be auto-approved blind.
+    test('passes through CronDelete when keepalive pending but its id is unrecoverable', () => {
         const tp = transcriptNoId();
         const out = run({ tool_name: 'CronDelete', tool_input: { id: 'whatever1' }, transcript_path: tp });
-        expect((out.hookSpecificOutput as Record<string, unknown>)?.permissionDecision).toBe('allow');
+        expect(out).toEqual({});
     });
 
     test('passes through CronDelete when no keepalive is pending', () => {
