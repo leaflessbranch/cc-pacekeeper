@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **macOS: three latent production bugs** — the background usage refresh never ran (`setsid` doesn't exist on macOS; now `nohup`), live-session counting always reported zero (`/proc` liveness; now signal-0), and a symlinked `/tmp` could evade the checkpoint unsafe-directory refusal (realpath both sides). The full test suite is now green on macOS, enforced by new GitHub Actions CI (ubuntu + macos).
+
+### Added
+
+- **Doctor self-diagnosis grows**: recorded hook crashes (entrypoints now leave breadcrumbs in `~/.cache/cc-pacekeeper/crash-log.json`), plugin version skew (installed vs running copy — "restart to apply" detection), usage-cache format-drift detection, and an optional `--transcript <path>` probe validating transcript-shape assumptions.
+
+### Changed
+
+- **Keepalive is now need-based** (`keepalive.require_pending`, default `true`): the idle cache-warming cron is only scheduled when something is actually pending — an active checkpoint lane or a paused subagent handoff. Set `require_pending: false` to restore the previous always-on behavior.
+- **Upgrading with an existing keepalive job**: keepalive pings are now recognized only when the marker is at the START of the scheduled prompt. If a pre-upgrade recurring job put the marker mid-prompt, its pings will stop being suppressed — `CronDelete` the old job and let the plugin reschedule it.
+
 ## [0.5.0]
 
 Runs-for-every-user release: portability + self-diagnosis.

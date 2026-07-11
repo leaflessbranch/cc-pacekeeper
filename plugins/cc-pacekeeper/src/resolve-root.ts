@@ -22,17 +22,40 @@ import * as path from 'path';
  */
 
 /**
+ * realpath for comparisons — resolves symlinks even for paths that don't
+ * exist yet by climbing to the nearest existing ancestor, realpathing it,
+ * and re-appending the missing suffix. Plain resolve only if nothing on the
+ * path exists at all.
+ */
+function realOrResolve(p: string): string {
+    const resolved = path.resolve(p);
+    let base = resolved;
+    const missing: string[] = [];
+    while (!fs.existsSync(base)) {
+        const parent = path.dirname(base);
+        if (parent === base) return resolved; // hit fs root; nothing exists
+        missing.unshift(path.basename(base));
+        base = parent;
+    }
+    try {
+        return path.join(fs.realpathSync(base), ...missing);
+    } catch {
+        return resolved;
+    }
+}
+
+/**
  * Dirs we refuse to write checkpoints into: transient (vanish on reboot) or
  * too broad to be a real project. Matches the dir itself and anything beneath
  * the tmp roots.
  */
 export function isUnsafeRoot(dir: string): boolean {
-    const resolved = path.resolve(dir);
-    const tmpRoots = [os.tmpdir(), '/tmp'].map(d => path.resolve(d));
+    const resolved = realOrResolve(dir);
+    const tmpRoots = [os.tmpdir(), '/tmp'].map(realOrResolve);
     for (const t of tmpRoots) {
         if (resolved === t || resolved.startsWith(t + path.sep)) return true;
     }
-    const exact = [os.homedir(), path.parse(resolved).root].map(d => path.resolve(d));
+    const exact = [os.homedir(), path.parse(resolved).root].map(realOrResolve);
     return exact.includes(resolved);
 }
 

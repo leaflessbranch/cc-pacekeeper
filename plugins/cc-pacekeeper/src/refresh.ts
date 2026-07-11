@@ -4,6 +4,7 @@ import { fetchUsageData, getUsageCacheFileAgeSeconds } from './vendor/usage-fetc
 import { readStdinJson } from './hook-io';
 import { readMostRecentModel } from './ctx-tokens';
 import { fetchAndCacheMaxInputTokens, readCachedMaxInputTokens, cachedEntryAgeDays, MODEL_INFO_REFRESH_AFTER_DAYS } from './model-info';
+import { recordCrash } from './crash-log';
 
 /**
  * Detached refresh script — runs in the background after PostToolUse. Self-gates
@@ -42,4 +43,7 @@ async function main(): Promise<void> {
     }
 }
 
-main().catch(() => { /* never throw from a detached refresh */ });
+main().catch((err) => {
+    recordCrash('refresh', err);
+    /* never throw from a detached refresh */
+});

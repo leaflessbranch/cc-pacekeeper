@@ -1,12 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { configDir, configFile, configValidationIssues, loadConfig } from './config';
+import { crashLogFile, readCrashLog } from './crash-log';
+import { readContextTokens, readMostRecentModel } from './ctx-tokens';
 import { MODEL_INFO_CACHE_FILE, resolveModelInfoAuth } from './model-info';
 import { stateDir } from './state';
 import { USAGE_ERROR_HINTS } from './thresholds';
 import { getClaudeConfigDir } from './vendor/claude-config-dir';
 import { DEFAULT_CONTEXT_WINDOW_SIZE } from './vendor/model-context';
-import { fetchUsageData, getUsageCacheFileAgeSeconds, getUsageToken, readUsageCacheFile } from './vendor/usage-fetch';
+import { fetchUsageData, getUsageCacheFileAgeSeconds, getUsageToken, readUsageCacheFile, USAGE_CACHE_FILE } from './vendor/usage-fetch';
 
 export interface DoctorCheck {
     name: string;
@@ -32,7 +34,7 @@ function writableDir(dir: string): boolean {
     }
 }
 
-export async function runDoctor(opts: { network?: boolean } = {}): Promise<DoctorCheck[]> {
+export async function runDoctor(opts: { network?: boolean; transcript?: string } = {}): Promise<DoctorCheck[]> {
     const checks: DoctorCheck[] = [];
     const cfg = loadConfig();
 
@@ -69,6 +71,8 @@ export async function runDoctor(opts: { network?: boolean } = {}): Promise<Docto
     } else if (cached && age !== null) {
         // cached.error is never written to disk today — defensive display only.
         checks.push({ name: 'usage cache', severity: 'ok', detail: `present, ${age}s old${cached.error ? `, last error: ${cached.error}` : ''}` });
+    } else if (age !== null && cached === null) {
+        checks.push({ name: 'usage cache', severity: 'fail', detail: `present (${age}s old) but unparseable — possible format drift after a Claude Code update. Delete it to re-fetch: rm ${USAGE_CACHE_FILE}` });
     } else {
         checks.push({ name: 'usage cache', severity: token ? 'warn' : 'fail', detail: 'never written — no successful usage fetch yet (run `doctor --network` to try one now)' });
     }
@@ -98,6 +102,43 @@ export async function runDoctor(opts: { network?: boolean } = {}): Promise<Docto
     checks.push(bad.length === 0
         ? { name: 'state dirs', severity: 'ok', detail: dirs.join(', ') }
         : { name: 'state dirs', severity: 'fail', detail: `not writable: ${bad.join(', ')}` });
+
+    // 8. Hook crashes (recorded by entrypoint catch handlers — see crash-log.ts).
+    const crashes = readCrashLog();
+    checks.push(crashes
+        ? { name: 'hook crashes', severity: 'warn', detail: `${crashes.count} recorded; last: ${crashes.lastScript} at ${crashes.lastAt} — ${crashes.lastMessage}. Clear with: rm ${crashLogFile()}` }
+        : { name: 'hook crashes', severity: 'ok', detail: 'none recorded' });
+
+    // 9. Optional transcript-format probe: validates that Claude Code's
+    //    transcript JSONL still has the shape our readers depend on.
+    if (opts.transcript !== undefined) {
+        const model = readMostRecentModel(opts.transcript);
+        const tokens = readContextTokens(opts.transcript);
+        if (model !== null || tokens !== null) {
+            checks.push({ name: 'transcript format', severity: 'ok', detail: `parsed (model: ${model ?? 'n/a'}, ctx tokens: ${tokens?.contextLength ?? 'n/a'})` });
+        } else {
+            checks.push({ name: 'transcript format', severity: 'fail', detail: `could not extract model or usage from ${opts.transcript} — the transcript shape may have drifted (or the file is missing/empty). Meters relying on it degrade to defaults.` });
+        }
+    }
+
+    // 10. Version skew: this copy vs the plugin manager's installed record.
+    //     Mismatch usually means "update applied but Claude Code not restarted"
+    //     or "running a dev checkout while an older install is active".
+    try {
+        const ownPkg = JSON.parse(fs.readFileSync(path.join(import.meta.dir, '..', '.claude-plugin', 'plugin.json'), 'utf8')) as { version?: string };
+        const installedRaw = JSON.parse(fs.readFileSync(path.join(getClaudeConfigDir(), 'plugins', 'installed_plugins.json'), 'utf8')) as { plugins?: Record<string, Array<{ version?: string }>> };
+        const entry = Object.entries(installedRaw.plugins ?? {}).find(([k]) => k.startsWith('cc-pacekeeper@'));
+        const installedVersion = entry?.[1]?.[0]?.version;
+        if (!ownPkg.version || !installedVersion) {
+            checks.push({ name: 'plugin version', severity: 'ok', detail: `this copy: ${ownPkg.version ?? '?'} (no installed record — dev checkout?)` });
+        } else if (ownPkg.version === installedVersion) {
+            checks.push({ name: 'plugin version', severity: 'ok', detail: `${ownPkg.version} (installed record matches)` });
+        } else {
+            checks.push({ name: 'plugin version', severity: 'warn', detail: `this copy is ${ownPkg.version} but the installed record says ${installedVersion} — restart Claude Code (or run \`claude plugin update cc-pacekeeper\`) so the running hooks match.` });
+        }
+    } catch {
+        checks.push({ name: 'plugin version', severity: 'ok', detail: 'no installed-plugins record readable (dev checkout or non-standard install)' });
+    }
 
     return checks;
 }

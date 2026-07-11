@@ -30,7 +30,19 @@ function sessionsDir(): string {
 }
 
 function pidAlive(pid: number): boolean {
-    return fs.existsSync(`/proc/${pid}`);
+    // kill(0, …) signals the caller's own process group and kill(-n, …) a
+    // group by id — a corrupt session file must never map to those.
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+
+    // Signal 0 performs permission/existence checks without sending anything.
+    // Portable (macOS + Linux), unlike the previous /proc/<pid> probe.
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (err) {
+        // EPERM = alive but owned by another user; anything else = gone.
+        return (err as NodeJS.ErrnoException).code === 'EPERM';
+    }
 }
 
 /**

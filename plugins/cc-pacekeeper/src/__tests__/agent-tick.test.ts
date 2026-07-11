@@ -226,6 +226,21 @@ describe('resume-marker prompt [G5]', () => {
         // Not treated as a keepalive ping (no suppression/block).
         expect(out).not.toContain('"decision":"block"');
     });
+
+    test('a prompt quoting the resume marker mid-text does not trigger orientation', () => {
+        // Regression: a pasted subagent report that merely QUOTES the resume
+        // marker must not be misclassified as the auto-wake trigger.
+        writeUsage(20);
+        const sid = newSid();
+        const out = runTick({
+            session_id: sid, hook_event_name: 'UserPromptSubmit',
+            prompt: `subagent report: "${RESUME_MARKER} orientation done"`
+        });
+        expect(out).not.toContain('Auto-wake fired');
+        expect(out).not.toContain('handoffs archive');
+        // Still gets the normal per-prompt heartbeat.
+        expect(out).toContain('[pacekeeper]');
+    });
 });
 
 describe('subagent branches', () => {

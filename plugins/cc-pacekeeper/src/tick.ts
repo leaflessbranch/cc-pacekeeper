@@ -2,6 +2,7 @@
 import { bootstrapConfigIfMissing, isProjectDenied, loadConfig, type Config } from './config';
 import { contextPercent, readContextTokens, readMostRecentModel, resolveUsableContextWindow } from './ctx-tokens';
 import { emitAdditionalContext, emitBlock, emitEmpty, readStdinJson } from './hook-io';
+import { recordCrash } from './crash-log';
 import { laneOf, listActive } from './checkpoint';
 import {
     computeSnapshot,
@@ -30,6 +31,14 @@ import {
     hasHandoff,
     RESUME_MARKER
 } from './agent-budget';
+
+/** A prompt is a marker-triggered system prompt only if it STARTS with the
+ * marker — text that merely QUOTES a marker (a pasted report, a subagent
+ * notification) must pass through untouched (observed live: quoted keepalive
+ * markers got real user messages suppressed). */
+function promptStartsWithMarker(prompt: string | undefined, marker: string): boolean {
+    return (prompt ?? '').trimStart().startsWith(marker);
+}
 
 async function main(): Promise<void> {
     const stdin = await readStdinJson();
@@ -71,7 +80,7 @@ async function main(): Promise<void> {
     //    surface a bogus "you were away" line. Short-circuit before any state
     //    mutation so the ping is transparent to idle tracking. Main thread only
     //    — subagents never see UserPromptSubmit (no user prompts at that depth). ──
-    if (isMainThread && event === 'UserPromptSubmit' && (stdin.prompt ?? '').includes(KEEPALIVE_MARKER)) {
+    if (isMainThread && event === 'UserPromptSubmit' && promptStartsWithMarker(stdin.prompt, KEEPALIVE_MARKER)) {
         // The ping is where idle is actually measurable. Read (don't mutate) the
         // session entry: gap = now - lastEventAt is the true idle time.
         const entry = getSessionEntry(sessionId);
@@ -237,7 +246,7 @@ async function main(): Promise<void> {
         // NOT suppressed like keepalive pings — inject fresh orientation
         // (meters + active lane + pending handoffs) instead of the normal
         // per-prompt heartbeat.
-        if (isMainThread && (stdin.prompt ?? '').includes(RESUME_MARKER)) {
+        if (isMainThread && promptStartsWithMarker(stdin.prompt, RESUME_MARKER)) {
             injection = buildResumeOrientation(cwd, cfg, snap);
         } else {
             // Always inject the combined time + meter line, plus any AFK-return note
@@ -348,9 +357,11 @@ async function main(): Promise<void> {
                 const lastDirectiveAt = sessionEntry.lastKeepaliveDirectiveAt ?? 0;
                 const debounceDue = nowMs - lastDirectiveAt >= cfg.keepalive.interval_min * 60_000;
                 if (debounceDue) {
+                    const hasPendingWork = listActive(cwd, cfg.checkpoint_dir_name).length > 0
+                        || listHandoffs(cwd, cfg.checkpoint_dir_name).length > 0;
                     const ka = keepaliveDirective({
                         cfg, snap, state: scanKeepaliveState(stdin.transcript_path),
-                        nowMs
+                        nowMs, hasPendingWork
                     });
                     if (ka.directive) {
                         if (stopLines.length > 0) stopLines.push('');
@@ -748,6 +759,7 @@ function buildResumeOrientation(cwd: string, cfg: ReturnType<typeof loadConfig>,
 // Guarded so tests can import buildSessionStartContext without triggering a live run.
 if (import.meta.main) {
     main().catch((err) => {
+        recordCrash('tick', err);
         // Never break Claude's workflow on hook error; emit empty + write debug log.
         try {
             process.stderr.write(`pacekeeper-tick error: ${err instanceof Error ? err.message : String(err)}\n`);

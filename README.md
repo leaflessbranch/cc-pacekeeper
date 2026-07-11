@@ -29,7 +29,7 @@ Plus **extra-usage credits** state, so when limits approach Claude can ask wheth
 ### New in v0.3
 
 - **Named checkpoint lanes** — checkpoints are keyed by a lane name (default: the sanitized git branch; `save --name` overrides). Saving supersedes only the same lane, so parallel efforts — including in separate worktrees — each keep an active, independently resumable checkpoint. `resume <name>` / `peek <name>` (non-mutating preview) / `resume --worktree` to re-enter or recreate the lane's worktree.
-- **AFK cache keepalive** — Claude schedules a single recurring cron job (once per session) to keep the prompt cache warm. Pings are suppressed hook-side while you're active (zero context cost) and pass through only while you're actually idle; after `keepalive.max_idle_hours` (default 12) of continuous idleness the job is torn down. Jobs are deduped via a CronList-first check, since cron jobs survive `/clear`. Auto-disabled when drawing on usage credits, where the cache TTL is short anyway.
+- **AFK cache keepalive** — Claude schedules a single recurring cron job (once per session) to keep the prompt cache warm. Pings are suppressed hook-side while you're active (zero context cost) and pass through only while you're actually idle; after `keepalive.max_idle_hours` (default 12) of continuous idleness the job is torn down. Jobs are deduped via a CronList-first check, since cron jobs survive `/clear`. Auto-disabled when drawing on usage credits, where the cache TTL is short anyway. Since 0.6, keepalive is need-based by default: it only schedules while a checkpoint lane or paused handoff is pending (config: keepalive.require_pending).
 
 ### New in v0.4
 
@@ -52,7 +52,7 @@ Plus **extra-usage credits** state, so when limits approach Claude can ask wheth
 /plugin install cc-pacekeeper@cc-pacekeeper
 ```
 
-Requires [Claude Code](https://claude.com/claude-code) and [Bun](https://bun.sh) on PATH. On macOS, the first usage fetch may show a Keychain prompt for `bun` — choose "Always Allow" so the 5h/weekly meters can read Claude Code's OAuth credential.
+Requires [Claude Code](https://claude.com/claude-code) and [Bun](https://bun.sh) on PATH. On macOS, the first usage fetch may show a Keychain prompt for `bun` — choose "Always Allow" so the 5h/weekly meters can read Claude Code's OAuth credential. Linux and macOS are supported; native Windows is not (the hook entrypoints are bash).
 
 ## Usage
 
