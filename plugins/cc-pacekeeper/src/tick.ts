@@ -10,6 +10,8 @@ import {
     formatDirective,
     formatMeterSegment,
     formatStatusLine,
+    formatUsageErrorNote,
+    usageErrorNoteToSurface,
     type Snapshot
 } from './thresholds';
 import { keepaliveDirective, scanKeepaliveState, scanMarkerCreates, pingGate, KEEPALIVE_MARKER } from './keepalive';
@@ -151,7 +153,7 @@ async function main(): Promise<void> {
     const ctxPct = ctxTokens ? contextPercent(ctxTokens.contextLength, usableWindow) : null;
 
     let usage: UsageData | null = readUsageCacheFile();
-    if (event === 'SessionStart' && hasStaleReset(usage)) {
+    if (event === 'SessionStart' && (usage === null || hasStaleReset(usage))) {
         // Last block ended while no Claude session was running, so nothing
         // refreshed the cache. Force a synchronous refetch before computing
         // the snapshot — SessionStart fires once, latency is acceptable.
@@ -163,6 +165,17 @@ async function main(): Promise<void> {
     }
 
     const snap = computeSnapshot({ contextPercent: ctxPct, usage }, cfg);
+
+    // ── [Improvement 2] Once-per-session usage-unavailability note, main
+    //    thread only: subagents inherit the parent's environment problems. ──
+    let usageErrorNote: string | null = null;
+    if (isMainThread) {
+        const errKind = usageErrorNoteToSurface(usage, snap, sessionEntry);
+        if (errKind) {
+            usageErrorNote = formatUsageErrorNote(errKind);
+            updateSession(key, nowMs, { usageErrorSurfaced: errKind });
+        }
+    }
 
     // ── Decide injection based on event type. ──
     const nowSec = Math.floor(Date.now() / 1000);
@@ -209,6 +222,9 @@ async function main(): Promise<void> {
             // Update debounce state without spamming.
             updateAllDebounce(key, snap, nowSec, cfg.debounce_seconds);
         }
+        if (usageErrorNote) {
+            injection = [injection, usageErrorNote].filter(s => s !== '').join('\n\n');
+        }
     } else if (event === 'UserPromptSubmit') {
         // RESUME_MARKER prompts are the real work trigger after an auto-wake:
         // NOT suppressed like keepalive pings — inject fresh orientation
@@ -227,6 +243,7 @@ async function main(): Promise<void> {
             // ping-fire time, so there is nothing to cancel here.
             const arb = isMainThread ? formatArbitrageNudge(snap, model) : null;
             if (arb) extras.push(arb);
+            if (usageErrorNote) extras.push(usageErrorNote);
             injection = composeLine(nowMs, sessionEntry, snap, cfg, afk, directive, extras);
             // A real prompt ends the idle window: drop the keepalive idle anchor.
             const keepalive = sessionEntry.keepalive?.idleSince !== undefined

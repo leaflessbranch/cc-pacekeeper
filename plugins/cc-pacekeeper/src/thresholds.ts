@@ -1,6 +1,6 @@
 import type { Config, ThresholdLevels } from './config';
 import type { Level, Meter } from './state';
-import type { UsageData } from './vendor/usage-types';
+import type { UsageData, UsageError } from './vendor/usage-types';
 import { modelFamily } from './model-family';
 
 export interface MeterReading {
@@ -292,4 +292,35 @@ export function formatDirective(snap: Snapshot): string {
         '  (b) save a checkpoint via /cc-pacekeeper:checkpoint save and resume after reset,',
         '  (c) keep going if confident the next step is small.'
     ].join('\n');
+}
+
+export const USAGE_ERROR_HINTS: Record<UsageError, string> = {
+    'no-credentials': 'no OAuth credentials found (checked ~/.claude/.credentials.json'
+        + (process.platform === 'darwin' ? ' and the macOS Keychain — if a Keychain prompt appeared, choose Always Allow' : '')
+        + '). 5h/weekly meters are off; the context meter still works. Run `pacekeeper-checkpoint doctor` to diagnose.',
+    'timeout': 'usage API timed out; 5h/weekly meters resume when a fetch succeeds. The context meter still works.',
+    'rate-limited': 'usage API rate-limited; 5h/weekly meters resume after backoff. The context meter still works.',
+    'api-error': 'usage API returned an error; 5h/weekly meters resume when a fetch succeeds. The context meter still works.',
+    'parse-error': 'usage API response was unparsable; 5h/weekly meters may lag. The context meter still works.'
+};
+
+export function formatUsageErrorNote(err: UsageError): string {
+    return `[pacekeeper] usage meters unavailable: ${USAGE_ERROR_HINTS[err]}`;
+}
+
+/**
+ * Once-per-session gate: surface the usage error only when it actually costs
+ * meters (no five_hour/weekly readings survived) and this session hasn't
+ * already been told about this error kind.
+ */
+export function usageErrorNoteToSurface(
+    usage: UsageData | null,
+    snap: Snapshot,
+    entry: { usageErrorSurfaced?: string } | undefined
+): UsageError | null {
+    if (!usage?.error) return null;
+    const hasWindowMeters = snap.readings.some(r => r.meter === 'five_hour' || r.meter === 'weekly');
+    if (hasWindowMeters) return null;
+    if (entry?.usageErrorSurfaced === usage.error) return null;
+    return usage.error;
 }

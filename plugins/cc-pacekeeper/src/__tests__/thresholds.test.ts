@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_CONFIG } from '../config';
 import { computeSnapshot, formatArbitrageNudge, formatBridgeDirective, formatDirective, formatStatusLine } from '../thresholds';
+import { formatUsageErrorNote, usageErrorNoteToSurface } from '../thresholds';
 
 describe('computeSnapshot', () => {
     test('all meters none when below thresholds', () => {
@@ -218,5 +219,31 @@ describe('formatArbitrageNudge', () => {
 
     test('null for unknown model family', () => {
         expect(formatArbitrageNudge(nudgeable, 'some-other-model')).toBeNull();
+    });
+});
+
+describe('usage error surfacing', () => {
+    const cfg = DEFAULT_CONFIG; // thresholds.test.ts already imports/builds a config — reuse its pattern
+    const emptySnap = computeSnapshot({ contextPercent: 10, usage: { error: 'no-credentials' } }, cfg);
+
+    test('fires for no-credentials when no windowed meters present', () => {
+        expect(usageErrorNoteToSurface({ error: 'no-credentials' }, emptySnap, undefined)).toBe('no-credentials');
+    });
+
+    test('suppressed once surfaced for the same error kind', () => {
+        const entry = { sessionStartedAt: 0, lastEventAt: 0, usageErrorSurfaced: 'no-credentials' };
+        expect(usageErrorNoteToSurface({ error: 'no-credentials' }, emptySnap, entry)).toBeNull();
+    });
+
+    test('suppressed when windowed meters exist (stale cache still shows numbers)', () => {
+        const snap = computeSnapshot({ contextPercent: 10, usage: { sessionUsage: 40, sessionResetAt: new Date(Date.now() + 3600_000).toISOString() } }, cfg);
+        expect(usageErrorNoteToSurface({ error: 'timeout', sessionUsage: 40 }, snap, undefined)).toBeNull();
+    });
+
+    test('note text names the failure and preserves the ctx meter promise', () => {
+        const note = formatUsageErrorNote('no-credentials');
+        expect(note).toContain('[pacekeeper]');
+        expect(note).toContain('credentials');
+        expect(note).toContain('context meter still works');
     });
 });

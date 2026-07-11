@@ -51,7 +51,10 @@ const SessionEntrySchema = z.object({
     // [G4] ctx auto-save crossing-based re-arm: armed once the ctx-critical
     // directive fires; cleared once a later tick observes ctx below warn
     // (i.e. compaction happened), allowing the next climb to re-fire.
-    ctxAutoSaveArmed: z.boolean().optional()
+    ctxAutoSaveArmed: z.boolean().optional(),
+    // Which UsageError kind was already surfaced to this session (once-per-
+    // session gate for the "usage meters unavailable" note).
+    usageErrorSurfaced: z.string().optional()
 });
 
 export type SessionEntry = z.infer<typeof SessionEntrySchema>;
