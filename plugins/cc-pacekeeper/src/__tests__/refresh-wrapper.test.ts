@@ -24,7 +24,7 @@ describe('pacekeeper-refresh wrapper', () => {
         const sink = path.join(tmpDir, 'received-stdin.json');
         // Stub child: records its stdin, so we can prove the wrapper forwarded it.
         const stub = path.join(tmpDir, 'refresh-stub.sh');
-        fs.writeFileSync(stub, `#!/usr/bin/env bash\ncat > "${sink}"\n`, { mode: 0o755 });
+        fs.writeFileSync(stub, `#!/usr/bin/env bash\ncat > "${sink}.tmp" && mv "${sink}.tmp" "${sink}"\n`, { mode: 0o755 });
 
         const payload = JSON.stringify({
             hook_event_name: 'PostToolUse',
@@ -50,9 +50,13 @@ describe('pacekeeper-refresh wrapper', () => {
         // Wrapper must still return exactly '{}' so the hook never disrupts Claude.
         expect(res.stdout.trim()).toBe('{}');
 
-        // Give the detached child a moment to flush its captured stdin.
+        // Give the detached child a moment to flush its captured stdin. The
+        // stub writes to a temp file and atomically `mv`s it into place, but
+        // tolerate polling before the file is non-empty too, in case some
+        // platform's mv is observably non-atomic under load.
         const deadline = Date.now() + 3000;
-        while (!fs.existsSync(sink) && Date.now() < deadline) {
+        while (Date.now() < deadline) {
+            if (fs.existsSync(sink) && fs.statSync(sink).size > 0) break;
             spawnSync('sleep', ['0.05']);
         }
 

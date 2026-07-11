@@ -207,7 +207,7 @@ export function keepaliveDirective(args: {
         directive: [
             `${KEEPALIVE_MARKER} To keep the prompt cache warm while the user is idle, ensure a RECURRING keepalive job exists.`,
             `First call CronList: if a recurring job whose prompt contains ${KEEPALIVE_MARKER} already exists, do NOT create another (and CronDelete extras so exactly one remains — jobs can outlive /clear, so CronList is the ground truth, not this conversation).`,
-            `Otherwise schedule one via CronCreate (recurring: true) firing every ~${mins} minutes — use fixed minute marks (e.g. "13,43 * * * *"), not a "*/N" minute step, which fires at uneven wall-clock gaps; its prompt MUST contain the literal marker ${KEEPALIVE_MARKER}.`,
+            `Otherwise schedule one via CronCreate (recurring: true) firing every ~${mins} minutes — use fixed minute marks (e.g. "13,43 * * * *"), not a "*/N" minute step, which fires at uneven wall-clock gaps; its prompt MUST START WITH the literal marker ${KEEPALIVE_MARKER}.`,
             `When it fires, reply with a single word and follow the injected pacekeeper guidance. Do not reschedule or recreate it on later turns.`
         ].join(' ')
     };

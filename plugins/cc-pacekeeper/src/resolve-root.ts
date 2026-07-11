@@ -22,11 +22,6 @@ import * as path from 'path';
  */
 
 /**
- * Dirs we refuse to write checkpoints into: transient (vanish on reboot) or
- * too broad to be a real project. Matches the dir itself and anything beneath
- * the tmp roots.
- */
-/**
  * realpath for comparisons — resolves symlinks even for paths that don't
  * exist yet by climbing to the nearest existing ancestor, realpathing it,
  * and re-appending the missing suffix. Plain resolve only if nothing on the
@@ -49,6 +44,11 @@ function realOrResolve(p: string): string {
     }
 }
 
+/**
+ * Dirs we refuse to write checkpoints into: transient (vanish on reboot) or
+ * too broad to be a real project. Matches the dir itself and anything beneath
+ * the tmp roots.
+ */
 export function isUnsafeRoot(dir: string): boolean {
     const resolved = realOrResolve(dir);
     const tmpRoots = [os.tmpdir(), '/tmp'].map(realOrResolve);

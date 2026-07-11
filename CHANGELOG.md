@@ -17,6 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **Keepalive is now need-based** (`keepalive.require_pending`, default `true`): the idle cache-warming cron is only scheduled when something is actually pending — an active checkpoint lane or a paused subagent handoff. Set `require_pending: false` to restore the previous always-on behavior.
+- **Upgrading with an existing keepalive job**: keepalive pings are now recognized only when the marker is at the START of the scheduled prompt. If a pre-upgrade recurring job put the marker mid-prompt, its pings will stop being suppressed — `CronDelete` the old job and let the plugin reschedule it.
 
 ## [0.5.0]
 
