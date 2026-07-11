@@ -30,7 +30,15 @@ function sessionsDir(): string {
 }
 
 function pidAlive(pid: number): boolean {
-    return fs.existsSync(`/proc/${pid}`);
+    // Signal 0 performs permission/existence checks without sending anything.
+    // Portable (macOS + Linux), unlike the previous /proc/<pid> probe.
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (err) {
+        // EPERM = alive but owned by another user; anything else = gone.
+        return (err as NodeJS.ErrnoException).code === 'EPERM';
+    }
 }
 
 /**
