@@ -121,5 +121,24 @@ export async function runDoctor(opts: { network?: boolean; transcript?: string }
         }
     }
 
+    // 10. Version skew: this copy vs the plugin manager's installed record.
+    //     Mismatch usually means "update applied but Claude Code not restarted"
+    //     or "running a dev checkout while an older install is active".
+    try {
+        const ownPkg = JSON.parse(fs.readFileSync(path.join(import.meta.dir, '..', '.claude-plugin', 'plugin.json'), 'utf8')) as { version?: string };
+        const installedRaw = JSON.parse(fs.readFileSync(path.join(getClaudeConfigDir(), 'plugins', 'installed_plugins.json'), 'utf8')) as { plugins?: Record<string, Array<{ version?: string }>> };
+        const entry = Object.entries(installedRaw.plugins ?? {}).find(([k]) => k.startsWith('cc-pacekeeper@'));
+        const installedVersion = entry?.[1]?.[0]?.version;
+        if (!ownPkg.version || !installedVersion) {
+            checks.push({ name: 'plugin version', severity: 'ok', detail: `this copy: ${ownPkg.version ?? '?'} (no installed record — dev checkout?)` });
+        } else if (ownPkg.version === installedVersion) {
+            checks.push({ name: 'plugin version', severity: 'ok', detail: `${ownPkg.version} (installed record matches)` });
+        } else {
+            checks.push({ name: 'plugin version', severity: 'warn', detail: `this copy is ${ownPkg.version} but the installed record says ${installedVersion} — restart Claude Code (or run \`claude plugin update cc-pacekeeper\`) so the running hooks match.` });
+        }
+    } catch {
+        checks.push({ name: 'plugin version', severity: 'ok', detail: 'no installed-plugins record readable (dev checkout or non-standard install)' });
+    }
+
     return checks;
 }
