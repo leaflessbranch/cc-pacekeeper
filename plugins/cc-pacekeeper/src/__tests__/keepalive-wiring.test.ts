@@ -103,6 +103,36 @@ describe('Stop hook keepalive wiring', () => {
         expect(second).not.toContain('[pacekeeper-keepalive]');
     });
 
+    test('no schedule directive on idle Stop when nothing is pending (require_pending wiring)', () => {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-ka-'));
+        fs.mkdirSync(path.join(home, '.cache', 'cc-pacekeeper'), { recursive: true });
+        fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+        fs.mkdirSync(path.join(home, 'proj'), { recursive: true });
+        // Subscription usage cache: five_hour reading present, not on credits.
+        fs.writeFileSync(
+            path.join(home, '.cache', 'cc-pacekeeper', 'usage.json'),
+            JSON.stringify({
+                sessionUsage: 45,
+                sessionResetAt: new Date(Date.now() + 3 * 3600_000).toISOString(),
+                weeklyUsage: 40,
+                fetchedAt: Date.now()
+            })
+        );
+        // Minimal transcript so the transcript_path branch runs (no pending keepalive).
+        fs.writeFileSync(
+            path.join(home, 't.jsonl'),
+            JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-4-8', role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }) + '\n'
+        );
+        // No writePendingCheckpoint(): the project dir has no .claude-checkpoints/
+        // at all, so hasPendingWork is false and keepalive.require_pending
+        // (default true) must suppress the directive.
+
+        const out = runStopTick(home);
+        fs.rmSync(home, { recursive: true, force: true });
+
+        expect(out).not.toContain('[pacekeeper-keepalive]');
+    });
+
     test('Stop does not re-arm after the give-up teardown (idleSince past max_idle_hours)', () => {
         const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-ka-'));
         fs.mkdirSync(path.join(home, '.cache', 'cc-pacekeeper'), { recursive: true });
