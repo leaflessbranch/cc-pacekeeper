@@ -223,21 +223,18 @@ describe('formatArbitrageNudge', () => {
 });
 
 describe('usage error surfacing', () => {
-    const cfg = DEFAULT_CONFIG; // thresholds.test.ts already imports/builds a config — reuse its pattern
-    const emptySnap = computeSnapshot({ contextPercent: 10, usage: { error: 'no-credentials' } }, cfg);
-
-    test('fires for no-credentials when no windowed meters present', () => {
-        expect(usageErrorNoteToSurface({ error: 'no-credentials' }, emptySnap, undefined)).toBe('no-credentials');
+    test('fires for no-credentials when not yet surfaced this session', () => {
+        expect(usageErrorNoteToSurface({ error: 'no-credentials' }, undefined)).toBe('no-credentials');
     });
 
     test('suppressed once surfaced for the same error kind', () => {
         const entry = { sessionStartedAt: 0, lastEventAt: 0, usageErrorSurfaced: 'no-credentials' };
-        expect(usageErrorNoteToSurface({ error: 'no-credentials' }, emptySnap, entry)).toBeNull();
+        expect(usageErrorNoteToSurface({ error: 'no-credentials' }, entry)).toBeNull();
     });
 
-    test('suppressed when windowed meters exist (stale cache still shows numbers)', () => {
-        const snap = computeSnapshot({ contextPercent: 10, usage: { sessionUsage: 40, sessionResetAt: new Date(Date.now() + 3600_000).toISOString() } }, cfg);
-        expect(usageErrorNoteToSurface({ error: 'timeout', sessionUsage: 40 }, snap, undefined)).toBeNull();
+    test('a different error kind re-fires despite an earlier surfaced kind', () => {
+        const entry = { sessionStartedAt: 0, lastEventAt: 0, usageErrorSurfaced: 'no-credentials' };
+        expect(usageErrorNoteToSurface({ error: 'timeout' }, entry)).toBe('timeout');
     });
 
     test('note text names the failure and preserves the ctx meter promise', () => {

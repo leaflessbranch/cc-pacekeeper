@@ -157,6 +157,9 @@ async function main(): Promise<void> {
         // Last block ended while no Claude session was running, so nothing
         // refreshed the cache. Force a synchronous refetch before computing
         // the snapshot — SessionStart fires once, latency is acceptable.
+        // For users with no credentials the cache never exists, so this
+        // re-runs each SessionStart — bounded by the fetch timeout and
+        // acceptable at session granularity.
         try {
             usage = await fetchUsageData();
         } catch {
@@ -166,11 +169,15 @@ async function main(): Promise<void> {
 
     const snap = computeSnapshot({ contextPercent: ctxPct, usage }, cfg);
 
-    // ── [Improvement 2] Once-per-session usage-unavailability note, main
-    //    thread only: subagents inherit the parent's environment problems. ──
+    // ── [Improvement 2] Once-per-session usage-unavailability note.
+    //    usage.error can only be non-null on the SessionStart tick that ran
+    //    the synchronous fetch above (the disk cache is never written
+    //    error-shaped), so this is SessionStart-only by construction; the
+    //    session-state gate additionally debounces repeat SessionStarts
+    //    (resume/compact). Main thread only. ──
     let usageErrorNote: string | null = null;
-    if (isMainThread) {
-        const errKind = usageErrorNoteToSurface(usage, snap, sessionEntry);
+    if (isMainThread && event === 'SessionStart') {
+        const errKind = usageErrorNoteToSurface(usage, sessionEntry);
         if (errKind) {
             usageErrorNote = formatUsageErrorNote(errKind);
             updateSession(key, nowMs, { usageErrorSurfaced: errKind });
@@ -243,7 +250,6 @@ async function main(): Promise<void> {
             // ping-fire time, so there is nothing to cancel here.
             const arb = isMainThread ? formatArbitrageNudge(snap, model) : null;
             if (arb) extras.push(arb);
-            if (usageErrorNote) extras.push(usageErrorNote);
             injection = composeLine(nowMs, sessionEntry, snap, cfg, afk, directive, extras);
             // A real prompt ends the idle window: drop the keepalive idle anchor.
             const keepalive = sessionEntry.keepalive?.idleSince !== undefined

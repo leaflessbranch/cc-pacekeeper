@@ -309,18 +309,16 @@ export function formatUsageErrorNote(err: UsageError): string {
 }
 
 /**
- * Once-per-session gate: surface the usage error only when it actually costs
- * meters (no five_hour/weekly readings survived) and this session hasn't
- * already been told about this error kind.
+ * Once-per-session gate for the usage-error note. usage.error can only be
+ * non-null on a SessionStart tick (the disk cache is written only on
+ * success), so this fires at most once per session key per error kind —
+ * repeat SessionStarts in one session (resume, compact) stay suppressed.
  */
 export function usageErrorNoteToSurface(
     usage: UsageData | null,
-    snap: Snapshot,
     entry: { usageErrorSurfaced?: string } | undefined
 ): UsageError | null {
     if (!usage?.error) return null;
-    const hasWindowMeters = snap.readings.some(r => r.meter === 'five_hour' || r.meter === 'weekly');
-    if (hasWindowMeters) return null;
     if (entry?.usageErrorSurfaced === usage.error) return null;
     return usage.error;
 }
