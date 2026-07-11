@@ -28,6 +28,7 @@ Legacy checkpoints saved before lanes existed have no `name` in frontmatter; the
 | `handoffs list` | Show pending subagent budget-pause handoffs (agent_id, type, trigger, age). |
 | `handoffs write <agent_id>` | Used by a paused subagent to write its handoff file (Goal / Done / Next / Files touched). |
 | `handoffs archive <agent_id>` | After re-dispatching (or explicitly dropping) a paused handoff's work, archive it so it isn't re-surfaced. Never `mv` handoff files by hand. |
+| `doctor [--network]` | User asks "is pacekeeper working?", meters are missing from the status line, or after install/upgrade. Prints ✓/⚠/✗ environment checks with fixes; `--network` also tries a live usage fetch. |
 
 ## Auto-save (no asking)
 

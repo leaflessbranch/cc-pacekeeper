@@ -19,6 +19,7 @@ import { contextPercent, readContextTokens, resolveUsableContextWindow } from '.
 import { readUsageCacheFile } from './vendor/usage-fetch';
 import { projectRootFromTranscript, resolveProjectRoot, worktreeInfo } from './resolve-root';
 import { archiveHandoff, listHandoffs, writeHandoff } from './agent-budget';
+import { formatDoctorReport, runDoctor } from './doctor';
 
 interface Args {
     verb: string;
@@ -507,6 +508,9 @@ function verbHelp(): void {
         '  handoffs archive <agent_id>',
         '                        Move a handoff to handoffs/archive/ once its work is absorbed.',
         '',
+        '  doctor [--network]    Check the plugin\'s environment: runtime, credentials,',
+        '                        usage cache, config validity, window override, state dirs.',
+        '',
         '  help                  Show this message.',
         ''
     ].join('\n'));
@@ -521,6 +525,13 @@ async function main(): Promise<void> {
     // unsafe dir) before printing usage would be unhelpful.
     if (args.verb === 'help' || args.verb === '--help' || args.verb === '-h') {
         verbHelp();
+        return;
+    }
+
+    if (args.verb === 'doctor') {
+        const checks = await runDoctor({ network: args.flags.network === true });
+        process.stdout.write(formatDoctorReport(checks) + '\n');
+        process.exitCode = checks.some(c => c.severity === 'fail') ? 1 : 0;
         return;
     }
 
