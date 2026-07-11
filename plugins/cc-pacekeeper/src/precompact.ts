@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { bootstrapConfigIfMissing, isProjectDenied, loadConfig } from './config';
 import { emitAdditionalContext, emitEmpty, readStdinJson } from './hook-io';
+import { recordCrash } from './crash-log';
 
 async function main(): Promise<void> {
     const stdin = await readStdinJson();
@@ -27,6 +28,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
+    recordCrash('precompact', err);
     try { process.stderr.write(`pacekeeper-precompact error: ${err instanceof Error ? err.message : String(err)}\n`); } catch { /* ignore */ }
     emitEmpty();
 });

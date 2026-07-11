@@ -5,7 +5,7 @@ describe('doctor', () => {
     test('offline run produces every check with a severity', async () => {
         const checks = await runDoctor({ network: false });
         const names = checks.map(c => c.name);
-        for (const expected of ['runtime', 'credentials', 'usage cache', 'config', 'context window override', 'model-info cache', 'state dirs']) {
+        for (const expected of ['runtime', 'credentials', 'usage cache', 'config', 'context window override', 'model-info cache', 'state dirs', 'hook crashes']) {
             expect(names).toContain(expected);
         }
         for (const c of checks) {

@@ -2,6 +2,7 @@
 import { bootstrapConfigIfMissing, isProjectDenied, loadConfig, type Config } from './config';
 import { contextPercent, readContextTokens, readMostRecentModel, resolveUsableContextWindow } from './ctx-tokens';
 import { emitAdditionalContext, emitBlock, emitEmpty, readStdinJson } from './hook-io';
+import { recordCrash } from './crash-log';
 import { laneOf, listActive } from './checkpoint';
 import {
     computeSnapshot,
@@ -748,6 +749,7 @@ function buildResumeOrientation(cwd: string, cfg: ReturnType<typeof loadConfig>,
 // Guarded so tests can import buildSessionStartContext without triggering a live run.
 if (import.meta.main) {
     main().catch((err) => {
+        recordCrash('tick', err);
         // Never break Claude's workflow on hook error; emit empty + write debug log.
         try {
             process.stderr.write(`pacekeeper-tick error: ${err instanceof Error ? err.message : String(err)}\n`);

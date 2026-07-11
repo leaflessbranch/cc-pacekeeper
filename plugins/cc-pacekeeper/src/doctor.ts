@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { configDir, configFile, configValidationIssues, loadConfig } from './config';
+import { crashLogFile, readCrashLog } from './crash-log';
 import { MODEL_INFO_CACHE_FILE, resolveModelInfoAuth } from './model-info';
 import { stateDir } from './state';
 import { USAGE_ERROR_HINTS } from './thresholds';
@@ -98,6 +99,12 @@ export async function runDoctor(opts: { network?: boolean } = {}): Promise<Docto
     checks.push(bad.length === 0
         ? { name: 'state dirs', severity: 'ok', detail: dirs.join(', ') }
         : { name: 'state dirs', severity: 'fail', detail: `not writable: ${bad.join(', ')}` });
+
+    // 8. Hook crashes (recorded by entrypoint catch handlers — see crash-log.ts).
+    const crashes = readCrashLog();
+    checks.push(crashes
+        ? { name: 'hook crashes', severity: 'warn', detail: `${crashes.count} recorded; last: ${crashes.lastScript} at ${crashes.lastAt} — ${crashes.lastMessage}. Clear with: rm ${crashLogFile()}` }
+        : { name: 'hook crashes', severity: 'ok', detail: 'none recorded' });
 
     return checks;
 }
