@@ -18,6 +18,18 @@ const TICK = path.join(import.meta.dir, '..', 'tick.ts');
  * We run the real tick binary with a Stop payload under a sandboxed HOME and a
  * staged subscription usage cache, and assert the schedule directive is emitted.
  */
+
+// keepalive.require_pending (default true) suppresses the directive unless
+// there's an active checkpoint lane or a paused handoff — stage a minimal
+// active checkpoint so these tests still exercise the "idle + emits" path.
+function writePendingCheckpoint(cwd: string): void {
+    const dir = path.join(cwd, '.claude-checkpoints');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+        path.join(dir, 'default-2026-07-04T10-00-00.md'),
+        '---\nstatus: active\ncreated_at: 2026-07-04T10:00:00.000Z\n---\n\nwork in progress\n'
+    );
+}
 function runStopTick(home: string): string {
     const res = spawnSync('bun', ['run', TICK], {
         input: JSON.stringify({
@@ -52,6 +64,7 @@ describe('Stop hook keepalive wiring', () => {
             path.join(home, 't.jsonl'),
             JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-4-8', role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }) + '\n'
         );
+        writePendingCheckpoint(path.join(home, 'proj'));
 
         const out = runStopTick(home);
         fs.rmSync(home, { recursive: true, force: true });
@@ -79,6 +92,7 @@ describe('Stop hook keepalive wiring', () => {
             path.join(home, 't.jsonl'),
             JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-4-8', role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }) + '\n'
         );
+        writePendingCheckpoint(path.join(home, 'proj'));
 
         const first = runStopTick(home);
         expect(first).toContain('[pacekeeper-keepalive]');

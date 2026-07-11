@@ -37,7 +37,8 @@ const ConfigSchema = z.object({
         interval_min: z.number().int().positive(),
         // After this many hours of continuous idleness, tick.ts tells Claude to
         // tear down the recurring keepalive job rather than keep pinging forever.
-        max_idle_hours: z.number().positive()
+        max_idle_hours: z.number().positive(),
+        require_pending: z.boolean()
     }),
     bridge: z.object({
         enabled: z.boolean(),
@@ -78,7 +79,9 @@ export const DEFAULT_CONFIG: Config = {
     keepalive: {
         enabled: true,
         interval_min: 30,
-        max_idle_hours: 12
+        max_idle_hours: 12,
+        // Only keep the cache warm when something is pending (active checkpoint lane or paused handoff). Set false for the pre-0.6 always-on behavior.
+        require_pending: true
     },
     bridge: {
         enabled: true,

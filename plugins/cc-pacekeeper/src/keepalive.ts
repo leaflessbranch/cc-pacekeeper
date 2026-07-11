@@ -190,9 +190,11 @@ export function keepaliveDirective(args: {
     snap: Snapshot;
     state: KeepaliveState;
     nowMs: number;
+    hasPendingWork?: boolean;
 }): KeepaliveDecision {
     const { cfg, snap, state } = args;
     if (!cfg.keepalive.enabled) return { directive: null };
+    if (cfg.keepalive.require_pending && args.hasPendingWork === false) return { directive: null };
     if (onUsageCredits(snap)) return { directive: null };
     // Keepalive only makes sense with a readable subscription usage cache.
     if (!snap.readings.some(r => r.meter === 'five_hour' || r.meter.startsWith('weekly'))) {

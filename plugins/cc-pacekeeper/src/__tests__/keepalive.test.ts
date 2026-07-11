@@ -147,6 +147,18 @@ describe('keepaliveDirective', () => {
         if (d.directive) expect(d.directive).not.toContain('CronDelete');
     });
 
+    test('require_pending suppresses the schedule directive when no work is pending', () => {
+        const cfg = { ...DEFAULT_CONFIG, keepalive: { ...DEFAULT_CONFIG.keepalive, require_pending: true } };
+        const d = keepaliveDirective({ cfg, snap: base, state: { hasPending: false }, nowMs: 0, hasPendingWork: false });
+        expect(d.directive).toBeNull();
+    });
+
+    test('require_pending allows the directive when work is pending or unknown', () => {
+        const cfg = { ...DEFAULT_CONFIG, keepalive: { ...DEFAULT_CONFIG.keepalive, require_pending: true } };
+        expect(keepaliveDirective({ cfg, snap: base, state: { hasPending: false }, nowMs: 0, hasPendingWork: true }).directive).not.toBeNull();
+        expect(keepaliveDirective({ cfg, snap: base, state: { hasPending: false }, nowMs: 0 }).directive).not.toBeNull();
+    });
+
     test('disabled config → nothing', () => {
         const cfg = { ...DEFAULT_CONFIG, keepalive: { ...DEFAULT_CONFIG.keepalive, enabled: false } };
         const d = keepaliveDirective({ cfg, snap: base, state: { hasPending: false }, nowMs: 0 });

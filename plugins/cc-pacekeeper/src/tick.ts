@@ -349,9 +349,11 @@ async function main(): Promise<void> {
                 const lastDirectiveAt = sessionEntry.lastKeepaliveDirectiveAt ?? 0;
                 const debounceDue = nowMs - lastDirectiveAt >= cfg.keepalive.interval_min * 60_000;
                 if (debounceDue) {
+                    const hasPendingWork = listActive(cwd, cfg.checkpoint_dir_name).length > 0
+                        || listHandoffs(cwd, cfg.checkpoint_dir_name).length > 0;
                     const ka = keepaliveDirective({
                         cfg, snap, state: scanKeepaliveState(stdin.transcript_path),
-                        nowMs
+                        nowMs, hasPendingWork
                     });
                     if (ka.directive) {
                         if (stopLines.length > 0) stopLines.push('');
