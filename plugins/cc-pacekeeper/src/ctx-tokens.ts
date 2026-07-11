@@ -23,6 +23,7 @@ const UsageSchema = z.object({
 
 const AssistantMessageSchema = z.object({
     type: z.literal('assistant').optional(),
+    isSidechain: z.boolean().optional(),
     message: z.object({
         model: z.string().optional(),
         usage: UsageSchema.optional()
@@ -54,6 +55,7 @@ export function readContextTokens(transcriptPath: string): ContextTokens | null 
         try { obj = JSON.parse(line); } catch { continue; }
         const parsed = AssistantMessageSchema.safeParse(obj);
         if (!parsed.success) continue;
+        if (parsed.data.isSidechain === true) continue;
         const usage = parsed.data.message?.usage;
         if (!usage) continue;
         const input = usage.input_tokens ?? 0;
@@ -92,6 +94,7 @@ export function readMostRecentModel(transcriptPath: string): string | null {
         try { obj = JSON.parse(line); } catch { continue; }
         const parsed = AssistantMessageSchema.safeParse(obj);
         if (!parsed.success) continue;
+        if (parsed.data.isSidechain === true) continue;
         const model = parsed.data.message?.model;
         if (model) return model;
     }
