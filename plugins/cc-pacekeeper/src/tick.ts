@@ -32,6 +32,14 @@ import {
     RESUME_MARKER
 } from './agent-budget';
 
+/** A prompt is a marker-triggered system prompt only if it STARTS with the
+ * marker — text that merely QUOTES a marker (a pasted report, a subagent
+ * notification) must pass through untouched (observed live: quoted keepalive
+ * markers got real user messages suppressed). */
+function promptStartsWithMarker(prompt: string | undefined, marker: string): boolean {
+    return (prompt ?? '').trimStart().startsWith(marker);
+}
+
 async function main(): Promise<void> {
     const stdin = await readStdinJson();
     const event = stdin.hook_event_name ?? '';
@@ -72,7 +80,7 @@ async function main(): Promise<void> {
     //    surface a bogus "you were away" line. Short-circuit before any state
     //    mutation so the ping is transparent to idle tracking. Main thread only
     //    — subagents never see UserPromptSubmit (no user prompts at that depth). ──
-    if (isMainThread && event === 'UserPromptSubmit' && (stdin.prompt ?? '').includes(KEEPALIVE_MARKER)) {
+    if (isMainThread && event === 'UserPromptSubmit' && promptStartsWithMarker(stdin.prompt, KEEPALIVE_MARKER)) {
         // The ping is where idle is actually measurable. Read (don't mutate) the
         // session entry: gap = now - lastEventAt is the true idle time.
         const entry = getSessionEntry(sessionId);
@@ -238,7 +246,7 @@ async function main(): Promise<void> {
         // NOT suppressed like keepalive pings — inject fresh orientation
         // (meters + active lane + pending handoffs) instead of the normal
         // per-prompt heartbeat.
-        if (isMainThread && (stdin.prompt ?? '').includes(RESUME_MARKER)) {
+        if (isMainThread && promptStartsWithMarker(stdin.prompt, RESUME_MARKER)) {
             injection = buildResumeOrientation(cwd, cfg, snap);
         } else {
             // Always inject the combined time + meter line, plus any AFK-return note

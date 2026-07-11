@@ -153,6 +153,57 @@ describe('keepalive ping transparency', () => {
         fs.rmSync(home, { recursive: true, force: true });
     });
 
+    test('a prompt quoting the marker mid-text (idle) is not treated as a ping', () => {
+        // Regression: a pasted subagent report or user message that merely
+        // QUOTES the marker must pass through as a real prompt, not be
+        // misclassified as a system keepalive ping.
+        const home = seedSandbox();
+        const idleStart = Date.now() - 40 * 60_000;
+        fs.writeFileSync(stateFile(home), JSON.stringify({
+            'sess-1': { sessionStartedAt: idleStart - 60_000, lastEventAt: idleStart }
+        }));
+
+        const out = runTick(home, {
+            session_id: 'sess-1',
+            hook_event_name: 'UserPromptSubmit',
+            cwd: path.join(home, 'proj'),
+            prompt: `examine this: "${MARKER} ping suppressed"`
+        });
+
+        // Not treated as a ping: no block decision, no idle-gate cron guidance.
+        expect(out).not.toContain('"decision":"block"');
+        expect(out).not.toContain('do NOT create or delete any cron jobs');
+
+        // Real prompt: lastEventAt advances past the old idle-start, proving it
+        // went through the normal per-prompt heartbeat path.
+        const state = JSON.parse(fs.readFileSync(stateFile(home), 'utf8'));
+        expect(state['sess-1'].lastEventAt).toBeGreaterThan(idleStart);
+
+        fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    test('a prompt quoting the marker mid-text (active) is not blocked either', () => {
+        // Regression (observed live): subagent completion notifications whose
+        // reports quoted the keepalive marker were suppressed and lost because
+        // the gate matched on `.includes` instead of a start anchor.
+        const home = seedSandbox();
+        const recent = Date.now() - 30_000;
+        fs.writeFileSync(stateFile(home), JSON.stringify({
+            'sess-1': { sessionStartedAt: recent - 60_000, lastEventAt: recent }
+        }));
+
+        const out = runTick(home, {
+            session_id: 'sess-1',
+            hook_event_name: 'UserPromptSubmit',
+            cwd: path.join(home, 'proj'),
+            prompt: `subagent report: "${MARKER} ping suppressed — user active"`
+        });
+
+        expect(out).not.toContain('"decision":"block"');
+
+        fs.rmSync(home, { recursive: true, force: true });
+    });
+
     test('a real prompt clears keepalive.idleSince', () => {
         const home = seedSandbox();
         const idleStart = Date.now() - 40 * 60_000;
