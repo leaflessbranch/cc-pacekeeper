@@ -18,6 +18,8 @@ STDIN_TMP="$(mktemp -t pacekeeper-refresh.XXXXXX)"
 cat > "$STDIN_TMP"
 # Detach the refresh; the subshell feeds it the payload then deletes the temp
 # file. stdout/stderr ignored so the parent returns immediately.
-setsid bash -c "bun run --silent '$DIR/../src/refresh.ts' < '$STDIN_TMP'; rm -f '$STDIN_TMP'" < /dev/null > /dev/null 2>&1 &
+# setsid(1) does not exist on macOS; nohup + background + disown achieves the
+# same "survives the hook's exit, no terminal" detach portably.
+nohup bash -c "bun run --silent '$DIR/../src/refresh.ts' < '$STDIN_TMP'; rm -f '$STDIN_TMP'" < /dev/null > /dev/null 2>&1 &
 disown 2>/dev/null || true
 echo '{}'
