@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { MODEL_INFO_CACHE_FILE, readCachedMaxInputTokens } from '../model-info';
+import { MODEL_INFO_CACHE_FILE, readCachedMaxInputTokens, authHeaders, resolveModelInfoAuth } from '../model-info';
 
 const CACHE_DIR = path.dirname(MODEL_INFO_CACHE_FILE);
 let backupPath: string | null = null;
@@ -51,5 +51,31 @@ describe('readCachedMaxInputTokens', () => {
             'claude-opus-4-7': { max_input_tokens: -1, fetched_at: 'x' }
         }));
         expect(readCachedMaxInputTokens('claude-opus-4-7')).toBeNull();
+    });
+});
+
+describe('model-info auth', () => {
+    test('api-key fallback when no OAuth token and ANTHROPIC_API_KEY set', () => {
+        // No CLAUDE_CONFIG_DIR credentials in this env path
+        process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-noauth-'));
+        const auth = resolveModelInfoAuth({ ANTHROPIC_API_KEY: 'sk-ant-test' } as NodeJS.ProcessEnv);
+        // On darwin the keychain may yield a real token; accept either source
+        if (auth?.kind === 'api-key') {
+            expect(auth.key).toBe('sk-ant-test');
+        } else {
+            expect(auth?.kind).toBe('oauth');
+        }
+    });
+
+    test('authHeaders shapes', () => {
+        expect(authHeaders({ kind: 'oauth', token: 't' })).toEqual({
+            'Authorization': 'Bearer t',
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': 'oauth-2025-04-20'
+        });
+        expect(authHeaders({ kind: 'api-key', key: 'k' })).toEqual({
+            'x-api-key': 'k',
+            'anthropic-version': '2023-06-01'
+        });
     });
 });

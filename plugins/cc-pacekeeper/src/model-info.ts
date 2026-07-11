@@ -65,7 +65,29 @@ const ModelApiResponseSchema = z.object({
 
 type FetchResult = { kind: 'success'; maxInputTokens: number } | { kind: 'error' };
 
-async function fetchModelInfoOnce(modelId: string, token: string): Promise<FetchResult> {
+export type ModelInfoAuth = { kind: 'oauth'; token: string } | { kind: 'api-key'; key: string };
+
+/** OAuth (subscription) first; ANTHROPIC_API_KEY as fallback so API-key-only
+ *  setups still resolve real context windows instead of the 200k default. */
+export function resolveModelInfoAuth(env: NodeJS.ProcessEnv = process.env): ModelInfoAuth | null {
+    const token = getUsageToken();
+    if (token) return { kind: 'oauth', token };
+    const key = env.ANTHROPIC_API_KEY?.trim();
+    return key ? { kind: 'api-key', key } : null;
+}
+
+export function authHeaders(auth: ModelInfoAuth): Record<string, string> {
+    if (auth.kind === 'oauth') {
+        return {
+            'Authorization': `Bearer ${auth.token}`,
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': 'oauth-2025-04-20'
+        };
+    }
+    return { 'x-api-key': auth.key, 'anthropic-version': '2023-06-01' };
+}
+
+async function fetchModelInfoOnce(modelId: string, auth: ModelInfoAuth): Promise<FetchResult> {
     return new Promise((resolve) => {
         let settled = false;
         const finish = (v: FetchResult) => { if (!settled) { settled = true; resolve(v); } };
@@ -74,11 +96,7 @@ async function fetchModelInfoOnce(modelId: string, token: string): Promise<Fetch
             hostname: API_HOST,
             path: `/v1/models/${encodeURIComponent(modelId)}`,
             method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'anthropic-version': '2023-06-01',
-                'anthropic-beta': 'oauth-2025-04-20'
-            },
+            headers: authHeaders(auth),
             timeout: API_TIMEOUT_MS,
             ...(proxyUrl ? { agent: new HttpsProxyAgent(proxyUrl) } : {})
         }, (response) => {
@@ -108,9 +126,9 @@ async function fetchModelInfoOnce(modelId: string, token: string): Promise<Fetch
  * Safe to call from a detached background script.
  */
 export async function fetchAndCacheMaxInputTokens(modelId: string): Promise<number | null> {
-    const token = getUsageToken();
-    if (!token) return null;
-    const result = await fetchModelInfoOnce(modelId, token);
+    const auth = resolveModelInfoAuth();
+    if (!auth) return null;
+    const result = await fetchModelInfoOnce(modelId, auth);
     if (result.kind !== 'success') return null;
     const cache = readCache();
     cache[modelId] = {
