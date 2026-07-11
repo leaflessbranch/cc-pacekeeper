@@ -33,15 +33,16 @@ function decision(out: Record<string, unknown>): string | undefined {
 /** [G7] Wake-arming is exclusively the main loop's job: resume-marker
  * CronCreate is auto-approved only when agent_id is absent. */
 describe('pacekeeper-approve resume marker', () => {
-    test('allows marker CronCreate on the main thread (no agent_id)', () => {
-        const out = run({ tool_name: 'CronCreate', tool_input: { prompt: RESUME_MARKER + ' lane feat-x, 2 handoffs pending' } });
+    // A one-shot pins minute/hour/day-of-month/month (single future fire).
+    test('allows full-shape wake one-shot on the main thread (no agent_id)', () => {
+        const out = run({ tool_name: 'CronCreate', tool_input: { cron: '30 14 7 11 *', recurring: false, prompt: RESUME_MARKER + ' lane feat-x, 2 handoffs pending' } });
         expect(decision(out)).toBe('allow');
     });
 
     test('does NOT allow marker CronCreate from a subagent (agent_id present)', () => {
         const out = run({
             tool_name: 'CronCreate',
-            tool_input: { prompt: RESUME_MARKER + ' lane feat-x' },
+            tool_input: { cron: '30 14 7 11 *', recurring: false, prompt: RESUME_MARKER + ' lane feat-x' },
             agent_id: 'ag-123'
         });
         expect(decision(out)).toBeUndefined();
@@ -49,7 +50,7 @@ describe('pacekeeper-approve resume marker', () => {
     });
 
     test('non-marker CronCreate still falls through', () => {
-        const out = run({ tool_name: 'CronCreate', tool_input: { prompt: 'unrelated job' } });
+        const out = run({ tool_name: 'CronCreate', tool_input: { cron: '30 14 7 11 *', recurring: false, prompt: 'unrelated job' } });
         expect(out).toEqual({});
     });
 });
