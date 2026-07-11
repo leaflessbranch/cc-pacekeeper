@@ -49,7 +49,7 @@ export async function runDoctor(opts: { network?: boolean } = {}): Promise<Docto
         const source = fs.existsSync(credFile) ? credFile : 'macOS Keychain (service "Claude Code-credentials")';
         checks.push({ name: 'credentials', severity: 'ok', detail: `OAuth token found via ${source}` });
     } else {
-        const apiKeyAuth = resolveModelInfoAuth();
+        const apiKeyAuth = resolveModelInfoAuth(process.env, () => token);
         checks.push({
             name: 'credentials', severity: apiKeyAuth ? 'warn' : 'fail',
             detail: apiKeyAuth
