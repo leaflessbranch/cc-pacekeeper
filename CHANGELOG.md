@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1]
+
+### Changed
+
+- **Keepalive "ping suppressed" block reason now rotates.** When a keepalive ping races with active use, `tick.ts` blocks it hook-side; Claude Code renders that as an unavoidable yellow `UserPromptSubmit operation blocked by hook` banner the plugin cannot restyle. The reason is the only lever, and the single terse string (`keepalive ping suppressed — user active`) read like an error. It now draws from `PING_SUPPRESSED_REASONS` — dry, plainly-intentional one-liners — via a pure, clock-derived rotation (`Math.floor(now / 60_000) % len`), so it varies ping-to-ping while the suppression path still mutates no state. Every reason keeps the `[pacekeeper]` marker and none start with the keepalive marker, so the prompt-start marker gates are unaffected.
+
 ## [0.6.0]
 
 Hardening release: injection-proof cron auto-approval, macOS bug fixes, CI, richer doctor.
