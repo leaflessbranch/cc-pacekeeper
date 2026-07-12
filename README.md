@@ -2,7 +2,7 @@
 
 A Claude Code plugin that hands monitoring of context window, 5-hour session block, and weekly usage limits over to Claude itself — so it can pace, warn, and checkpoint work before hitting a wall.
 
-**Status:** v0.5.0 — macOS Keychain OAuth reading, self-diagnosis (doctor verb + silent-failure surfacing), graceful degradation (no-op hooks when Bun missing), model-family tracking, plus everything from 0.4: budget-aware subagent trees with pause/handoff files, autonomous 5h-block renewal (auto-save + scheduled auto-wake), context auto-save. See the [changelog](CHANGELOG.md).
+**Status:** v0.6.1 — keepalive "ping suppressed" block reason now rotates so a ping racing active use reads as routine, not an error, plus everything from 0.6: injection-hardened cron auto-approval, need-based keepalive, three latent macOS bug fixes + CI (ubuntu + macos), and a richer doctor (crash breadcrumbs, version skew, cache-drift, `--transcript` probe). See the [changelog](CHANGELOG.md).
 
 ![cc-pacekeeper in action](docs/demo.gif)
 
@@ -51,6 +51,7 @@ Plus **extra-usage credits** state, so when limits approach Claude can ask wheth
 - **Need-based keepalive** — the idle cache-warming cron only schedules while a checkpoint lane or paused handoff is pending (`keepalive.require_pending`, default true).
 - **macOS fixes + CI** — three latent macOS bugs fixed (background refresh, live-session counting, symlinked `/tmp`); the suite is enforced green on ubuntu + macos via GitHub Actions.
 - **Doctor grows** — hook-crash breadcrumbs, version-skew detection, cache format-drift checks, `--transcript` probe.
+- **Calmer keepalive suppression (0.6.1)** — when a keepalive ping races with active use, the unavoidable hook-block banner is all the plugin can restyle; its reason now rotates through a set of dry, plainly-intentional one-liners (clock-derived, no persisted state) instead of one terse string that read like an error.
 
 ## Install
 

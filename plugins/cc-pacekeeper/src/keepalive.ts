@@ -174,6 +174,42 @@ export function pingGate(gapMs: number, cfg: Config): 'block' | 'passthrough' {
 }
 
 /**
+ * Block-reason strings shown when a keepalive ping is suppressed because the
+ * user is active. Claude Code renders the block as an alarming yellow "operation
+ * blocked by hook" banner that the plugin can't restyle — so the wording carries
+ * the whole "this is routine, nothing is broken" message. Rotated for variety.
+ *
+ * Every line must keep the [pacekeeper] status marker but must NOT start with the
+ * KEEPALIVE_MARKER, or it would trip the prompt-start marker gates in tick.ts.
+ */
+export const PING_SUPPRESSED_REASONS = [
+    "[pacekeeper] you're active. Ping dismissed with prejudice.",
+    "[pacekeeper] ping suppressed. You're alive. Good talk.",
+    "[pacekeeper] busy detected. ping yeeted.",
+    "[pacekeeper] keepalive ping: read, ignored. wai.",
+    "[pacekeeper] ping went to knock, you answered the door. nvm.",
+    "[pacekeeper] ping suppressed — this is not the error you're looking for.",
+    "[pacekeeper] you're awake, so this ping can go home.",
+    "[pacekeeper] ping suppressed. all systems nominal, carry on.",
+    "[pacekeeper] ping suppressed. touch grass? no — you're touching keyboard.",
+    "[pacekeeper] you're typing, I checked. ping returned to sender.",
+    "[pacekeeper] ping self-destructed on contact with a live user.",
+    "[pacekeeper] no pulse check needed, pulse detected. ping voided.",
+    "[pacekeeper] ping suppressed. working as designed, unlike most things."
+] as const;
+
+/**
+ * Pick a suppression reason. Pure and state-free by design: the block path in
+ * tick.ts deliberately mutates no state, so rotation is derived from the clock
+ * (pings fire minutes apart → the minute bucket varies between them) rather than
+ * a persisted counter. Deterministic in `now`, so it unit-tests cleanly.
+ */
+export function pingSuppressedReason(now: number): string {
+    const i = Math.floor(now / 60_000) % PING_SUPPRESSED_REASONS.length;
+    return PING_SUPPRESSED_REASONS[i]!;
+}
+
+/**
  * Ensure a keepalive job exists. Emits a schedule directive when none is
  * pending, and null otherwise. The job is recurring (scheduled once per
  * session) so there is no reschedule/cancel churn — pings just fire on their

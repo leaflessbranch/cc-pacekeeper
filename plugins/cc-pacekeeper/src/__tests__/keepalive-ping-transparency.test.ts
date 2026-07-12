@@ -3,6 +3,7 @@ import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { PING_SUPPRESSED_REASONS } from '../keepalive';
 
 const TICK = path.join(import.meta.dir, '..', 'tick.ts');
 
@@ -95,7 +96,7 @@ describe('keepalive ping transparency', () => {
 
         const parsed = JSON.parse(out);
         expect(parsed.decision).toBe('block');
-        expect(parsed.reason).toContain('user active');
+        expect(PING_SUPPRESSED_REASONS as readonly string[]).toContain(parsed.reason);
         // Still no state mutation.
         const state = JSON.parse(fs.readFileSync(stateFile(home), 'utf8'));
         expect(state['sess-1'].lastEventAt).toBe(recent);
