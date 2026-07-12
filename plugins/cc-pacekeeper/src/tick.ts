@@ -15,7 +15,7 @@ import {
     usageErrorNoteToSurface,
     type Snapshot
 } from './thresholds';
-import { keepaliveDirective, scanKeepaliveState, scanMarkerCreates, pingGate, KEEPALIVE_MARKER } from './keepalive';
+import { keepaliveDirective, scanKeepaliveState, scanMarkerCreates, pingGate, pingSuppressedReason, KEEPALIVE_MARKER } from './keepalive';
 import { peekLevel, shouldInjectAndRecord, stateKey, type Level, type Meter } from './state';
 import { touchSession, updateSession, getSessionEntry, type SessionEntry } from './session-state';
 import { detectAfkReturn, formatTimeSegment } from './timeline';
@@ -90,7 +90,7 @@ async function main(): Promise<void> {
             if (gate === 'block') {
                 // User is active — suppress the ping hook-side. Zero context cost.
                 // The recurring job persists; nothing to reschedule or delete.
-                emitBlock('[pacekeeper] keepalive ping suppressed — user active');
+                emitBlock(pingSuppressedReason(Date.now()));
                 return;
             }
             // Total idle accumulates across ping turns: each passthrough ping
