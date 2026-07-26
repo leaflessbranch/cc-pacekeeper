@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { pingGate } from '../keepalive';
+import { pingGate, pingSuppressedReason, PING_SUPPRESSED_REASONS, KEEPALIVE_MARKER } from '../keepalive';
 import { DEFAULT_CONFIG } from '../config';
 
 /**
@@ -28,5 +28,33 @@ describe('pingGate', () => {
         // 120-minute idle_threshold_min.
         expect(pingGate(9 * 60_000, cfg)).toBe('passthrough');
         expect(pingGate(7 * 60_000, cfg)).toBe('block');
+    });
+});
+
+/**
+ * The suppression reason shown while the user is active. Rotated for variety,
+ * pure in `now` (the block path mutates no state, so rotation can't lean on a
+ * persisted counter).
+ */
+describe('pingSuppressedReason', () => {
+    test('always returns a string from the rotation set', () => {
+        for (let m = 0; m < PING_SUPPRESSED_REASONS.length * 3; m++) {
+            const reason = pingSuppressedReason(m * 60_000);
+            expect(PING_SUPPRESSED_REASONS as readonly string[]).toContain(reason);
+        }
+    });
+
+    test('rotates across the whole set as the minute bucket advances', () => {
+        const seen = new Set<string>();
+        for (let m = 0; m < PING_SUPPRESSED_REASONS.length; m++) {
+            seen.add(pingSuppressedReason(m * 60_000));
+        }
+        expect(seen.size).toBe(PING_SUPPRESSED_REASONS.length);
+    });
+
+    test('no reason starts with the keepalive marker (would trip the marker gates)', () => {
+        for (const reason of PING_SUPPRESSED_REASONS) {
+            expect(reason.trimStart().startsWith(KEEPALIVE_MARKER)).toBe(false);
+        }
     });
 });
