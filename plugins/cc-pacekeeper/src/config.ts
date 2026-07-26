@@ -64,6 +64,20 @@ const ConfigSchema = z.object({
             loginctl: z.boolean()
         })
     }),
+    // Where to reach the user when they are away. Deliberately channel-
+    // agnostic: `preferred` and `target` are opaque strings the plugin never
+    // interprets, it only hands them back to Claude, which resolves them
+    // against whatever MCP channel tools are actually loaded. No channel is
+    // named anywhere in this codebase — users have different ones, and the
+    // plugin cannot know which.
+    channels: z.object({
+        // The user's own labels for their channels, most-preferred first.
+        preferred: z.array(z.string()),
+        // Opaque destination id. Lives only in the user's local config.
+        target: z.string(),
+        // Set once the user has answered the onboarding prompt, so it stops.
+        asked: z.boolean()
+    }),
     share_ccstatusline_cache: z.boolean()
 });
 
@@ -115,6 +129,11 @@ export const DEFAULT_CONFIG: Config = {
             ssh: true,
             loginctl: true
         }
+    },
+    channels: {
+        preferred: [],
+        target: '',
+        asked: false
     },
     share_ccstatusline_cache: false
 };

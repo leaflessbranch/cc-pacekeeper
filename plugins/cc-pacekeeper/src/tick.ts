@@ -20,6 +20,8 @@ import { peekLevel, shouldInjectAndRecord, stateKey, type Level, type Meter } fr
 import { touchSession, updateSession, getSessionEntry, type SessionEntry } from './session-state';
 import { detectAfkReturn, formatTimeSegment } from './timeline';
 import { liveSessionCount } from './live-sessions';
+import { awayDirective, onboardingDirective } from './channels';
+import { isAway } from './presence';
 import { fetchUsageData, readUsageCacheFile } from './vendor/usage-fetch';
 import type { UsageData } from './vendor/usage-types';
 import { fetchAndCacheMaxInputTokens, readCachedMaxInputTokens } from './model-info';
@@ -134,6 +136,12 @@ async function main(): Promise<void> {
     let sessionStartBlock = '';
     if (isMainThread && event === 'SessionStart') {
         sessionStartBlock = buildSessionStartContext(cwd, cfg.checkpoint_dir_name);
+        // One-time channel onboarding. SessionStart, not Stop: Stop fires every
+        // turn-end, so the question would repeat all session.
+        const onboarding = onboardingDirective(cfg);
+        if (onboarding) {
+            sessionStartBlock = sessionStartBlock ? `${sessionStartBlock}\n\n${onboarding}` : onboarding;
+        }
     }
 
     // ── Compute meters from cached usage + transcript. Hot path. The only API
@@ -336,6 +344,27 @@ async function main(): Promise<void> {
                 );
             }
         }
+        // Away notification. Only when the user is actually absent (the monitor
+        // writes the verdict; no probing on the hot path), something is pending
+        // that would still be running without them, and a limit has escalated.
+        // Walking away from an idle session with nothing to report is not worth
+        // a message.
+        if (escalated && isAway()) {
+            const pending = listActive(cwd, cfg.checkpoint_dir_name).length > 0
+                || listHandoffs(cwd, cfg.checkpoint_dir_name).length > 0;
+            if (pending) {
+                const away = awayDirective(cfg, snap.readings
+                    // `stale` readings are last-known values from an ended
+                    // block — display-only, never a basis for waking the user.
+                    .filter(r => !r.stale && (r.level === 'warn' || r.level === 'critical'))
+                    .map(r => ({ reason: `${r.meter} is at ${r.level} (${Math.round(r.percent)}%)` })));
+                if (away) {
+                    if (stopLines.length > 0) stopLines.push('');
+                    stopLines.push(away);
+                }
+            }
+        }
+
         // Stop fires at every turn-end. Ensure a keepalive job exists —
         // idempotently, so it emits at most once per interval, not every turn.
         // Main thread only: subagents have no idle concept of their own.

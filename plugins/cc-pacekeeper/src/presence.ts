@@ -270,6 +270,24 @@ export function probeAll(cfg: Config, nowMs: number): Signal[] {
 }
 
 /**
+ * Whether the last observed transition was into `afk`.
+ *
+ * A plain file read, deliberately: this is called from the Stop hook, which is
+ * on the hot path, and the monitor has already done the probing. Absent or
+ * unreadable state means "not known to be away" — the same fail-toward-present
+ * bias as the fusion ladder, since a wrong `true` reroutes output away from a
+ * user who is sitting right there.
+ */
+export function isAway(): boolean {
+    try {
+        const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) as { state?: string };
+        return raw.state === 'afk';
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Path to the cross-session transition record. The monitor
  * (`presence-watch.ts`) uses it to decide whether *it* is the watcher that
  * announces a given transition — presence is a property of the machine, so N

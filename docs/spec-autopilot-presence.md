@@ -120,22 +120,41 @@ fused state.
 ### Channel switching
 
 Hooks are short-lived bun processes with no MCP access, so pacekeeper **cannot send
-messages itself**. It injects an instruction into context and Claude performs the send
-with its own MCP tools.
+messages itself**. It injects an instruction and Claude performs the send with its own
+MCP tools.
 
-Injected on transition to `afk`, e.g.:
+**The plugin is channel-agnostic and names no channel anywhere.** Users have different
+channels configured, so an enumerated list (`"telegram" | "signal" | …`) would be wrong
+for most of them and would break silently for anyone whose channel is not on it.
+Instead:
 
-> `[pacekeeper] User is AFK (no input 23m). Route significant updates to the configured
-> channel: <channel> → <target>. Keep terminal output normal.`
+- `preferred` and `target` are **opaque strings** the plugin stores and hands back
+  verbatim. It never parses or validates them.
+- At send time **Claude resolves the preference** against whatever channel tools are
+  actually loaded in that session. The plugin cannot see the tool list; Claude can.
+- A test asserts no channel name appears in the plugin's own output, so this does not
+  regress.
 
-Channel and target are **read from config only** — never hardcoded, never in code,
-tests, docs, or committed examples (CLAUDE.md §7).
+**Onboarding.** When no preference is recorded, a directive injected at **SessionStart**
+asks the user once, offering the channels Claude can actually see as loaded MCP tools.
+SessionStart rather than Stop: Stop fires at every turn end, so the question would repeat
+all session. The `asked` flag — not a debounce — is what stops it, so a user who declines
+is not re-prompted forever.
 
-**Send policy: significant events only.** Task completed, task blocked, threshold
-crossed, run finished, question needed. Never mirror every assistant turn.
+**Send policy: significant events only, batched.** Today that means threshold crossings
+while away; autopilot will add task-completed / blocked / finished. Never mirror
+assistant turns. All notices for a turn go into one message — each notification costs a
+turn, and this plugin exists to conserve quota.
 
-**Direction: notify-only for v1.** The Telegram/Signal MCP plugins already handle
-inbound separately; feeding replies into a running autonomous loop is a much larger
+**Gated on pending work.** No notification fires when the user walks away from an idle
+session with nothing running: the same `require_pending` reasoning the keepalive uses. A
+ping that says "you left" with nothing to report is noise.
+
+**Stale readings never notify.** A `stale` meter reading is a last-known value from an
+ended block, explicitly display-only — never a basis for waking someone.
+
+**Direction: notify-only for v1.** Inbound replies are handled separately by whatever
+channel plugin the user has; feeding them into a running autonomous loop is a much larger
 design and is out of scope.
 
 ### Config addition
@@ -148,14 +167,14 @@ design and is out of scope.
     "probes": { "tmux": true, "tty": true, "ssh": true, "loginctl": true }
   },
   "channels": {
-    "preferred": "none",              // "telegram" | "signal" | "command" | "none"
-    "telegram": { "chat_id": "" },    // placeholder — real value is user-local only
-    "signal":   { "recipient": "" },
-    "command":  { "argv": [] },       // escape hatch for users without MCP channels
-    "fallback": "none"
+    "preferred": [],   // the user's own labels, most-preferred first
+    "target": "",      // opaque destination id; user-local only, never committed
+    "asked": false     // set once answered, so onboarding stops
   }
 }
 ```
+
+Both `preferred` and `target` live only in the user's local config (CLAUDE.md §7).
 
 ---
 
