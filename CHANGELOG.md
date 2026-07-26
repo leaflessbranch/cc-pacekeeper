@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0]
+
+Proactive presence detection, in log-only mode. Nothing consumes the verdict yet — this
+release exists to validate the detection against real usage before it is allowed to gate
+any behavior.
+
+### Added
+
+- `src/presence.ts` — proactive AFK detection. Until now, absence was only knowable
+  retroactively, from the gap between two hook events once the user returned. Four Linux
+  probes (tmux client activity, controlling-tty atime, SSH logins via `who`, systemd
+  `IdleHint`) are fused by a priority ladder into `online` / `afk` / `unknown`.
+- `presence` config block: `enabled`, `idle_minutes`, and per-probe toggles.
+- `doctor` reports which probes this machine offers and the current fused verdict.
+- Sampling runs in the already-detached PostToolUse refresh child, so the probe
+  subprocesses add no hook latency. Samples append to
+  `~/.cache/cc-pacekeeper/presence-log.jsonl` with the per-probe breakdown, so a wrong
+  verdict is diagnosable after the fact.
+
+### Notes
+
+- **Presence requires attachment plus recent activity, never mere connection existence.**
+  A live SSH socket is the most tempting signal and the one that lies: it lingers for
+  minutes after a laptop closes. A detached tmux session under a live SSH connection
+  therefore votes neither `online` nor `afk`.
+- **An unavailable probe never votes `afk`.** Degradation fails toward "assume present",
+  because a false `afk` would reroute output away from a user who is sitting there
+  watching — worse than a missed notification. All probes unavailable yields `unknown`.
+- Linux-only by design; macOS support is deferred for lack of a test environment. On
+  other platforms every probe reports `unavailable` and detection falls back to the
+  existing hook-gap behavior.
+
 ## [0.6.0]
 
 Hardening release: injection-proof cron auto-approval, macOS bug fixes, CI, richer doctor.

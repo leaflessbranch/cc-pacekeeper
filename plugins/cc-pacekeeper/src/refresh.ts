@@ -5,6 +5,7 @@ import { readStdinJson } from './hook-io';
 import { readMostRecentModel } from './ctx-tokens';
 import { fetchAndCacheMaxInputTokens, readCachedMaxInputTokens, cachedEntryAgeDays, MODEL_INFO_REFRESH_AFTER_DAYS } from './model-info';
 import { recordCrash } from './crash-log';
+import { logPresence } from './presence';
 
 /**
  * Detached refresh script — runs in the background after PostToolUse. Self-gates
@@ -27,6 +28,15 @@ async function main(): Promise<void> {
     if (model && (readCachedMaxInputTokens(model) === null
         || (modelAge !== null && modelAge > MODEL_INFO_REFRESH_AFTER_DAYS))) {
         try { await fetchAndCacheMaxInputTokens(model); } catch { /* swallow */ }
+    }
+
+    // Presence sampling, log-only for now: nothing consumes the verdict yet.
+    // Runs here because this child is already detached and need-gated, so the
+    // five probe subprocesses cost the hook nothing. Deliberately placed ahead
+    // of the usage-cache early-return below, which would otherwise skip it on
+    // most invocations.
+    if (cfg.presence.enabled) {
+        try { logPresence(cfg, Date.now()); } catch { /* never break refresh */ }
     }
 
     const age = getUsageCacheFileAgeSeconds();

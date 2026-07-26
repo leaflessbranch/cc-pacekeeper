@@ -51,6 +51,19 @@ const ConfigSchema = z.object({
         subagent_pause_pct: z.number().min(0).max(100),
         wake_delay_min: z.number().int().positive()
     }),
+    // Proactive presence detection (src/presence.ts). Linux-only probes; on
+    // other platforms they all report unavailable and detection falls back to
+    // the retroactive hook-gap signal.
+    presence: z.object({
+        enabled: z.boolean(),
+        idle_minutes: z.number().int().positive(),
+        probes: z.object({
+            tmux: z.boolean(),
+            tty: z.boolean(),
+            ssh: z.boolean(),
+            loginctl: z.boolean()
+        })
+    }),
     share_ccstatusline_cache: z.boolean()
 });
 
@@ -92,6 +105,16 @@ export const DEFAULT_CONFIG: Config = {
         five_hour_pct: 85,
         subagent_pause_pct: 75,
         wake_delay_min: 3
+    },
+    presence: {
+        enabled: true,
+        idle_minutes: 10,
+        probes: {
+            tmux: true,
+            tty: true,
+            ssh: true,
+            loginctl: true
+        }
     },
     share_ccstatusline_cache: false
 };
