@@ -64,6 +64,16 @@ closed-laptop case, where the TCP connection lingers for minutes — contributes
 five subprocesses; they run in the already-detached `refresh.ts` child (PostToolUse,
 need-gated), so no new daemon and no added hook latency.
 
+**Sampling while away — the gap the hook path cannot close.** Hook-driven sampling only
+runs when a hook fires, and hooks fire only when the session is doing something. Absence
+is therefore invisible to it: the moment the user leaves, sampling stops. Detecting the
+`online → afk` transition requires a watcher that polls independently.
+
+Validated live on 2026-07-26: a 20 s poll loop emitting only on state change detected a
+real detach (tmux + SSH exit) within 20 seconds, and the resulting notification woke the
+model, which sent the Signal message unprompted. Both probes flipped correctly
+(`tmux:idle`, `ssh:idle`) with no false reading in either direction.
+
 **Platform.** Linux-first. macOS is explicitly deferred — we have no way to test it.
 The code must not *break* there (CI runs both): every non-Linux probe reports
 `unavailable`, so macOS falls back to today's `hook-gap` behavior.
@@ -308,6 +318,17 @@ Observed directly: `tick.ts` emitted the keepalive directive on `Stop` via
 `emitAdditionalContext`; it surfaced as `Stop hook additional context:` and the model
 acted on it, executing `ToolSearch` → `CronList` → `CronCreate`. The resulting recurring
 job was confirmed present afterwards, so the calls genuinely executed.
+
+**Also resolved: a background Monitor event wakes the model with tool access.** Verified
+live on 2026-07-26 — a presence transition detected by a background poll loop produced a
+notification that reached the model mid-idle, and the model sent a Signal message from
+it without any user prompt. This is a *second* viable wake path alongside the hook, and a
+strictly better one for presence: it fires on the transition (~20 s) rather than at the
+next hook event, which by definition does not occur while the user is away.
+
+Consequence for the design: **the AFK notification does not need to wait for a hook.**
+A watcher can wake the model when presence changes. The `Stop`-hook path remains the
+mechanism for injecting status into an active session.
 
 Two constraints this imposes on the channel layer:
 
