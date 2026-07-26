@@ -60,19 +60,55 @@ closed-laptop case, where the TCP connection lingers for minutes — contributes
 - No SSH, local TTY, tmux attached, recent activity → `online`.
 - Bare SSH (no tmux), recent TTY atime → `online`.
 
-**Caching.** Result cached ~30 s in `~/.cache/cc-pacekeeper/presence.json`. Probes are
-five subprocesses; they run in the already-detached `refresh.ts` child (PostToolUse,
-need-gated), so no new daemon and no added hook latency.
+**Caching.** Result cached ~30 s in `~/.cache/cc-pacekeeper/presence.json`.
 
-**Sampling while away — the gap the hook path cannot close.** Hook-driven sampling only
-runs when a hook fires, and hooks fire only when the session is doing something. Absence
-is therefore invisible to it: the moment the user leaves, sampling stops. Detecting the
-`online → afk` transition requires a watcher that polls independently.
+**Sampling runs in a declared plugin monitor, not in a hook.** Hook events fire only
+while a session is active, so a hook can never observe a *departure* — the moment the
+user leaves, sampling stops. This is structural, not a tuning problem, and it was the
+original design's fatal flaw.
 
-Validated live on 2026-07-26: a 20 s poll loop emitting only on state change detected a
-real detach (tmux + SSH exit) within 20 seconds, and the resulting notification woke the
-model, which sent the Signal message unprompted. Both probes flipped correctly
-(`tmux:idle`, `ssh:idle`) with no false reading in either direction.
+Claude Code's `monitors/` component solves it directly: a plugin declares a background
+command, Claude Code starts it automatically for the session's lifetime, and every
+stdout line is delivered as a notification. No daemon, no systemd unit, no lifecycle
+management, and nothing for the model to remember to invoke.
+
+```jsonc
+// monitors/monitors.json
+[{ "name": "presence",
+   "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/pacekeeper-presence-watch",
+   "description": "User presence (online/AFK) transitions" }]
+```
+
+Constraints, from the plugins reference:
+
+- Monitors are an **experimental component**; the manifest schema may change. Declaring
+  them at `experimental.monitors` in `plugin.json` is the forward-compatible location,
+  and `monitors/monitors.json` is the default path.
+- They run only in interactive CLI sessions, unsandboxed at hook trust level, and are
+  skipped where the Monitor tool is unavailable.
+- A monitor command **cannot read `${user_config.*}`**; the script reads config itself.
+- Disabling the plugin mid-session does not stop a running monitor.
+
+**Output is one line per transition, never a heartbeat.** Each line costs a turn, and
+this plugin exists to conserve quota.
+
+**Cross-session dedup.** Presence is a property of the machine, not of a session: one AFK
+signal is confirmed absence, and a second observer adds nothing. But Claude Code runs one
+monitor *per session*, so N open sessions would otherwise produce N notifications for one
+departure. Watchers arbitrate through `presence-state.json`: a transition is announced
+only by the watcher that records it, and the losers stay silent. Verified — a second
+watcher observing the same state prints nothing.
+
+**Validated live, 2026-07-26.** A 20 s poll loop detected a real tmux detach + SSH exit
+within 20 seconds; the notification woke the model, which sent a Signal message
+unprompted. Both probes flipped correctly (`tmux:idle`, `ssh:idle`), the reverse
+transition fired on reconnect, and five toggles produced no flapping or false readings.
+
+**What remains impossible.** No supported mechanism lets an external process reach a
+Claude session — no IPC, no socket, no watched file, no MCP push. Monitors stop when the
+session ends. So *AFK while a session is open* is solvable and now solved; *AFK after the
+session ends* is not, and no amount of plugin code changes that. This is an acceptable
+boundary: autopilot means a live session doing work, which is exactly when a monitor runs.
 
 **Platform.** Linux-first. macOS is explicitly deferred — we have no way to test it.
 The code must not *break* there (CI runs both): every non-Linux probe reports

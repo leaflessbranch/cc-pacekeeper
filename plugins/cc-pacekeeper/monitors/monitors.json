@@ -1,0 +1,7 @@
+[
+  {
+    "name": "presence",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/pacekeeper-presence-watch",
+    "description": "User presence (online/AFK) transitions"
+  }
+]

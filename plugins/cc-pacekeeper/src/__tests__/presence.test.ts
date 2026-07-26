@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { fuse, parseWhoRemoteTtys, type Signal } from '../presence';
+import { fuse, parseWhoRemoteTtys, presenceStateFile, type Signal } from '../presence';
 
 const IDLE_MS = 10 * 60_000; // matches DEFAULT_CONFIG.presence.idle_minutes
 const NOW = Date.UTC(2026, 6, 26, 12, 0, 0);
@@ -106,6 +106,17 @@ describe('parseWhoRemoteTtys', () => {
 
     test('empty output yields no logins', () => {
         expect(parseWhoRemoteTtys('')).toEqual([]);
+    });
+});
+
+describe('presenceStateFile', () => {
+    test('is a stable path under the plugin cache dir', () => {
+        const f = presenceStateFile();
+        expect(f).toContain('cc-pacekeeper');
+        expect(f.endsWith('presence-state.json')).toBe(true);
+        // Shared across sessions by construction — the dedup depends on every
+        // watcher on the machine resolving the same path.
+        expect(presenceStateFile()).toBe(f);
     });
 });
 

@@ -19,6 +19,7 @@ import type { Config } from './config';
 
 const CACHE_DIR = path.join(os.homedir(), '.cache', 'cc-pacekeeper');
 const CACHE_FILE = path.join(CACHE_DIR, 'presence.json');
+const STATE_FILE = path.join(CACHE_DIR, 'presence-state.json');
 const CACHE_TTL_MS = 30_000;
 const PROBE_TIMEOUT_MS = 1500;
 
@@ -268,37 +269,14 @@ export function probeAll(cfg: Config, nowMs: number): Signal[] {
     return signals;
 }
 
-const LOG_FILE = path.join(CACHE_DIR, 'presence-log.jsonl');
-const LOG_MAX_BYTES = 512 * 1024;
-
 /**
- * Append one presence sample to a JSONL soak log. Log-only mode: nothing
- * consumes the verdict yet, so this is purely an instrument for checking the
- * ladder against reality before it is allowed to gate anything.
- *
- * The per-probe breakdown is recorded, not just the fused state — a wrong
- * verdict is only diagnosable if you can see which probe misreported.
+ * Path to the cross-session transition record. The monitor
+ * (`presence-watch.ts`) uses it to decide whether *it* is the watcher that
+ * announces a given transition — presence is a property of the machine, so N
+ * open sessions must not produce N notifications for one departure.
  */
-export function logPresence(cfg: Config, nowMs: number): Presence {
-    const signals = probeAll(cfg, nowMs);
-    const presence = fuse(signals, null, cfg.presence.idle_minutes * 60_000);
-    try {
-        fs.mkdirSync(CACHE_DIR, { recursive: true });
-        // Cheap size cap: truncate wholesale rather than rotating. This is a
-        // temporary diagnostic, not an audit trail worth preserving.
-        try {
-            if (fs.statSync(LOG_FILE).size > LOG_MAX_BYTES) fs.truncateSync(LOG_FILE, 0);
-        } catch { /* no log yet */ }
-        fs.appendFileSync(LOG_FILE, JSON.stringify({
-            at: new Date(nowMs).toISOString(),
-            state: presence.state,
-            lastActivityMs: presence.lastActivityMs,
-            signals: presence.signals
-        }) + '\n');
-    } catch {
-        // Best-effort.
-    }
-    return presence;
+export function presenceStateFile(): string {
+    return STATE_FILE;
 }
 
 /**
