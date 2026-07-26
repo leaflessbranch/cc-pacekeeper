@@ -4,6 +4,89 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0]
+
+Away notifications: when the user steps away mid-run and a limit escalates, Claude is
+told to reach them on their own channel.
+
+### Added
+
+- `src/channels.ts` — away-notification and channel-onboarding directives.
+- `channels` config block: `preferred` (the user's own labels), `target`, `asked`.
+- SessionStart onboarding: with no channel recorded, Claude asks once — offering the
+  channels it can actually see as loaded MCP tools — and saves the answer.
+- Stop-hook away notification, fired only when presence says `afk`, work is pending, and
+  a meter has escalated.
+
+### Notes
+
+- **The plugin is channel-agnostic and names no channel anywhere.** Users configure
+  different channels, so an enumerated list would be wrong for most of them. `preferred`
+  and `target` are opaque strings stored and handed back verbatim; Claude resolves them
+  at send time against whatever tools are actually loaded, since the plugin cannot see
+  the tool list and Claude can. A test asserts no channel name appears in plugin output.
+- Onboarding fires at SessionStart, not Stop — Stop fires every turn-end, so the question
+  would repeat all session. The `asked` flag stops it, so declining is remembered.
+- Notifications are gated on pending work, batched into one message per turn, and never
+  triggered by a `stale` meter reading (a last-known value from an ended block).
+
+## [0.7.1]
+
+Presence sampling moves from the PostToolUse refresh child to a declared plugin monitor.
+
+### Fixed
+
+- **v0.7.0 could not observe a departure.** Sampling ran in a hook-spawned child, and
+  hooks fire only while a session is active — so the moment the user walked away,
+  sampling stopped. Structural, not a tuning problem.
+
+### Changed
+
+- `src/presence-watch.ts` plus `monitors/monitors.json`: Claude Code starts the watcher
+  automatically for the session lifetime and delivers each stdout line as a notification.
+  No daemon, no systemd unit, no lifecycle to manage.
+- Emits one line per transition, never a heartbeat — each line costs a turn.
+- Cross-session dedup via `presence-state.json`: presence is a property of the machine,
+  so N sessions must not produce N notifications for one departure. Only the watcher that
+  records a transition announces it.
+- Removed the refresh-child sampling and the log-only JSONL, both superseded.
+
+### Notes
+
+- Monitors are an **experimental** plugin component; the manifest schema may change.
+- Monitor commands cannot read `${user_config.*}`, so the script loads config itself.
+
+## [0.7.0]
+
+Proactive presence detection, in log-only mode. Nothing consumes the verdict yet — this
+release exists to validate the detection against real usage before it is allowed to gate
+any behavior.
+
+### Added
+
+- `src/presence.ts` — proactive AFK detection. Until now, absence was only knowable
+  retroactively, from the gap between two hook events once the user returned. Four Linux
+  probes (tmux client activity, controlling-tty atime, SSH logins via `who`, systemd
+  `IdleHint`) are fused by a priority ladder into `online` / `afk` / `unknown`.
+- `presence` config block: `enabled`, `idle_minutes`, and per-probe toggles.
+- `doctor` reports which probes this machine offers and the current fused verdict.
+- Sampling runs in the already-detached PostToolUse refresh child, so the probe
+  subprocesses add no hook latency. Samples append to
+  `~/.cache/cc-pacekeeper/presence-log.jsonl` with the per-probe breakdown, so a wrong
+  verdict is diagnosable after the fact.
+
+### Notes
+
+- **Presence requires attachment plus recent activity, never mere connection existence.**
+  A live SSH socket is the most tempting signal and the one that lies: it lingers for
+  minutes after a laptop closes. A detached tmux session under a live SSH connection
+  therefore votes neither `online` nor `afk`.
+- **An unavailable probe never votes `afk`.** Degradation fails toward "assume present",
+  because a false `afk` would reroute output away from a user who is sitting there
+  watching — worse than a missed notification. All probes unavailable yields `unknown`.
+- Linux-only by design; macOS support is deferred for lack of a test environment. On
+  other platforms every probe reports `unavailable` and detection falls back to the
+  existing hook-gap behavior.
 ## [0.6.1]
 
 ### Changed

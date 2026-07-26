@@ -34,6 +34,7 @@ The suite must be fully green on both macOS and Linux — CI (`.github/workflows
 - **`pacekeeper-approve` → `src/approve.ts`** — PreToolUse on `CronCreate|CronDelete`. Auto-approves only the plugin's own keepalive/wake cron calls (matched by markers); everything else falls through to normal permissions.
 - **`pacekeeper-precompact` → `src/precompact.ts`** — PreCompact nudge to checkpoint.
 - **`pacekeeper-checkpoint` → `src/checkpoint-cli.ts`** and **`pacekeeper-worktrees` → `src/worktrees.ts`** — CLIs invoked by the skills, not by hooks.
+- **`pacekeeper-presence-watch` → `src/presence-watch.ts`** — not a hook. Declared in `monitors/monitors.json` as a plugin **monitor**: Claude Code starts it for the session's lifetime and delivers each stdout line to Claude as a notification. This exists because hook events fire only while a session is active, so no hook can observe the user *departing* — sampling stops the moment they leave. Monitors are an experimental plugin component and their manifest schema may change; they also cannot read `${user_config.*}`, so the script calls `loadConfig()` itself.
 
 ### Data flow and state locations
 
@@ -51,6 +52,8 @@ Behavior is coordinated through markers: `[pacekeeper]` (status lines), the keep
 
 - **`doctor`** (`src/doctor.ts`, CLI verb) — ✓/⚠/✗ environment checks; grows a check whenever a new silent-failure mode is found. Hook entrypoints record crashes to `~/.cache/cc-pacekeeper/crash-log.json` via `src/crash-log.ts` — hooks swallow errors by design, so that file is the only trace a crash leaves.
 - **`src/model-family.ts`** — the one table to extend when Anthropic ships a new model family.
+- **Presence** (`src/presence.ts`) fuses four Linux probes into `online`/`afk`/`unknown` via a priority ladder with one asymmetry that is load-bearing: **an unavailable probe never votes `afk`**. Degradation fails toward "assume present", because a false `afk` reroutes output away from a user who is sitting there watching. Presence also requires *attachment plus recent activity*, never mere connection existence — a live SSH socket lingers for minutes after a laptop closes, so it is the most tempting signal and the one that lies. `isAway()` is a cheap state-file read for the hot path; the monitor does the probing.
+- **Channels are never named in this codebase** (`src/channels.ts`). Users configure different ones, so `channels.preferred`/`target` are opaque strings the plugin stores and hands back verbatim — Claude resolves them at send time against the tools actually loaded, which the plugin cannot see. A test asserts no channel name appears in plugin output; keep it that way.
 - **Keepalive is need-based** (`keepalive.require_pending`, default true): the idle cache-warming cron is scheduled only while an active checkpoint lane or paused handoff exists.
 - macOS and Linux are both supported (credentials come from `~/.claude/.credentials.json` or the macOS Keychain; `getUsageToken` is memoized per hook process). Native Windows is not.
 

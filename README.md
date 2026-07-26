@@ -53,6 +53,15 @@ Plus **extra-usage credits** state, so when limits approach Claude can ask wheth
 - **Doctor grows** — hook-crash breadcrumbs, version-skew detection, cache format-drift checks, `--transcript` probe.
 - **Calmer keepalive suppression (0.6.1)** — when a keepalive ping races with active use, the unavoidable hook-block banner is all the plugin can restyle; its reason now rotates through a set of dry, plainly-intentional one-liners (clock-derived, no persisted state) instead of one terse string that read like an error.
 
+### New in v0.7 / v0.8
+
+- **Proactive AFK detection** — a background monitor watches tmux client activity, controlling-tty atime, SSH logins and systemd's idle hint, and reports when you actually step away. Previously absence was only knowable *retroactively*, from the gap between two hook events once you came back; hooks stop firing the moment you leave, so they can never see a departure.
+- **Away notifications** — when you're away, work is pending and a limit escalates, Claude reaches you on the channel you chose instead of talking to an empty terminal. It asks once, at session start, offering whatever channels it can see; the answer is saved.
+- **Channel-agnostic by design** — the plugin names no channel anywhere. Your `preferred` labels and `target` are opaque strings it stores and hands back; Claude resolves them at send time against the tools actually loaded in your session. Your destination lives only in your local config, never in the repo.
+- **Presence is per machine, not per session** — several open sessions won't each ping you for one departure; the watchers arbitrate through a shared state file so exactly one reports it.
+
+Presence probes are Linux-only for now (macOS support is deferred for lack of a test environment); everywhere else detection falls back to the previous hook-gap behavior. Notifications only work while a session is open — nothing can reach a session that has ended.
+
 ## Install
 
 ```
@@ -87,6 +96,26 @@ To list, create, or clean up git worktrees with live-session and dirty-state awa
 /cc-pacekeeper:worktree new <name>
 /cc-pacekeeper:worktree cleanup
 ```
+
+### Away channels
+
+The first session after install, Claude asks how to reach you when you step away, offering the channels it can see in your setup. Nothing is sent unless you answer — decline and it won't ask again.
+
+The answer lands in `~/.config/cc-pacekeeper/config.json`:
+
+```jsonc
+"channels": {
+  "preferred": ["my-channel"],  // your own labels, most-preferred first
+  "target": "my-destination",   // whatever identifies where to send
+  "asked": true
+}
+```
+
+Both values are opaque to the plugin — it stores them and hands them back to Claude, which matches them against the tools actually available. They stay in your local config and are never committed.
+
+You'll only be notified when you're genuinely away, something is pending, and a limit has escalated. Walking away from an idle session sends nothing.
+
+To turn presence detection off entirely, set `"presence": { "enabled": false }`. Run `pacekeeper-checkpoint doctor` to see which probes work on your machine.
 
 Checkpoints are written to your project's `.claude-checkpoints/` directory — anchored to the git repo root (or the session's working directory for non-git projects), never a transient dir like `/tmp`. Because they live in the working tree, you can commit, ignore, or delete them as you see fit.
 

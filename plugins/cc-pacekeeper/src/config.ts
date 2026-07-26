@@ -51,6 +51,33 @@ const ConfigSchema = z.object({
         subagent_pause_pct: z.number().min(0).max(100),
         wake_delay_min: z.number().int().positive()
     }),
+    // Proactive presence detection (src/presence.ts). Linux-only probes; on
+    // other platforms they all report unavailable and detection falls back to
+    // the retroactive hook-gap signal.
+    presence: z.object({
+        enabled: z.boolean(),
+        idle_minutes: z.number().int().positive(),
+        probes: z.object({
+            tmux: z.boolean(),
+            tty: z.boolean(),
+            ssh: z.boolean(),
+            loginctl: z.boolean()
+        })
+    }),
+    // Where to reach the user when they are away. Deliberately channel-
+    // agnostic: `preferred` and `target` are opaque strings the plugin never
+    // interprets, it only hands them back to Claude, which resolves them
+    // against whatever MCP channel tools are actually loaded. No channel is
+    // named anywhere in this codebase — users have different ones, and the
+    // plugin cannot know which.
+    channels: z.object({
+        // The user's own labels for their channels, most-preferred first.
+        preferred: z.array(z.string()),
+        // Opaque destination id. Lives only in the user's local config.
+        target: z.string(),
+        // Set once the user has answered the onboarding prompt, so it stops.
+        asked: z.boolean()
+    }),
     share_ccstatusline_cache: z.boolean()
 });
 
@@ -92,6 +119,21 @@ export const DEFAULT_CONFIG: Config = {
         five_hour_pct: 85,
         subagent_pause_pct: 75,
         wake_delay_min: 3
+    },
+    presence: {
+        enabled: true,
+        idle_minutes: 10,
+        probes: {
+            tmux: true,
+            tty: true,
+            ssh: true,
+            loginctl: true
+        }
+    },
+    channels: {
+        preferred: [],
+        target: '',
+        asked: false
     },
     share_ccstatusline_cache: false
 };

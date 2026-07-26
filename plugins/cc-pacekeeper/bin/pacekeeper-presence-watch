@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# cc-pacekeeper monitor entrypoint: presence watch (declared in monitors/monitors.json)
+set -euo pipefail
+# Without Bun the monitor simply doesn't watch. Exit 0 rather than erroring: a
+# failed monitor would surface as a task error every session, and inert is the
+# same graceful degradation the hooks use.
+if ! command -v bun >/dev/null 2>&1; then
+  echo "cc-pacekeeper: Bun not found on PATH — presence monitor inert." >&2
+  exit 0
+fi
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+exec bun run --silent "$DIR/../src/presence-watch.ts"

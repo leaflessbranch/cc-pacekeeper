@@ -4,6 +4,7 @@ import { configDir, configFile, configValidationIssues, loadConfig } from './con
 import { crashLogFile, readCrashLog } from './crash-log';
 import { readContextTokens, readMostRecentModel } from './ctx-tokens';
 import { MODEL_INFO_CACHE_FILE, resolveModelInfoAuth } from './model-info';
+import { fuse, probeAll } from './presence';
 import { stateDir } from './state';
 import { USAGE_ERROR_HINTS } from './thresholds';
 import { getClaudeConfigDir } from './vendor/claude-config-dir';
@@ -102,6 +103,28 @@ export async function runDoctor(opts: { network?: boolean; transcript?: string }
     checks.push(bad.length === 0
         ? { name: 'state dirs', severity: 'ok', detail: dirs.join(', ') }
         : { name: 'state dirs', severity: 'fail', detail: `not writable: ${bad.join(', ')}` });
+
+    // 7b. Presence probes. Which signals this box actually offers, and the
+    // fused verdict right now. Probes are Linux-only by design; everywhere else
+    // detection falls back to the retroactive hook-gap signal, which is a
+    // reduced capability rather than a fault.
+    if (cfg.presence.enabled) {
+        const signals = probeAll(cfg, Date.now());
+        const presence = fuse(signals, null, cfg.presence.idle_minutes * 60_000);
+        const summary = signals
+            .map(s => `${s.name}:${s.state}${s.detail ? ` (${s.detail})` : ''}`)
+            .join(', ');
+        const allGone = signals.every(s => s.state === 'unavailable');
+        checks.push({
+            name: 'presence probes',
+            severity: allGone ? 'warn' : 'ok',
+            detail: allGone
+                ? `no probes available — falling back to hook-gap detection only. ${summary}`
+                : `state=${presence.state}; ${summary}`
+        });
+    } else {
+        checks.push({ name: 'presence probes', severity: 'ok', detail: 'disabled in config' });
+    }
 
     // 8. Hook crashes (recorded by entrypoint catch handlers — see crash-log.ts).
     const crashes = readCrashLog();
