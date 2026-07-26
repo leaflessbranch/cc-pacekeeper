@@ -2,7 +2,7 @@
 
 A Claude Code plugin that hands monitoring of context window, 5-hour session block, and weekly usage limits over to Claude itself — so it can pace, warn, and checkpoint work before hitting a wall.
 
-**Status:** v0.6.1 — keepalive "ping suppressed" block reason now rotates so a ping racing active use reads as routine, not an error, plus everything from 0.6: injection-hardened cron auto-approval, need-based keepalive, three latent macOS bug fixes + CI (ubuntu + macos), and a richer doctor (crash breadcrumbs, version skew, cache-drift, `--transcript` probe). See the [changelog](CHANGELOG.md).
+**Status:** v0.8.0 — proactive AFK detection (a background monitor watches tmux, tty, SSH and systemd idle, so absence is noticed as it happens rather than inferred after you return) and away notifications that reach you on your own channel when a limit escalates while you're gone. Presence probes are Linux-only for now; macOS falls back to the previous behavior. Plus everything from 0.6: injection-hardened cron auto-approval, need-based keepalive, macOS fixes + CI (ubuntu + macos), and a richer doctor. See the [changelog](CHANGELOG.md).
 
 ![cc-pacekeeper in action](docs/demo.gif)
 
