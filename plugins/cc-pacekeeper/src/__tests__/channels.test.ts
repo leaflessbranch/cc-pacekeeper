@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { awayDirective, onboardingDirective } from '../channels';
+import { awayDirective, awayRoutingDirective, onboardingDirective } from '../channels';
 import { DEFAULT_CONFIG, type Config } from '../config';
 
 function cfgWith(channels: Partial<Config['channels']>): Config {
@@ -67,6 +67,52 @@ describe('awayDirective', () => {
 
     test('omits the target clause when none is set', () => {
         const d = awayDirective(cfgWith({ preferred: ['chan-a'] }), [{ reason: 'x' }]) ?? '';
+        expect(d).not.toContain('target:');
+    });
+});
+
+describe('awayRoutingDirective', () => {
+    const configured = cfgWith({ preferred: ['chan-a'], target: 'dest-1', asked: true });
+
+    test('names the configured channel and target', () => {
+        const d = awayRoutingDirective(configured) ?? '';
+        expect(d).toContain('chan-a');
+        expect(d).toContain('dest-1');
+    });
+
+    test('is silent when no channel is configured', () => {
+        expect(awayRoutingDirective(DEFAULT_CONFIG)).toBeNull();
+    });
+
+    test('is a STANDING, episode-scoped instruction — not turn-scoped', () => {
+        // Guards against regressing to "this turn's reply" wording. The whole
+        // point is that it persists across turns until the user returns.
+        const d = awayRoutingDirective(configured) ?? '';
+        expect(d).toContain('every subsequent reply');
+        expect(d).toContain('detected back');
+        expect(d).toContain('across turns');
+    });
+
+    test('tells Claude to judge substantive-vs-quiet', () => {
+        const d = awayRoutingDirective(configured) ?? '';
+        expect(d).toContain('substantive');
+        expect(d).toContain('stay quiet');
+    });
+
+    test('names no specific channel — the plugin cannot know which exist', () => {
+        const d = awayRoutingDirective(configured) ?? '';
+        for (const name of ['signal', 'telegram', 'slack', 'discord']) {
+            expect(d.toLowerCase()).not.toContain(name);
+        }
+    });
+
+    test('lists every preferred channel so Claude can fall back', () => {
+        const d = awayRoutingDirective(cfgWith({ preferred: ['chan-a', 'chan-b'] })) ?? '';
+        expect(d).toContain('chan-a or chan-b');
+    });
+
+    test('omits the target clause when none is set', () => {
+        const d = awayRoutingDirective(cfgWith({ preferred: ['chan-a'] })) ?? '';
         expect(d).not.toContain('target:');
     });
 });

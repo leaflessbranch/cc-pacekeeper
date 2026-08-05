@@ -1,7 +1,24 @@
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_CONFIG } from '../config';
-import { computeSnapshot, formatArbitrageNudge, formatBridgeDirective, formatDirective, formatStatusLine } from '../thresholds';
+import { computeSnapshot, formatArbitrageNudge, formatBridgeDirective, formatDirective, formatStatusLine, levelForMeter } from '../thresholds';
 import { formatUsageErrorNote, usageErrorNoteToSurface } from '../thresholds';
+
+describe('levelForMeter', () => {
+    // DEFAULT_CONFIG: five_hour warn 85 crit 95; weekly warn 70 crit 85.
+    test('maps five_hour % through the five_hour thresholds', () => {
+        expect(levelForMeter(50, 'five_hour', DEFAULT_CONFIG)).toBe('none');
+        expect(levelForMeter(86, 'five_hour', DEFAULT_CONFIG)).toBe('warn');
+        expect(levelForMeter(96, 'five_hour', DEFAULT_CONFIG)).toBe('critical');
+    });
+
+    test('all three weekly meters use the weekly thresholds', () => {
+        for (const m of ['weekly', 'weekly_sonnet', 'weekly_opus'] as const) {
+            expect(levelForMeter(72, m, DEFAULT_CONFIG)).toBe('warn');
+            expect(levelForMeter(86, m, DEFAULT_CONFIG)).toBe('critical');
+            expect(levelForMeter(40, m, DEFAULT_CONFIG)).toBe('none');
+        }
+    });
+});
 
 describe('computeSnapshot', () => {
     test('all meters none when below thresholds', () => {

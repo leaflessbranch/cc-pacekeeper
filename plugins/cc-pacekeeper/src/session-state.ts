@@ -54,7 +54,22 @@ const SessionEntrySchema = z.object({
     ctxAutoSaveArmed: z.boolean().optional(),
     // Which UsageError kind was already surfaced to this session (once-per-
     // session gate for the "usage meters unavailable" note).
-    usageErrorSurfaced: z.string().optional()
+    usageErrorSurfaced: z.string().optional(),
+    // Highest checkpoint-reminder level already emitted per meter, keyed to the
+    // block/window (resetKey) that level belongs to. The reminder fires only
+    // when the current level strictly exceeds the covered level; the entry
+    // re-arms when resetKey changes (block/window rollover). Prevents the
+    // "limits remain elevated" directive from re-firing every debounce.
+    reminderCoverage: z.record(
+        z.string(),   // meter
+        z.object({ level: z.enum(['none', 'notify', 'warn', 'critical']), resetKey: z.string() })
+    ).optional(),
+    // Away-routing (Issue 2): whether the standing "route replies to the
+    // preferred channel while away" directive was already surfaced for the
+    // current away episode. Set on emit; cleared when a tick sees presence
+    // back online. Injected once per episode because it is a STANDING
+    // instruction, not a per-turn action.
+    awayRouteSurfaced: z.boolean().optional()
 });
 
 export type SessionEntry = z.infer<typeof SessionEntrySchema>;

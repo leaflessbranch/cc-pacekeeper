@@ -4,6 +4,44 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1]
+
+Two in-session fixes: the "limits remain elevated" checkpoint reminder no longer loops,
+and stepping away now routes replies to the user's channel without needing a limit to
+escalate first.
+
+### Fixed
+
+- **Escalation reminder fires once per severity level, not on a timer.** The "consider
+  saving a checkpoint" directive previously re-injected every `debounce_seconds` for as
+  long as a meter sat at warn/critical — noise in an attended session, and a
+  context/quota-burning loop in an unattended one (Claude saves, the turn ends, the meter
+  is still elevated, it saves again). It now fires once when a meter crosses into a level
+  and again only on crossing to a strictly higher level, then stays silent until the
+  block/window rolls over. Applied to both emitters (`directiveIfEscalated` on
+  UserPromptSubmit/PreToolUse and the Stop-hook nudge), which share one coverage marker.
+- A checkpoint saved in the current block/window also covers its level: if you (or Claude)
+  already saved at the warn band, the warn reminder stays silent — but a later climb to
+  critical still fires. Coverage is derived from the checkpoint's stored `meters` %
+  (`levelForMeter`), and only counts checkpoints from the current window.
+
+### Added
+
+- **Standing away-routing directive** (`awayRoutingDirective`, `src/channels.ts`): when
+  presence is `afk`, Claude is told once per away episode to route *substantive* replies
+  to the preferred channel — for that reply and every subsequent reply until the user is
+  detected back — deciding for itself when a reply is worth interrupting for. Decoupled
+  from limit-escalation and pending-work (the pre-existing `awayDirective` report path is
+  unchanged). The marker clears on an explicit `online` transition; `unknown` never clears
+  it (`isOnline()` in `src/presence.ts`).
+
+### Notes
+
+- Auto-save (`auto.five_hour_pct`) is untouched — the reminder change softens only the
+  courtesy nudge below the cliff, not the cliff-protection.
+- Still channel-agnostic: the routing directive passes `preferred`/`target` through
+  verbatim and names no channel; the no-channel-name test is extended to cover it.
+
 ## [0.8.0]
 
 Away notifications: when the user steps away mid-run and a limit escalates, Claude is

@@ -288,6 +288,21 @@ export function isAway(): boolean {
 }
 
 /**
+ * True only when presence is explicitly `online`. Deliberately NOT `!isAway()`:
+ * an `unknown` or unreadable state must not count as "returned", or it would
+ * prematurely clear the away-routing episode marker while the user is still
+ * gone. Same fail-toward-caution bias as the fusion ladder.
+ */
+export function isOnline(): boolean {
+    try {
+        const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) as { state?: string };
+        return raw.state === 'online';
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Path to the cross-session transition record. The monitor
  * (`presence-watch.ts`) uses it to decide whether *it* is the watcher that
  * announces a given transition — presence is a property of the machine, so N

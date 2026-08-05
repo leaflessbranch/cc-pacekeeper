@@ -12,16 +12,18 @@ import {
     formatMeterSegment,
     formatStatusLine,
     formatUsageErrorNote,
+    levelForMeter,
     usageErrorNoteToSurface,
+    type MeterReading,
     type Snapshot
 } from './thresholds';
 import { keepaliveDirective, scanKeepaliveState, scanMarkerCreates, pingGate, pingSuppressedReason, KEEPALIVE_MARKER } from './keepalive';
-import { peekLevel, shouldInjectAndRecord, stateKey, type Level, type Meter } from './state';
+import { levelGt, peekLevel, shouldInjectAndRecord, stateKey, type Level, type Meter } from './state';
 import { touchSession, updateSession, getSessionEntry, type SessionEntry } from './session-state';
 import { detectAfkReturn, formatTimeSegment } from './timeline';
 import { liveSessionCount } from './live-sessions';
-import { awayDirective, onboardingDirective } from './channels';
-import { isAway } from './presence';
+import { awayDirective, awayRoutingDirective, onboardingDirective } from './channels';
+import { isAway, isOnline } from './presence';
 import { fetchUsageData, readUsageCacheFile } from './vendor/usage-fetch';
 import type { UsageData } from './vendor/usage-types';
 import { fetchAndCacheMaxInputTokens, readCachedMaxInputTokens } from './model-info';
@@ -261,7 +263,7 @@ async function main(): Promise<void> {
             // and any debounced warn/critical directive. This is the per-prompt
             // heartbeat: the user sees where time and budget stand every turn.
             const afk = afkLine(key, previousEventAt, sessionEntry, nowMs, cfg);
-            const directive = autoDirective ?? ctxAutoSaveDirective ?? directiveIfEscalated(key, snap, nowSec, cfg, sessionEntry);
+            const directive = autoDirective ?? ctxAutoSaveDirective ?? directiveIfEscalated(key, snap, nowSec, nowMs, cwd, cfg, sessionEntry);
             const extras: string[] = [];
             // No keepalive handling on a real prompt: the chain self-terminates at
             // ping-fire time, so there is nothing to cancel here.
@@ -288,7 +290,7 @@ async function main(): Promise<void> {
             // fire on their own debounce regardless of the tick gate.
             const lastInj = sessionEntry.lastTimestampInjectedAt ?? 0;
             const tickDue = nowMs - lastInj >= cfg.time.tool_tick_min * 60000;
-            const directive = autoDirective ?? ctxAutoSaveDirective ?? directiveIfEscalated(key, snap, nowSec, cfg, sessionEntry);
+            const directive = autoDirective ?? ctxAutoSaveDirective ?? directiveIfEscalated(key, snap, nowSec, nowMs, cwd, cfg, sessionEntry);
             if (tickDue) {
                 injection = composeLine(nowMs, sessionEntry, snap, cfg, null, directive);
                 updateSession(key, nowMs, { lastTimestampInjectedAt: nowMs });
@@ -336,7 +338,14 @@ async function main(): Promise<void> {
         });
         if (escalated && stopLines.length === 0) {
             const fireMeters = applyDebounce(key, snap, nowSec, cfg.debounce_seconds);
-            if (fireMeters.length > 0) {
+            // Once-per-level coverage: even if the debounce timer elapsed, stay
+            // silent unless some escalated meter now exceeds what a prior reminder
+            // or a this-block checkpoint already covers. Shares the same
+            // reminderCoverage marker as directiveIfEscalated, so a reminder
+            // already fired on this turn's PreToolUse won't repeat here.
+            const toFire = reminderMetersToFire(sessionEntry, snap, cwd, cfg);
+            if (fireMeters.length > 0 && toFire.length > 0) {
+                recordReminderFired(key, nowMs, sessionEntry, toFire);
                 stopLines.push(
                     formatStatusLine(snap),
                     '',
@@ -344,6 +353,28 @@ async function main(): Promise<void> {
                 );
             }
         }
+        // Away-routing (Issue 2): a STANDING, episode-scoped instruction to route
+        // substantive replies to the preferred channel while the user is away.
+        // Decoupled from limits and pending-work — it fires on the mere fact of
+        // absence, once per away episode, and clears when presence returns. Main
+        // thread only: subagents have no presence of their own.
+        if (isMainThread) {
+            if (isOnline()) {
+                // Episode ended — re-arm for the next departure. Only an explicit
+                // `online` clears it; `unknown` must not (isOnline guards that).
+                if (sessionEntry.awayRouteSurfaced) {
+                    updateSession(key, nowMs, { awayRouteSurfaced: false });
+                }
+            } else if (isAway() && !sessionEntry.awayRouteSurfaced) {
+                const routing = awayRoutingDirective(cfg);
+                if (routing) {
+                    if (stopLines.length > 0) stopLines.push('');
+                    stopLines.push(routing);
+                    updateSession(key, nowMs, { awayRouteSurfaced: true });
+                }
+            }
+        }
+
         // Away notification. Only when the user is actually absent (the monitor
         // writes the verdict; no probing on the hot path), something is pending
         // that would still be running without them, and a limit has escalated.
@@ -493,6 +524,91 @@ function autoFiredThisBlock(entry: SessionEntry, snap: ReturnType<typeof compute
 }
 
 /**
+ * Per-meter idempotency key for reminder coverage. The 5h meter keys on its
+ * block reset; the three weekly meters key on their own weekly reset. Meters
+ * with no reset window (context) return undefined and are never coverage-gated
+ * here — context has its own dedicated auto-save path.
+ */
+function reminderResetKey(reading: MeterReading): string | undefined {
+    return blockResetKey(reading.resetsAt);
+}
+
+/**
+ * The level a given meter is already "covered" at for its current block/window,
+ * combining two sources of evidence that the user is aware and handled:
+ *   - reminderCoverage: the highest level this reminder already fired at, and
+ *   - the newest ACTIVE checkpoint saved THIS block, mapped from its stored
+ *     meter % to a Level (a checkpoint saved in the warn band covers warn).
+ * Returns 'none' when neither applies. Checkpoints from a different block (key
+ * mismatch) don't count — a stale save can't cover a fresh escalation.
+ */
+export function coveredLevel(
+    entry: SessionEntry | undefined,
+    reading: MeterReading,
+    resetKey: string,
+    cwd: string,
+    cfg: ReturnType<typeof loadConfig>
+): Level {
+    let covered: Level = 'none';
+
+    const marked = entry?.reminderCoverage?.[reading.meter];
+    if (marked && marked.resetKey === resetKey && levelGt(marked.level, covered)) {
+        covered = marked.level;
+    }
+
+    // Newest active checkpoint in this project's default lane resolution.
+    const newest = listActive(cwd, cfg.checkpoint_dir_name)[0];
+    const meters = newest?.frontmatter.meters as Record<string, unknown> | undefined;
+    if (meters) {
+        const savedPct = meters[`${reading.meter}_pct`];
+        // Confirm the checkpoint belongs to THIS block via its stored resets_at.
+        const savedResetsAt = meters[`${reading.meter}_resets_at`];
+        const savedKey = typeof savedResetsAt === 'string' ? blockResetKey(savedResetsAt) : undefined;
+        if (typeof savedPct === 'number' && savedKey === resetKey) {
+            const savedLevel = levelForMeter(savedPct, reading.meter, cfg);
+            if (levelGt(savedLevel, covered)) covered = savedLevel;
+        }
+    }
+
+    return covered;
+}
+
+/**
+ * Escalated meters (non-stale, warn/critical) whose CURRENT level strictly
+ * exceeds what's already covered — i.e. the ones that still warrant a reminder.
+ * Empty means every escalation is already covered and the reminder is silenced.
+ */
+export function reminderMetersToFire(
+    entry: SessionEntry | undefined,
+    snap: ReturnType<typeof computeSnapshot>,
+    cwd: string,
+    cfg: ReturnType<typeof loadConfig>
+): MeterReading[] {
+    return snap.readings.filter(r => {
+        if (r.stale) return false;
+        if (r.level !== 'warn' && r.level !== 'critical') return false;
+        const resetKey = reminderResetKey(r);
+        if (resetKey === undefined) return false;   // no window → not coverage-gated
+        return levelGt(r.level, coveredLevel(entry, r, resetKey, cwd, cfg));
+    });
+}
+
+/**
+ * Record that the reminder just fired for these meters at their current level,
+ * so the next turn-end at the same level stays silent (only a strictly higher
+ * level, or a block rollover, re-arms). Merges into reminderCoverage.
+ */
+function recordReminderFired(sessionId: string, nowMs: number, entry: SessionEntry | undefined, fired: MeterReading[]): void {
+    if (fired.length === 0) return;
+    const coverage: Record<string, { level: Level; resetKey: string }> = { ...(entry?.reminderCoverage ?? {}) };
+    for (const r of fired) {
+        const resetKey = reminderResetKey(r);
+        if (resetKey !== undefined) coverage[r.meter] = { level: r.level, resetKey };
+    }
+    updateSession(sessionId, nowMs, { reminderCoverage: coverage });
+}
+
+/**
  * Return the warn/critical directive for this event if the debounce fires and
  * the level warrants it; otherwise null. Mirrors the prior PreToolUse gate.
  */
@@ -500,6 +616,8 @@ function directiveIfEscalated(
     sessionId: string,
     snap: ReturnType<typeof computeSnapshot>,
     nowSec: number,
+    nowMs: number,
+    cwd: string,
     cfg: ReturnType<typeof loadConfig>,
     entry?: SessionEntry
 ): string | null {
@@ -510,12 +628,22 @@ function directiveIfEscalated(
     // save that already happened this block; stay quiet unless another meter
     // is the driver.
     if (entry && snap.driver?.meter === 'five_hour' && autoFiredThisBlock(entry, snap)) return null;
+    // Once-per-level coverage: suppress unless some escalated meter's current
+    // level strictly exceeds what a prior reminder or a this-block checkpoint
+    // already covers. This is what stops the "limits remain elevated" loop from
+    // re-firing every debounce while a meter sits at the same level.
+    const toFire = reminderMetersToFire(entry, snap, cwd, cfg);
+    if (toFire.length === 0) return null;
     // Prefer the 5h block-reset bridge over the checkpoint directive when a
     // short reset is imminent: waiting it out beats a checkpoint/resume cycle.
     if (cfg.bridge.enabled) {
         const bridge = formatBridgeDirective(snap, cfg.bridge.max_wait_min);
+        // The bridge is a wait-it-out nudge, not the checkpoint reminder, so it
+        // doesn't consume coverage — leave the marker so the checkpoint reminder
+        // can still fire later this block if the bridge stops applying.
         if (bridge) return bridge;
     }
+    recordReminderFired(sessionId, nowMs, entry, toFire);
     return formatDirective(snap);
 }
 

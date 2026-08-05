@@ -70,3 +70,34 @@ export function awayDirective(cfg: Config, notices: AwayNotice[]): string | null
             + 'notification costs a turn, and this plugin exists to conserve quota.'
     ].join('\n');
 }
+
+/**
+ * Standing away-routing directive: when the user has stepped away, tell Claude
+ * to route substantive replies to the preferred channel — for this reply AND
+ * every subsequent reply until the user is detected back. This is a STANDING
+ * instruction, not a one-turn action, which is why the caller injects it only
+ * once per away episode: it persists across turns so Claude doesn't fall back
+ * to "go quiet" on turn 2+ merely because no fresh directive arrived.
+ *
+ * Distinct from awayDirective (which reports specific escalation items and asks
+ * for a single wake message). This one carries no report — it establishes where
+ * output should go, and lets Claude judge per-turn whether a reply is worth
+ * sending. Returns null when no channel is configured.
+ */
+export function awayRoutingDirective(cfg: Config): string | null {
+    if (cfg.channels.preferred.length === 0) return null;
+
+    const channels = cfg.channels.preferred.join(' or ');
+    const target = cfg.channels.target ? ` (target: ${cfg.channels.target})` : '';
+
+    return [
+        '[pacekeeper] The user has stepped away. Until they are detected back — for '
+            + 'this reply and every subsequent reply while they remain away — if the '
+            + `reply is substantive (not a trivial acknowledgement) send it to them via ${channels}${target}, `
+            + 'using whichever loaded MCP channel tool matches; that tool may need a '
+            + 'ToolSearch first. If there is nothing worth interrupting them for, stay quiet.',
+        'This instruction stays in effect across turns until the user returns — you '
+            + 'will not be reminded each turn. If no matching channel tool is loaded, say '
+            + 'so once and do not retry.'
+    ].join(' ');
+}

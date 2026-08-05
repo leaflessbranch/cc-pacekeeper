@@ -45,6 +45,27 @@ function levelFor(percent: number, t: ThresholdLevels): Level {
     return 'none';
 }
 
+/**
+ * Which config threshold set governs a meter. The three weekly meters
+ * (all / sonnet / opus) all read the single `weekly` threshold set, matching
+ * how computeSnapshot maps them.
+ */
+function thresholdsForMeter(meter: Meter, cfg: Config): ThresholdLevels {
+    if (meter === 'context') return cfg.thresholds.context;
+    if (meter === 'five_hour') return cfg.thresholds.five_hour;
+    return cfg.thresholds.weekly;   // weekly, weekly_sonnet, weekly_opus
+}
+
+/**
+ * Map a raw meter percentage to its severity Level using the config
+ * thresholds for that meter. Single source of truth for percent→Level,
+ * used by computeSnapshot and by the reminder-coverage check (which derives
+ * the level a checkpoint was saved at from its stored meter %).
+ */
+export function levelForMeter(percent: number, meter: Meter, cfg: Config): Level {
+    return levelFor(percent, thresholdsForMeter(meter, cfg));
+}
+
 export interface ComputeInputs {
     contextPercent: number | null;
     usage: UsageData | null;
