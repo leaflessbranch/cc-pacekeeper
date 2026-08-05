@@ -2,7 +2,7 @@
 
 A Claude Code plugin that hands monitoring of context window, 5-hour session block, and weekly usage limits over to Claude itself — so it can pace, warn, and checkpoint work before hitting a wall.
 
-**Status:** v0.8.0 — proactive AFK detection (a background monitor watches tmux, tty, SSH and systemd idle, so absence is noticed as it happens rather than inferred after you return) and away notifications that reach you on your own channel when a limit escalates while you're gone. Presence probes are Linux-only for now; macOS falls back to the previous behavior. Plus everything from 0.6: injection-hardened cron auto-approval, need-based keepalive, macOS fixes + CI (ubuntu + macos), and a richer doctor. See the [changelog](CHANGELOG.md).
+**Status:** v0.8.1 — the escalation checkpoint reminder now fires once per severity level instead of looping every debounce (no more attended-session noise or unattended save-loop), and stepping away routes substantive replies to your channel as soon as you're detected `afk`, without waiting for a limit to escalate. Builds on 0.8.0's proactive AFK detection (a background monitor watches tmux, tty, SSH and systemd idle, so absence is noticed as it happens rather than inferred after you return) and away notifications that reach you on your own channel when a limit escalates while you're gone. Presence probes are Linux-only for now; macOS falls back to the previous behavior. Plus everything from 0.6: injection-hardened cron auto-approval, need-based keepalive, macOS fixes + CI (ubuntu + macos), and a richer doctor. See the [changelog](CHANGELOG.md).
 
 ![cc-pacekeeper in action](docs/demo.gif)
 
@@ -18,32 +18,14 @@ Three meters tracked:
 
 Plus **extra-usage credits** state, so when limits approach Claude can ask whether to keep going on pay-as-you-go or checkpoint and resume after reset.
 
-### New in v0.2
+### New in v0.7 / v0.8
 
-- **Time & AFK awareness** — every prompt carries the local wall-clock, session duration, and (after an idle gap) a "you were away" note, so Claude reasons about elapsed time and reset windows.
-- **Cross-session budget awareness** — when more than one Claude session is live, the line notes how many share your account budget.
-- **5-hour block-reset bridge** — when the 5h block is nearly full but resets soon, Claude is told to wait it out rather than checkpoint-and-resume.
-- **Weekly model-family arbitrage** — when one family's weekly limit is stressed but the other has headroom, Claude is nudged to consider switching models.
-- **Worktree-aware checkpoints** — checkpoints saved from a linked git worktree anchor to the main repo and record provenance, so resuming re-enters the originating worktree.
+- **Proactive AFK detection** — a background monitor watches tmux client activity, controlling-tty atime, SSH logins and systemd's idle hint, and reports when you actually step away. Previously absence was only knowable *retroactively*, from the gap between two hook events once you came back; hooks stop firing the moment you leave, so they can never see a departure.
+- **Away notifications** — when you're away, Claude reaches you on the channel you chose instead of talking to an empty terminal: it routes substantive replies to you as soon as you're detected `afk`, and sends a status report when work is pending and a limit escalates. It asks once, at session start, offering whatever channels it can see; the answer is saved.
+- **Channel-agnostic by design** — the plugin names no channel anywhere. Your `preferred` labels and `target` are opaque strings it stores and hands back; Claude resolves them at send time against the tools actually loaded in your session. Your destination lives only in your local config, never in the repo.
+- **Presence is per machine, not per session** — several open sessions won't each ping you for one departure; the watchers arbitrate through a shared state file so exactly one reports it.
 
-### New in v0.3
-
-- **Named checkpoint lanes** — checkpoints are keyed by a lane name (default: the sanitized git branch; `save --name` overrides). Saving supersedes only the same lane, so parallel efforts — including in separate worktrees — each keep an active, independently resumable checkpoint. `resume <name>` / `peek <name>` (non-mutating preview) / `resume --worktree` to re-enter or recreate the lane's worktree.
-- **AFK cache keepalive** — Claude schedules a single recurring cron job (once per session) to keep the prompt cache warm. Pings are suppressed hook-side while you're active (zero context cost) and pass through only while you're actually idle; after `keepalive.max_idle_hours` (default 12) of continuous idleness the job is torn down. Jobs are deduped via a CronList-first check, since cron jobs survive `/clear`. Auto-disabled when drawing on usage credits, where the cache TTL is short anyway. Since 0.6, keepalive is need-based by default: it only schedules while a checkpoint lane or paused handoff is pending (config: keepalive.require_pending).
-
-### New in v0.4
-
-- **Budget-aware subagent trees** — hook state is keyed per agent, so subagents at any depth see their own compact meter ticks (`5h X% · pause at P%`). Each spawned agent gets a budget contract with a spawn-relative pause point: instead of burning the block invisibly, it finishes the current small step, writes a handoff to `.claude-checkpoints/handoffs/<agent_id>.md`, and returns `PAUSED-BUDGET`. Parents record (never re-attempt) paused children's work and pause too. Manage handoffs via `pacekeeper-checkpoint handoffs list|write|archive`.
-- **Autonomous block renewal** — full auto, no asking: at `auto.five_hour_pct` (default 85) of the 5h block, Claude saves a checkpoint immediately and schedules a one-shot wake cron for just after the block resets. The wake prompt re-orients from the checkpoint (consuming it) and re-dispatches paused handoffs. Works even when the trigger tick arrives on an AFK keepalive turn.
-- **Context auto-save** — at ctx critical, an immediate no-asking checkpoint save, re-armed per compaction cycle. Combined with the 5h directive when both fire at once.
-- **Dispatch advisory** — a one-line caution (never a denial) before spawning agent trees when the 5h block is already tight.
-
-### New in v0.5
-
-- **macOS support** — OAuth credentials are now also read from the macOS Keychain, so the 5h/weekly meters work on Macs (previously silently absent).
-- **Self-diagnosis** — if usage meters can't be read, Claude is told *why* once per session instead of the meters just vanishing, and `pacekeeper-checkpoint doctor` checks the whole environment (runtime, credentials, caches, config) with fixes.
-- **Graceful degradation** — hooks no-op cleanly with an install hint if Bun is missing, instead of erroring on every event.
-- **Better model tracking** — model-family detection covers Haiku/Fable/Mythos, per-model context windows resolve via `ANTHROPIC_API_KEY` when no subscription token exists, and subagent transcript rows no longer skew the context meter.
+Presence probes are Linux-only for now (macOS support is deferred for lack of a test environment); everywhere else detection falls back to the previous hook-gap behavior. Notifications only work while a session is open — nothing can reach a session that has ended.
 
 ### New in v0.6
 
@@ -53,14 +35,32 @@ Plus **extra-usage credits** state, so when limits approach Claude can ask wheth
 - **Doctor grows** — hook-crash breadcrumbs, version-skew detection, cache format-drift checks, `--transcript` probe.
 - **Calmer keepalive suppression (0.6.1)** — when a keepalive ping races with active use, the unavoidable hook-block banner is all the plugin can restyle; its reason now rotates through a set of dry, plainly-intentional one-liners (clock-derived, no persisted state) instead of one terse string that read like an error.
 
-### New in v0.7 / v0.8
+### New in v0.5
 
-- **Proactive AFK detection** — a background monitor watches tmux client activity, controlling-tty atime, SSH logins and systemd's idle hint, and reports when you actually step away. Previously absence was only knowable *retroactively*, from the gap between two hook events once you came back; hooks stop firing the moment you leave, so they can never see a departure.
-- **Away notifications** — when you're away, work is pending and a limit escalates, Claude reaches you on the channel you chose instead of talking to an empty terminal. It asks once, at session start, offering whatever channels it can see; the answer is saved.
-- **Channel-agnostic by design** — the plugin names no channel anywhere. Your `preferred` labels and `target` are opaque strings it stores and hands back; Claude resolves them at send time against the tools actually loaded in your session. Your destination lives only in your local config, never in the repo.
-- **Presence is per machine, not per session** — several open sessions won't each ping you for one departure; the watchers arbitrate through a shared state file so exactly one reports it.
+- **macOS support** — OAuth credentials are now also read from the macOS Keychain, so the 5h/weekly meters work on Macs (previously silently absent).
+- **Self-diagnosis** — if usage meters can't be read, Claude is told *why* once per session instead of the meters just vanishing, and `pacekeeper-checkpoint doctor` checks the whole environment (runtime, credentials, caches, config) with fixes.
+- **Graceful degradation** — hooks no-op cleanly with an install hint if Bun is missing, instead of erroring on every event.
+- **Better model tracking** — model-family detection covers Haiku/Fable/Mythos, per-model context windows resolve via `ANTHROPIC_API_KEY` when no subscription token exists, and subagent transcript rows no longer skew the context meter.
 
-Presence probes are Linux-only for now (macOS support is deferred for lack of a test environment); everywhere else detection falls back to the previous hook-gap behavior. Notifications only work while a session is open — nothing can reach a session that has ended.
+### New in v0.4
+
+- **Budget-aware subagent trees** — hook state is keyed per agent, so subagents at any depth see their own compact meter ticks (`5h X% · pause at P%`). Each spawned agent gets a budget contract with a spawn-relative pause point: instead of burning the block invisibly, it finishes the current small step, writes a handoff to `.claude-checkpoints/handoffs/<agent_id>.md`, and returns `PAUSED-BUDGET`. Parents record (never re-attempt) paused children's work and pause too. Manage handoffs via `pacekeeper-checkpoint handoffs list|write|archive`.
+- **Autonomous block renewal** — full auto, no asking: at `auto.five_hour_pct` (default 85) of the 5h block, Claude saves a checkpoint immediately and schedules a one-shot wake cron for just after the block resets. The wake prompt re-orients from the checkpoint (consuming it) and re-dispatches paused handoffs. Works even when the trigger tick arrives on an AFK keepalive turn.
+- **Context auto-save** — at ctx critical, an immediate no-asking checkpoint save, re-armed per compaction cycle. Combined with the 5h directive when both fire at once.
+- **Dispatch advisory** — a one-line caution (never a denial) before spawning agent trees when the 5h block is already tight.
+
+### New in v0.3
+
+- **Named checkpoint lanes** — checkpoints are keyed by a lane name (default: the sanitized git branch; `save --name` overrides). Saving supersedes only the same lane, so parallel efforts — including in separate worktrees — each keep an active, independently resumable checkpoint. `resume <name>` / `peek <name>` (non-mutating preview) / `resume --worktree` to re-enter or recreate the lane's worktree.
+- **AFK cache keepalive** — Claude schedules a single recurring cron job (once per session) to keep the prompt cache warm. Pings are suppressed hook-side while you're active (zero context cost) and pass through only while you're actually idle; after `keepalive.max_idle_hours` (default 12) of continuous idleness the job is torn down. Jobs are deduped via a CronList-first check, since cron jobs survive `/clear`. Auto-disabled when drawing on usage credits, where the cache TTL is short anyway. Since 0.6, keepalive is need-based by default: it only schedules while a checkpoint lane or paused handoff is pending (config: keepalive.require_pending).
+
+### New in v0.2
+
+- **Time & AFK awareness** — every prompt carries the local wall-clock, session duration, and (after an idle gap) a "you were away" note, so Claude reasons about elapsed time and reset windows.
+- **Cross-session budget awareness** — when more than one Claude session is live, the line notes how many share your account budget.
+- **5-hour block-reset bridge** — when the 5h block is nearly full but resets soon, Claude is told to wait it out rather than checkpoint-and-resume.
+- **Weekly model-family arbitrage** — when one family's weekly limit is stressed but the other has headroom, Claude is nudged to consider switching models.
+- **Worktree-aware checkpoints** — checkpoints saved from a linked git worktree anchor to the main repo and record provenance, so resuming re-enters the originating worktree.
 
 ## Install
 
@@ -113,7 +113,7 @@ The answer lands in `~/.config/cc-pacekeeper/config.json`:
 
 Both values are opaque to the plugin — it stores them and hands them back to Claude, which matches them against the tools actually available. They stay in your local config and are never committed.
 
-You'll only be notified when you're genuinely away, something is pending, and a limit has escalated. Walking away from an idle session sends nothing.
+Two things happen when you're away. As soon as you're detected `afk`, Claude is told — once per away episode — to route *substantive* replies to your channel for the rest of that absence, deciding for itself when a reply is worth interrupting you for; a trivial acknowledgement stays quiet. Separately, if work is pending *and* a limit escalates while you're gone, it sends the usual status report. Walking away from an idle session with nothing to say sends nothing.
 
 To turn presence detection off entirely, set `"presence": { "enabled": false }`. Run `pacekeeper-checkpoint doctor` to see which probes work on your machine.
 
