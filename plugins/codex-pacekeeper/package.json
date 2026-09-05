@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit",
-    "doctor": "bun run src/doctor.ts"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "zod": "^3.23.0"

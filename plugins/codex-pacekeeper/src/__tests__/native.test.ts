@@ -28,6 +28,7 @@ describe('native Codex boundary', () => {
       methods: ['thread/queue/add', 'account/rateLimits/read']
     })).toEqual({
       protocolVersion: NATIVE_PROTOCOL_VERSION,
+      versionMatchesPin: true,
       queue: 'supported',
       accountRateLimits: 'supported',
       toolDisable: 'unsupported',
