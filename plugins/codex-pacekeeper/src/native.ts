@@ -536,12 +536,17 @@ export function parseQueuedSubmission(response: unknown): ParsedQueuedSubmission
 function isUnsupportedQueueError(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const record = error as { code?: unknown; message?: unknown };
-  const message = typeof record.message === 'string' ? record.message : '';
+  // Method-not-found is unambiguous on its own.
   if (record.code === -32601) return true;
+  // Invalid-request is only about the queue when the message names the method:
+  // upstream matches the experimental-required text and the unknown-variant
+  // text. Message matching stays gated on this code, never used on its own —
+  // an error carrying no structured code is ambiguous, and treating it as a
+  // stable "no queue here" fact would mask a real delivery failure.
   if (record.code === -32600) {
-    return message.includes(QUEUE_ADD_METHOD);
+    return typeof record.message === 'string' && record.message.includes(QUEUE_ADD_METHOD);
   }
-  return /method not found|unknown variant `thread\/queue\/add`/i.test(message);
+  return false;
 }
 
 export class NativeClient {
