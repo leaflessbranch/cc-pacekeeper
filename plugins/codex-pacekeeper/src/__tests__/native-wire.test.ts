@@ -427,6 +427,44 @@ describe('delivery failure classification', () => {
     expect(result.status).toBe('unsupported');
   });
 
+  // Upstream only matches message text when a structured code already says
+  // invalid-request. An error with no code is ambiguous, and calling it
+  // "unsupported" would mask a real delivery failure as a stable fact.
+  test('an error naming the method but carrying no code is not unsupported', async () => {
+    const client = new NativeClient(
+      { request: async () => { throw new Error('thread/queue/add went wrong somehow'); } },
+      supported,
+      owner
+    );
+    const result = await client.queueExistingThread({
+      threadId: 'thread-a',
+      message: 'ping',
+      clientUserMessageId: 'msg-g'
+    });
+    expect(result.status).toBe('unavailable');
+  });
+
+  test('invalid-request naming the queue method is unsupported', async () => {
+    const client = new NativeClient(
+      {
+        request: async () => {
+          throw Object.assign(
+            new Error('Invalid request: unknown variant `thread/queue/add`'),
+            { code: -32600 }
+          );
+        }
+      },
+      supported,
+      owner
+    );
+    const result = await client.queueExistingThread({
+      threadId: 'thread-a',
+      message: 'ping',
+      clientUserMessageId: 'msg-h'
+    });
+    expect(result.status).toBe('unsupported');
+  });
+
   test('an unsupported queue capability never reaches the transport', async () => {
     let called = false;
     const client = new NativeClient(
