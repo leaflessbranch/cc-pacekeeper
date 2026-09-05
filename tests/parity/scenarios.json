@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "scenarios": [
+    { "id": "ordinary-debounce-reemit", "reference": "claude", "codex": "in-scope" },
+    { "id": "threshold-escalation", "reference": "claude", "codex": "in-scope" },
+    { "id": "block-reset-rearm", "reference": "claude", "codex": "in-scope" },
+    { "id": "compaction-rearm", "reference": "claude", "codex": "in-scope" },
+    { "id": "main-subagent-isolation", "reference": "claude", "codex": "in-scope" },
+    { "id": "marker-quotation", "reference": "claude", "codex": "in-scope" },
+    { "id": "stop-continuation-suppression", "reference": "claude", "codex": "in-scope" },
+    { "id": "effective-non-default-settings", "reference": "claude", "codex": "in-scope" },
+    { "id": "keepalive-text-preservation", "reference": "claude", "codex": "in-scope" },
+    { "id": "queued-ping-then-user-input", "reference": "claude", "codex": "in-scope" },
+    { "id": "reset-wake-lost-ack-restart", "reference": "claude", "codex": "in-scope" },
+    { "id": "same-lane-two-harnesses", "reference": "claude", "codex": "in-scope" },
+    { "id": "stale-quota-degradation", "reference": "claude", "codex": "in-scope" },
+    { "id": "paid-credit-transition", "reference": "claude", "codex": "in-scope" },
+    { "id": "context-after-compaction", "reference": "claude", "codex": "in-scope" },
+    { "id": "model-window-change", "reference": "claude", "codex": "in-scope" },
+    { "id": "subagent-pause-handoff", "reference": "claude", "codex": "in-scope" },
+    { "id": "presence-away-back", "reference": "claude", "codex": "in-scope" },
+    { "id": "worktree-safety", "reference": "claude", "codex": "in-scope" },
+    { "id": "diagnostic-owner-absent", "reference": "claude", "codex": "in-scope" },
+    { "id": "deferred-model-arbitrage", "reference": "claude", "codex": "deferred" },
+    { "id": "deferred-away-routing", "reference": "claude", "codex": "deferred" }
+  ]
+}
