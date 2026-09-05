@@ -15,8 +15,17 @@ export type NativeCapability = 'supported' | 'unsupported' | 'unavailable';
 
 export interface NativeCapabilities {
   protocolVersion: string;
+  /** Whether the probed protocol equals the pinned acceptance target. */
+  versionMatchesPin: boolean;
   queue: NativeCapability;
   accountRateLimits: NativeCapability;
+  /**
+   * The following three are permanently `unsupported`: the 0.153.4 protocol
+   * exposes no method or `turn/start` parameter that disables tools, suppresses
+   * an input before model work, or forces a persisted save before compaction.
+   * They are named here so a caller must handle the gap explicitly rather than
+   * assume a prompt instruction or a deny-all hook is enforcement.
+   */
   toolDisable: NativeCapability;
   preModelSuppression: NativeCapability;
   saveBarrier: NativeCapability;
@@ -75,23 +84,35 @@ export interface NativeSchemaProbe {
 }
 
 /**
- * Report only controls established by the supplied native schema. In
- * particular, `turn/start` does not imply a no-tools switch, and a hook does
- * not imply pre-model suppression or a persisted save barrier.
+ * Report only controls established by the supplied native schema.
+ *
+ * A method list that was never obtained is `unavailable` (we did not look),
+ * which is a different fact from `unsupported` (we looked and it is absent);
+ * conflating them would let a failed probe read as a proved negative. A
+ * protocol newer than the pin still reports its real methods, with the version
+ * mismatch surfaced separately, because failing closed on any drift would
+ * disable the queue on every future release.
  */
 export function normalizeNativeCapabilities(probe: NativeSchemaProbe): NativeCapabilities {
-  const methods = methodSet(probe.methods);
   const version = typeof probe.version === 'string' && probe.version !== ''
     ? probe.version
     : 'unknown';
-  const exactVersion = version === NATIVE_PROTOCOL_VERSION;
+  const probed = probe.methods !== undefined;
+  const methods = methodSet(probe.methods);
+  const has = (method: string): NativeCapability => {
+    if (!probed) return 'unavailable';
+    return methods.has(method) ? 'supported' : 'unsupported';
+  };
   return {
     protocolVersion: version,
-    queue: exactVersion && methods.has(QUEUE_ADD_METHOD) ? 'supported' : 'unsupported',
-    accountRateLimits: exactVersion && methods.has(RATE_LIMITS_READ_METHOD) ? 'supported' : 'unsupported',
-    toolDisable: methods.has('turn/start/tools-disabled') ? 'supported' : 'unsupported',
-    preModelSuppression: methods.has('turn/input/suppress') ? 'supported' : 'unsupported',
-    saveBarrier: methods.has('turn/compact/save-barrier') ? 'supported' : 'unsupported'
+    versionMatchesPin: version === NATIVE_PROTOCOL_VERSION,
+    queue: has(QUEUE_ADD_METHOD),
+    accountRateLimits: has(RATE_LIMITS_READ_METHOD),
+    // Not probed: no such method exists in any published protocol version, so
+    // probing for one would only invent a control surface.
+    toolDisable: 'unsupported',
+    preModelSuppression: 'unsupported',
+    saveBarrier: 'unsupported'
   };
 }
 
@@ -103,6 +124,9 @@ export interface NativeRateLimitWindow {
 
 export interface NativeRateLimitSnapshot {
   planType?: unknown;
+  limitId?: unknown;
+  limitName?: unknown;
+  rateLimitReachedType?: unknown;
   primary?: NativeRateLimitWindow | null;
   secondary?: NativeRateLimitWindow | null;
   credits?: {
@@ -123,7 +147,8 @@ export interface NormalizedQuotaBucket {
   id: string;
   kind: QuotaKind;
   label: string;
-  usedPercent: number;
+  /** `null` when the native reading was missing or malformed. Never 0. */
+  usedPercent: number | null;
   durationMinutes: number | null;
   resetsAtMs: number | null;
   observedAtMs: number;
@@ -132,6 +157,9 @@ export interface NormalizedQuotaBucket {
 
 export interface ParsedRateLimitSnapshot {
   planType: string | null;
+  limitId: string | null;
+  limitName: string | null;
+  rateLimitReachedType: string | null;
   buckets: NormalizedQuotaBucket[];
   credits: {
     hasCredits: boolean | null;
@@ -140,6 +168,15 @@ export interface ParsedRateLimitSnapshot {
   };
   spendControlReached: boolean | null;
   diagnostics: string[];
+}
+
+/**
+ * The whole `account/rateLimits/read` reply: a backward-compatible
+ * single-bucket view plus the multi-bucket map keyed by metered limit id.
+ */
+export interface ParsedRateLimitsResponse extends ParsedRateLimitSnapshot {
+  accountId: string | null;
+  byLimitId: Record<string, ParsedRateLimitSnapshot>;
 }
 
 function finiteNumber(value: unknown): number | null {
@@ -204,17 +241,19 @@ export function parseRateLimitSnapshot(
     const resetsAtMs = normalizeTimestampMs(window.resetsAt);
     const valid = used !== null;
     if (used === null) diagnostics.push(`${id}.usedPercent is missing or outside 0..100`);
-    if (window.windowDurationMins !== undefined && duration === null) {
+    if (window.windowDurationMins !== undefined && window.windowDurationMins !== null && duration === null) {
       diagnostics.push(`${id}.windowDurationMins is invalid`);
     }
-    if (window.resetsAt !== undefined && resetsAtMs === null) {
+    if (window.resetsAt !== undefined && window.resetsAt !== null && resetsAtMs === null) {
       diagnostics.push(`${id}.resetsAt is invalid`);
     }
     buckets.push({
       id,
       kind: kindForDuration(duration),
       label: duration === 300 ? '5h' : duration === 10_080 ? 'weekly' : `${duration ?? 'unknown'}m`,
-      usedPercent: used ?? 0,
+      // An unreadable percentage stays null. Substituting 0 would read as
+      // "no usage" and authorize spending against a limit we cannot see.
+      usedPercent: used,
       durationMinutes: duration,
       resetsAtMs,
       observedAtMs,
@@ -233,9 +272,129 @@ export function parseRateLimitSnapshot(
   const planType = typeof snapshot.planType === 'string' ? snapshot.planType : null;
   return {
     planType,
+    limitId: typeof snapshot.limitId === 'string' ? snapshot.limitId : null,
+    limitName: typeof snapshot.limitName === 'string' ? snapshot.limitName : null,
+    rateLimitReachedType:
+      typeof snapshot.rateLimitReachedType === 'string' ? snapshot.rateLimitReachedType : null,
     buckets,
     credits: { hasCredits, unlimited, balance },
     spendControlReached,
+    diagnostics
+  };
+}
+
+export interface NativeRateLimitsResponse {
+  accountId?: unknown;
+  rateLimits?: unknown;
+  rateLimitsByLimitId?: unknown;
+}
+
+function isSnapshotObject(value: unknown): value is NativeRateLimitSnapshot {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parse the full `account/rateLimits/read` reply. `rateLimits` is the
+ * historical single-bucket view and is required by the schema; its absence is
+ * a diagnostic rather than an empty success, because an empty bucket list is
+ * indistinguishable from "no limits reached" to a naive caller.
+ */
+export function parseRateLimitsResponse(
+  response: NativeRateLimitsResponse,
+  observedAtMs: number
+): ParsedRateLimitsResponse {
+  const accountId = typeof response.accountId === 'string' ? response.accountId : null;
+  const byLimitId: Record<string, ParsedRateLimitSnapshot> = {};
+  const rawByLimitId = response.rateLimitsByLimitId;
+  if (typeof rawByLimitId === 'object' && rawByLimitId !== null && !Array.isArray(rawByLimitId)) {
+    for (const [limitId, snapshot] of Object.entries(rawByLimitId as Record<string, unknown>)) {
+      if (!isSnapshotObject(snapshot)) continue;
+      byLimitId[limitId] = parseRateLimitSnapshot(snapshot, observedAtMs);
+    }
+  }
+  if (!isSnapshotObject(response.rateLimits)) {
+    return {
+      accountId,
+      planType: null,
+      limitId: null,
+      limitName: null,
+      rateLimitReachedType: null,
+      buckets: [],
+      credits: { hasCredits: null, unlimited: null, balance: null },
+      spendControlReached: null,
+      diagnostics: ['rateLimits is missing from the native response'],
+      byLimitId
+    };
+  }
+  return {
+    accountId,
+    ...parseRateLimitSnapshot(response.rateLimits, observedAtMs),
+    byLimitId
+  };
+}
+
+/**
+ * `ThreadTokenUsage` separates `last` (the most recent turn, which is the
+ * current context) from `total` (lifetime accumulation across the thread).
+ * Using `total` as a context meter overstates usage without bound, so only
+ * `last` is read here. `modelContextWindow` is nullable and there is no
+ * Codex-side default to fall back on: Claude's 200,000-token assumption is not
+ * a Codex truth, so a missing window leaves the percentage unknown.
+ */
+export interface ParsedThreadContext {
+  currentTokens: number | null;
+  contextWindow: number | null;
+  usedPercent: number | null;
+  cache: {
+    cachedInputTokens: number | null;
+    cacheWriteInputTokens: number | null;
+  };
+  diagnostics: string[];
+}
+
+function nonNegativeInteger(value: unknown): number | null {
+  const number = finiteNumber(value);
+  if (number === null || number < 0 || !Number.isInteger(number)) return null;
+  return number;
+}
+
+export function parseThreadTokenUsage(usage: unknown): ParsedThreadContext {
+  const diagnostics: string[] = [];
+  const empty: ParsedThreadContext = {
+    currentTokens: null,
+    contextWindow: null,
+    usedPercent: null,
+    cache: { cachedInputTokens: null, cacheWriteInputTokens: null },
+    diagnostics
+  };
+  if (typeof usage !== 'object' || usage === null) {
+    diagnostics.push('thread token usage is missing');
+    return empty;
+  }
+  const record = usage as Record<string, unknown>;
+  const last = record['last'];
+  if (typeof last !== 'object' || last === null) {
+    diagnostics.push('thread token usage has no readable `last` turn breakdown');
+    return empty;
+  }
+  const lastRecord = last as Record<string, unknown>;
+  const currentTokens = nonNegativeInteger(lastRecord['totalTokens']);
+  if (currentTokens === null) diagnostics.push('last.totalTokens is missing or invalid');
+  const contextWindow = nonNegativeInteger(record['modelContextWindow']);
+  if (contextWindow === null) diagnostics.push('modelContextWindow is unavailable');
+  const usedPercent = currentTokens !== null && contextWindow !== null && contextWindow > 0
+    ? Math.round((currentTokens / contextWindow) * 100)
+    : null;
+  return {
+    currentTokens,
+    contextWindow,
+    usedPercent,
+    cache: {
+      // `cacheWriteInputTokens` is optional in the schema. Absent must read as
+      // "not reported", never as a measured zero.
+      cachedInputTokens: nonNegativeInteger(lastRecord['cachedInputTokens']),
+      cacheWriteInputTokens: nonNegativeInteger(lastRecord['cacheWriteInputTokens'])
+    },
     diagnostics
   };
 }
@@ -250,6 +409,8 @@ export function classifySubscriptionCapacity(
   parsed: Pick<ParsedRateLimitSnapshot, 'planType' | 'spendControlReached'> & {
     fresh: boolean;
     authenticated?: boolean;
+    /** Recorded for diagnostics only; it never moves the classification. */
+    creditsAvailable?: boolean | null;
   }
 ): CapacityClassification {
   if (parsed.authenticated === false) return 'unsupported';
@@ -307,12 +468,18 @@ export interface OwnerLookupInput {
   records: readonly OwnerProbeRecord[];
   threadId: string;
   accountId: string | null;
+  /**
+   * Required. There is no safe default: assuming liveness would treat a stale
+   * record left behind by a dead process as a live delivery target, and a
+   * caller that cannot check liveness genuinely does not know.
+   */
   isAlive?: (pid: number) => boolean;
 }
 
 /** Find exactly one live, known-account owner for an existing thread. */
 export function findExistingOwner(input: OwnerLookupInput): OwnerLookup {
-  const isAlive = input.isAlive ?? (() => true);
+  if (input.isAlive === undefined) return { status: 'unknown' };
+  const isAlive = input.isAlive;
   const owners = input.records
     .map(parseOwnerRecord)
     .filter((owner): owner is ExistingOwnerRecord => owner !== null)
@@ -323,8 +490,10 @@ export function findExistingOwner(input: OwnerLookupInput): OwnerLookup {
     return { status: 'unknown' };
   }
   const matching = owners.filter((owner) => owner.accountId === input.accountId);
-  if (matching.length !== 1) return matching.length === 0 ? { status: 'absent' } : { status: 'ambiguous' };
-  return { status: 'found', owner: matching[0] };
+  const only = matching[0];
+  if (matching.length === 0 || only === undefined) return { status: 'absent' };
+  if (matching.length > 1) return { status: 'ambiguous' };
+  return { status: 'found', owner: only };
 }
 
 export interface NativeTransport {
@@ -332,16 +501,47 @@ export interface NativeTransport {
 }
 
 export type QueueDeliveryResult =
-  | { status: 'accepted'; threadId: string; queuedSubmissionId: string | null; clientUserMessageId: string }
+  | { status: 'accepted'; threadId: string; queuedSubmissionId: string; clientUserMessageId: string }
   | { status: 'unsupported' | 'unavailable' | 'ambiguous' | 'rejected'; reason: string; clientUserMessageId: string };
 
-function responseString(response: unknown, keys: string[]): string | null {
+export interface ParsedQueuedSubmission {
+  id: string;
+  clientUserMessageId: string;
+}
+
+/**
+ * `ThreadQueueAddResponse` requires a nested `queuedSubmission` object holding
+ * `id`, `clientUserMessageId` and `input`. There is no flat submission id at
+ * the top level, so a parser looking for one silently loses the identity that
+ * later reconciliation depends on.
+ */
+export function parseQueuedSubmission(response: unknown): ParsedQueuedSubmission | null {
   if (typeof response !== 'object' || response === null) return null;
-  const object = response as Record<string, unknown>;
-  for (const key of keys) {
-    if (typeof object[key] === 'string' && object[key] !== '') return object[key];
+  const submission = (response as Record<string, unknown>)['queuedSubmission'];
+  if (typeof submission !== 'object' || submission === null) return null;
+  const record = submission as Record<string, unknown>;
+  const id = record['id'];
+  const clientUserMessageId = record['clientUserMessageId'];
+  if (typeof id !== 'string' || id === '') return null;
+  if (typeof clientUserMessageId !== 'string' || clientUserMessageId === '') return null;
+  return { id, clientUserMessageId };
+}
+
+/**
+ * The pinned CLI treats JSON-RPC -32601, and -32600 with the
+ * experimental-required message, as "this server has no queue" rather than as
+ * a failed delivery. That distinction matters: unsupported is a stable fact
+ * about the owner, while a failed delivery may have been partially applied.
+ */
+function isUnsupportedQueueError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const record = error as { code?: unknown; message?: unknown };
+  const message = typeof record.message === 'string' ? record.message : '';
+  if (record.code === -32601) return true;
+  if (record.code === -32600) {
+    return message.includes(QUEUE_ADD_METHOD);
   }
-  return null;
+  return /method not found|unknown variant `thread\/queue\/add`/i.test(message);
 }
 
 export class NativeClient {
@@ -362,22 +562,44 @@ export class NativeClient {
         buildQueueAddRequest(input).params
       );
     } catch (error) {
+      if (isUnsupportedQueueError(error)) {
+        return {
+          status: 'unsupported',
+          reason: 'the existing owner does not support thread/queue/add',
+          clientUserMessageId: input.clientUserMessageId
+        };
+      }
       const reason = error instanceof Error ? error.message : 'native owner request failed';
-      const ambiguous = /timeout|timed out|disconnect|closed|unknown|reset/i.test(reason);
+      // A transport that timed out or dropped may still have delivered. That
+      // is ambiguous, not failed, and must never authorize a fresh retry.
+      const ambiguous = /timeout|timed out|disconnect|closed|reset|abort|EPIPE|ECONNRESET/i.test(reason);
       return {
         status: ambiguous ? 'ambiguous' : 'unavailable',
         reason,
         clientUserMessageId: input.clientUserMessageId
       };
     }
-    const queuedSubmissionId = responseString(response, ['queuedSubmissionId', 'id', 'submissionId']);
-    if (response === null || response === undefined) {
-      return { status: 'ambiguous', reason: 'owner accepted no inspectable response', clientUserMessageId: input.clientUserMessageId };
+    const submission = parseQueuedSubmission(response);
+    if (submission === null) {
+      return {
+        status: 'ambiguous',
+        reason: 'owner returned no readable queuedSubmission',
+        clientUserMessageId: input.clientUserMessageId
+      };
+    }
+    if (submission.clientUserMessageId !== input.clientUserMessageId) {
+      // The owner acknowledged a different message than the one we sent, so we
+      // cannot correlate this submission with our own intent.
+      return {
+        status: 'ambiguous',
+        reason: 'owner echoed a different clientUserMessageId',
+        clientUserMessageId: input.clientUserMessageId
+      };
     }
     return {
       status: 'accepted',
       threadId: input.threadId,
-      queuedSubmissionId,
+      queuedSubmissionId: submission.id,
       clientUserMessageId: input.clientUserMessageId
     };
   }

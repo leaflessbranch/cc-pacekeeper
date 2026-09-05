@@ -1,16 +1,72 @@
 {
   "version": "0.153.4",
   "methods": [
-    "thread/queue/add",
-    "thread/queue/list",
-    "thread/queue/delete",
     "account/rateLimits/read",
     "account/read",
     "account/usage/read",
+    "thread/compact/start",
+    "thread/queue/add",
+    "thread/queue/delete",
+    "thread/queue/list",
+    "thread/queue/reorder",
+    "thread/queue/start",
+    "thread/queue/update",
     "thread/resume",
-    "turn/start"
+    "turn/interrupt",
+    "turn/start",
+    "turn/steer"
   ],
-  "queueAddParams": ["threadId", "input", "clientUserMessageId"],
-  "turnStartParams": ["threadId", "input", "clientUserMessageId", "approvalPolicy"],
-  "unsupportedControls": ["tools", "tool_choice", "pre_model_suppression", "save_barrier"]
+  "queueAddParams": [
+    "threadId",
+    "input",
+    "clientUserMessageId"
+  ],
+  "turnStartParams": [
+    "additionalContext",
+    "approvalPolicy",
+    "approvalsReviewer",
+    "clientUserMessageId",
+    "collaborationMode",
+    "cwd",
+    "cyberAccessProgram",
+    "effort",
+    "environments",
+    "input",
+    "model",
+    "multiAgentMode",
+    "outputSchema",
+    "permissions",
+    "personality",
+    "responsesapiClientMetadata",
+    "runtimeWorkspaceRoots",
+    "sandboxPolicy",
+    "serviceTier",
+    "serviceTierForTurn",
+    "summary",
+    "threadId",
+    "toolOutput",
+    "turnTrigger"
+  ],
+  "unsupportedControls": {
+    "note": "TurnStartParams exposes no tools/tool_choice field and the protocol has no method that disables tools, suppresses an input before model work, or forces a persisted save before compaction.",
+    "absentFields": [
+      "tools",
+      "tool_choice"
+    ],
+    "absentMethods": [
+      "turn/start/tools-disabled",
+      "turn/input/suppress",
+      "turn/compact/save-barrier"
+    ],
+    "notEnforcement": [
+      "outputSchema",
+      "sandboxPolicy",
+      "permissions"
+    ]
+  },
+  "queueAddResponse": [
+    "queuedSubmission.id",
+    "queuedSubmission.clientUserMessageId",
+    "queuedSubmission.input"
+  ]
 }
