@@ -1,0 +1,16 @@
+{
+  "version": "0.153.4",
+  "methods": [
+    "thread/queue/add",
+    "thread/queue/list",
+    "thread/queue/delete",
+    "account/rateLimits/read",
+    "account/read",
+    "account/usage/read",
+    "thread/resume",
+    "turn/start"
+  ],
+  "queueAddParams": ["threadId", "input", "clientUserMessageId"],
+  "turnStartParams": ["threadId", "input", "clientUserMessageId", "approvalPolicy"],
+  "unsupportedControls": ["tools", "tool_choice", "pre_model_suppression", "save_barrier"]
+}
