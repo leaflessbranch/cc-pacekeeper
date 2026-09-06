@@ -36,6 +36,17 @@ stale one is not re-surfaced later.
 - Archived content is retained, so a consumer that fails after resuming can
   still recover the text.
 
+The concrete command is `pacekeeper-checkpoint`; the package also embeds its
+absolute path in subagent contracts. Use `list` first, then pass the exact id
+to `peek`, `resume`, `discard`, or the durable `claim`/`acknowledge` API. A
+claim keeps the active file in place while a consumer works; only an
+acknowledgement archives it. Queue acceptance and a reset wake are separate
+from checkpoint consumption.
+
+Codex's native PreCompact hook does not prove a save barrier. When the hook
+reports critical context, run `save` and verify the printed file before
+continuing; a directive alone is not evidence that a checkpoint exists.
+
 ## What a checkpoint is not
 
 Being told to save is not a save. Only a checkpoint whose file exists on disk,

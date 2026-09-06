@@ -1,0 +1,22 @@
+{
+  "name": "codex-pacekeeper",
+  "version": "0.1.0",
+  "description": "Opt-in pacing, checkpoint, presence and existing-owner queue helpers for Codex subscription sessions.",
+  "license": "MIT",
+  "optIn": true,
+  "runtime": "bun",
+  "hooks": "hooks/hooks.json",
+  "entrypoints": {
+    "tick": "bin/pacekeeper-tick",
+    "refresh": "bin/pacekeeper-refresh",
+    "checkpoint": "bin/pacekeeper-checkpoint",
+    "worktrees": "bin/pacekeeper-worktrees",
+    "service": "bin/pacekeeper-service",
+    "doctor": "bin/pacekeeper-doctor",
+    "presence": "bin/pacekeeper-presence"
+  },
+  "skills": [
+    "skills/checkpoint/SKILL.md",
+    "skills/worktree/SKILL.md"
+  ]
+}

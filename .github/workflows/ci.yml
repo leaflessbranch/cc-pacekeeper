@@ -37,6 +37,19 @@ jobs:
       - run: bun install
       - run: bun test
       - run: bun run typecheck
+      - name: verify opt-in package wiring in a disposable profile
+        run: |
+          test -x bin/pacekeeper-tick
+          test -x bin/pacekeeper-refresh
+          test -x bin/pacekeeper-checkpoint
+          test -x bin/pacekeeper-worktrees
+          test -x bin/pacekeeper-service
+          test -x bin/pacekeeper-doctor
+          test -x bin/pacekeeper-presence
+          bun -e 'const p=JSON.parse(await Bun.file(".codex-plugin/plugin.json").text()); if (p.name !== "codex-pacekeeper" || p.version !== JSON.parse(await Bun.file("package.json").text()).version || p.optIn !== true) process.exit(1); JSON.parse(await Bun.file("hooks/hooks.json").text())'
+          XDG_CACHE_HOME="$RUNNER_TEMP/codex-cache" XDG_CONFIG_HOME="$RUNNER_TEMP/codex-config" CODEX_HOME="$RUNNER_TEMP/codex-home" bin/pacekeeper-tick <<'EOF'
+          {"hook_event_name":"SessionStart","thread_id":"ci-thread","now_ms":1700000000000}
+          EOF
 
   # The parity corpus executes the shipped Claude runtime alongside the Codex
   # package, so it needs the Claude package's dependencies installed too.

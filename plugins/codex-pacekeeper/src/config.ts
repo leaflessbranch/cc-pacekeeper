@@ -35,9 +35,13 @@ const CodexConfigSchema = z.object({
   }),
   debounce_seconds: z.number().int().nonnegative(),
   usage_freshness_seconds: z.number().int().positive(),
-  checkpoint_dir_name: z.string().min(1),
+  checkpoint_dir_name: z.string().min(1).refine((value) => isSafeSegment(value), {
+    message: 'checkpoint directory name must be a single relative path segment'
+  }),
   /** Codex checkpoints live in their own subtree of the shared root. */
-  checkpoint_subdir: z.string().min(1),
+  checkpoint_subdir: z.string().min(1).refine((value) => isSafeSegment(value), {
+    message: 'checkpoint subdir must be a single relative path segment'
+  }),
   checkpoint: z.object({
     stale_after_days: z.number().int().positive(),
     archive_keep_days: z.number().int().positive()
@@ -105,6 +109,15 @@ export const CODEX_DEFAULTS: CodexConfig = {
   }
 };
 
+function isSafeSegment(value: string): boolean {
+  return value.length > 0
+    && value !== '.'
+    && value !== '..'
+    && !path.isAbsolute(value)
+    && !value.includes('/')
+    && !value.includes('\\');
+}
+
 /**
  * Fields never inherited from the legacy config. `channels` is deferred for
  * Codex (capability 21) and holds a user's private destination; the Claude
@@ -144,6 +157,10 @@ function defaultConfigHome(): string {
   return process.env['XDG_CONFIG_HOME'] ?? path.join(os.homedir(), '.config');
 }
 
+function cloneConfig(config: CodexConfig): CodexConfig {
+  return JSON.parse(JSON.stringify(config)) as CodexConfig;
+}
+
 /**
  * Try the whole candidate; if it fails, re-check each top-level section so one
  * bad field costs only its own section rather than the entire file.
@@ -152,18 +169,75 @@ function validate(candidate: unknown, diagnostics: string[]): CodexConfig {
   const whole = CodexConfigSchema.safeParse(candidate);
   if (whole.success) return whole.data;
 
-  const result: Record<string, unknown> = { ...CODEX_DEFAULTS };
+  const result = cloneConfig(CODEX_DEFAULTS) as unknown as Record<string, unknown>;
   const sections = isPlainObject(candidate) ? candidate : {};
-  for (const key of Object.keys(CODEX_DEFAULTS) as Array<keyof CodexConfig>) {
-    if (!(key in sections)) continue;
-    const probe = CodexConfigSchema.safeParse({ ...CODEX_DEFAULTS, [key]: sections[key] });
-    if (probe.success) {
-      result[key] = probe.data[key];
-      continue;
-    }
+
+  const addIssues = (probe: z.SafeParseError<unknown>, fallbackPath: string): void => {
     for (const issue of probe.error.issues) {
-      diagnostics.push(`${issue.path.join('.') || String(key)}: ${issue.message}`);
+      const rendered = issue.path.length > 0 ? issue.path.join('.') : fallbackPath;
+      const line = `${rendered}: ${issue.message}`;
+      if (!diagnostics.includes(line)) diagnostics.push(line);
     }
+  };
+
+  const setPath = (target: Record<string, unknown>, pathParts: string[], value: unknown): void => {
+    let cursor: Record<string, unknown> = target;
+    for (const part of pathParts.slice(0, -1)) {
+      const next = cursor[part];
+      if (!isPlainObject(next)) cursor[part] = {};
+      cursor = cursor[part] as Record<string, unknown>;
+    }
+    const last = pathParts[pathParts.length - 1];
+    if (last !== undefined) cursor[last] = value;
+  };
+
+  const candidateAt = (pathParts: string[]): unknown => {
+    let value: unknown = candidate;
+    for (const part of pathParts) {
+      if (!isPlainObject(value)) return undefined;
+      value = value[part];
+    }
+    return value;
+  };
+
+  const defaultAt = (pathParts: string[]): unknown => {
+    let value: unknown = CODEX_DEFAULTS;
+    for (const part of pathParts) {
+      if (!isPlainObject(value)) return undefined;
+      value = value[part];
+    }
+    return value;
+  };
+
+  const copyIfValid = (pathParts: string[]): void => {
+    const value = candidateAt(pathParts);
+    if (value === undefined) return;
+    const probeCandidate = cloneConfig(CODEX_DEFAULTS) as unknown as Record<string, unknown>;
+    setPath(probeCandidate, pathParts, value);
+    const probe = CodexConfigSchema.safeParse(probeCandidate);
+    if (probe.success) {
+      setPath(result, pathParts, value);
+      return;
+    }
+    const defaultValue = defaultAt(pathParts);
+    // Threshold ladders are atomic: an out-of-order triple must not be
+    // partially accepted as a different policy. Other nested objects can be
+    // safely decomposed to preserve valid sibling fields.
+    if (pathParts[0] === 'thresholds' && pathParts.length === 2) {
+      addIssues(probe, pathParts.join('.'));
+      if (defaultValue !== undefined) setPath(result, pathParts, defaultValue);
+      return;
+    }
+    if (isPlainObject(value) && isPlainObject(defaultValue)) {
+      for (const child of Object.keys(defaultValue)) copyIfValid([...pathParts, child]);
+      return;
+    }
+    addIssues(probe, pathParts.join('.'));
+  };
+
+  for (const key of Object.keys(CODEX_DEFAULTS)) {
+    if (!(key in sections)) continue;
+    copyIfValid([key]);
   }
   const merged = CodexConfigSchema.safeParse(result);
   if (merged.success) return merged.data;
@@ -186,7 +260,7 @@ export function loadCodexConfig(configHome: string = defaultConfigHome()): Loade
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') {
       diagnostics.push(
-        `${file} could not be read as JSON: ${error instanceof Error ? error.message : 'unknown error'}`
+        `legacy config could not be read as JSON: ${error instanceof Error ? error.message : 'unknown error'}`
       );
     }
     return { config: CODEX_DEFAULTS, source: 'defaults', diagnostics };
@@ -205,9 +279,15 @@ export function loadCodexConfig(configHome: string = defaultConfigHome()): Loade
   }
 
   const adapters = raw['adapters'];
-  const codexOverrides = isPlainObject(adapters) && isPlainObject(adapters['codex'])
-    ? adapters['codex']
-    : {};
+  let codexOverrides: Record<string, unknown> = {};
+  if (adapters !== undefined) {
+    if (!isPlainObject(adapters)) {
+      diagnostics.push('adapters: expected an object; Codex overrides were ignored');
+    } else if (adapters['codex'] !== undefined) {
+      if (isPlainObject(adapters['codex'])) codexOverrides = adapters['codex'];
+      else diagnostics.push('adapters.codex: expected an object; Codex overrides were ignored');
+    }
+  }
 
   const candidate = merge(merge(CODEX_DEFAULTS, inherited), codexOverrides);
   return { config: validate(candidate, diagnostics), source: 'legacy', diagnostics };

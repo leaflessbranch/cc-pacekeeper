@@ -30,12 +30,24 @@ export interface DoctorInput {
   protocolVersion: string;
   capabilities: NativeCapabilities;
   ownerStatus: 'found' | 'absent' | 'ambiguous' | 'unknown';
-  authenticated: boolean;
+  authenticated: boolean | null;
   capacity: 'included' | 'paid' | 'unknown' | 'unsupported';
   /** Age of the most recent quota reading. */
   quotaAgeSeconds: number;
   freshnessSeconds: number;
   configDiagnostics: string[];
+  /** Explicitly false when no native handshake/version read occurred. */
+  protocolObserved?: boolean;
+  /** Executable/version checks are supplied by the CLI, never self-asserted. */
+  executableObserved?: boolean;
+  executableVersion?: string | null;
+  hookTrust?: boolean | null;
+  permissionsOk?: boolean | null;
+  crashCount?: number | null;
+  cacheFields?: {
+    cachedInputTokens: boolean;
+    cacheWriteInputTokens: boolean;
+  };
   /** Accepted so a caller need not strip them; never included in the report. */
   accountId?: string;
   threadId?: string;
@@ -47,10 +59,16 @@ const SEVERITY: readonly CheckStatus[] = ['ok', 'warn', 'blocked', 'fail'];
 export function diagnose(input: DoctorInput): DoctorReport {
   const checks: DoctorCheck[] = [];
 
+  const protocolObserved = input.protocolObserved
+    ?? (input.capabilities.protocolVersion !== 'unknown'
+      && input.capabilities.queue !== 'unavailable');
+
   checks.push({
     name: 'protocol version',
-    status: input.capabilities.versionMatchesPin ? 'ok' : 'warn',
-    detail: input.capabilities.versionMatchesPin
+    status: !protocolObserved ? 'warn' : input.capabilities.versionMatchesPin ? 'ok' : 'warn',
+    detail: !protocolObserved
+      ? 'native protocol version was not observed; no pinned-version claim is made'
+      : input.capabilities.versionMatchesPin
       ? `matches the pinned acceptance target ${input.protocolVersion}`
       : `reports ${input.capabilities.protocolVersion}, which differs from the pinned target; ` +
         'capabilities are read from the server rather than assumed'
@@ -74,19 +92,26 @@ export function diagnose(input: DoctorInput): DoctorReport {
 
   checks.push({
     name: 'queue delivery',
-    status: input.capabilities.queue === 'supported' ? 'ok' : 'fail',
+    status:
+      input.capabilities.queue === 'supported'
+        ? 'ok'
+        : input.capabilities.queue === 'unsupported'
+          ? 'fail'
+          : 'warn',
     detail:
       input.capabilities.queue === 'supported'
         ? 'thread/queue/add is available on the existing owner'
-        : `thread/queue/add is ${input.capabilities.queue}; scheduled delivery cannot run`
+        : `thread/queue/add is ${input.capabilities.queue}; scheduled delivery cannot be confirmed`
   });
 
   checks.push({
     name: 'authentication',
-    status: input.authenticated ? 'ok' : 'fail',
-    detail: input.authenticated
+    status: input.authenticated === true ? 'ok' : input.authenticated === false ? 'fail' : 'warn',
+    detail: input.authenticated === true
       ? 'a subscription account is authenticated'
-      : 'no supported subscription authentication was found'
+      : input.authenticated === false
+        ? 'no supported subscription authentication was found'
+        : 'subscription authentication was not observed; automation stays disabled'
   });
 
   checks.push({
@@ -95,7 +120,7 @@ export function diagnose(input: DoctorInput): DoctorReport {
     detail:
       input.capabilities.accountRateLimits === 'supported'
         ? 'account/rateLimits/read is available'
-        : `account/rateLimits/read is ${input.capabilities.accountRateLimits}; quotas are unreadable`
+        : `account/rateLimits/read is ${input.capabilities.accountRateLimits}; quotas are not confirmed readable`
   });
 
   const neverRead = !Number.isFinite(input.quotaAgeSeconds);
@@ -109,6 +134,59 @@ export function diagnose(input: DoctorInput): DoctorReport {
         ? `the last reading is ${input.quotaAgeSeconds}s old, beyond the ${input.freshnessSeconds}s window; ` +
           'automation stays disabled until it refreshes'
         : `the last reading is ${input.quotaAgeSeconds}s old`
+  });
+
+  checks.push({
+    name: 'Codex executable',
+    status: input.executableObserved === true ? 'ok' : 'warn',
+    detail: input.executableObserved === true
+      ? `an executable was observed${input.executableVersion ? ` (${input.executableVersion})` : ''}`
+      : 'the installed Codex executable was not observed; version is not self-reported'
+  });
+
+  checks.push({
+    name: 'hook trust',
+    status: input.hookTrust === true ? 'ok' : input.hookTrust === false ? 'fail' : 'warn',
+    detail: input.hookTrust === true
+      ? 'the hook trust state was observed as enabled'
+      : input.hookTrust === false
+        ? 'the hook is not trusted by the harness'
+        : 'hook trust was not observed; configured hooks are not treated as executed'
+  });
+
+  checks.push({
+    name: 'state permissions',
+    status: input.permissionsOk === true ? 'ok' : input.permissionsOk === false ? 'fail' : 'warn',
+    detail: input.permissionsOk === true
+      ? 'state directories are writable'
+      : input.permissionsOk === false
+        ? 'state directories are not writable'
+        : 'state directory permissions were not observed'
+  });
+
+  checks.push({
+    name: 'crash breadcrumbs',
+    status: input.crashCount === undefined || input.crashCount === null
+      ? 'warn'
+      : input.crashCount === 0 ? 'ok' : 'warn',
+    detail: input.crashCount === undefined || input.crashCount === null
+      ? 'crash breadcrumbs were not observed'
+      : input.crashCount === 0
+        ? 'none recorded'
+        : `${input.crashCount} recorded crash breadcrumb(s)`
+  });
+
+  checks.push({
+    name: 'cache fields',
+    status: input.cacheFields === undefined
+      ? 'warn'
+      : input.cacheFields.cachedInputTokens
+        ? 'ok'
+        : 'warn',
+    detail: input.cacheFields === undefined
+      ? 'native cache read/write fields were not observed'
+      : `cachedInputTokens=${input.cacheFields.cachedInputTokens ? 'observed' : 'missing'}, `
+        + `cacheWriteInputTokens=${input.cacheFields.cacheWriteInputTokens ? 'observed' : 'missing'}`
   });
 
   checks.push({
@@ -145,8 +223,9 @@ export function diagnose(input: DoctorInput): DoctorReport {
     name: 'pre-model suppression',
     status: 'blocked',
     detail:
-      'no method withdraws a queued submission before model work begins, so a ping that ' +
-      'loses a race with real user input cannot be recalled'
+      'thread/queue/delete can remove a queued submission, but the pinned protocol ' +
+      'does not prove that deletion wins an execution race before model work begins; ' +
+      'a ping that loses a race with real user input remains unverified'
   });
   checks.push({
     name: 'compaction save barrier',

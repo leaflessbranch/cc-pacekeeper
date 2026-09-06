@@ -52,6 +52,8 @@ export interface Job {
   resetGeneration?: number;
   /** Whether this attempt may be retried. False whenever delivery is unproven. */
   retryable: boolean;
+  /** A queued native submission is awaiting cancellation acknowledgement. */
+  cancelRequested?: boolean;
   /** Only true after a completed turn whose result was exactly the pong. */
   pongVerified: boolean;
   cancelReason?: string;
@@ -73,7 +75,8 @@ export function createJob(input: CreateJobInput): Job {
   const canonical = [
     input.kind,
     input.owner.accountId ?? ' unknown-account',
-    input.owner.threadId
+    input.owner.threadId,
+    input.resetGeneration === undefined ? '' : String(input.resetGeneration)
   ]
     .map((part) => `${part.length}:${part}`)
     .join('|');
@@ -94,9 +97,10 @@ export type JobEvent =
   | { type: 'submitting' }
   | { type: 'accepted'; queuedSubmissionId: string }
   | { type: 'turn-started' }
-  | { type: 'completed'; result: string }
+  | { type: 'completed'; result: string; nativeCompleted?: boolean; toolCalls?: number }
   | { type: 'rejected'; reason: string }
-  | { type: 'ambiguous'; reason: string };
+  | { type: 'ambiguous'; reason: string }
+  | { type: 'cancelled' };
 
 /** States from which no further progress is possible. */
 const TERMINAL: ReadonlySet<JobState> = new Set<JobState>([
@@ -113,23 +117,44 @@ export function advance(job: Job, event: JobEvent): Job {
 
   switch (event.type) {
     case 'submitting':
-      return { ...job, state: 'submitting' };
+      if (job.state !== 'scheduled') return job;
+      return { ...job, state: 'submitting', retryable: false };
     case 'accepted':
+      if (job.state !== 'submitting' || event.queuedSubmissionId.trim() === '') return job;
       // Acceptance means queued, never executed, so pongVerified stays false.
-      return { ...job, state: 'queued', queuedSubmissionId: event.queuedSubmissionId };
+      return { ...job, state: 'queued', queuedSubmissionId: event.queuedSubmissionId, retryable: false };
     case 'turn-started':
+      if (job.state !== 'queued') return job;
       return { ...job, state: 'running' };
     case 'completed':
+      // Some native owners do not emit a distinct queue-running notification;
+      // a verified completion may therefore arrive directly from queued. A
+      // scheduled/submitting job still cannot jump to completion.
+      if (job.state !== 'running' && job.state !== 'queued') return job;
       return {
         ...job,
         state: 'completed',
-        pongVerified: event.result.trim().toLowerCase() === KEEPALIVE_PONG
+        // Exact means byte-for-byte lowercase `pong`: whitespace and case
+        // changes are observable model output and do not prove the contract.
+        pongVerified:
+          event.result === KEEPALIVE_PONG
+          // Omitted evidence is unknown, not a successful observation. The
+          // caller must supply both native completion and an observed zero
+          // tool-call count independently.
+          && event.nativeCompleted === true
+          && event.toolCalls === 0,
+        retryable: false
       };
     case 'rejected':
+      if (job.state !== 'scheduled' && job.state !== 'submitting') return job;
       // Explicitly refused: nothing was delivered, so another attempt is safe.
       return { ...job, state: 'rejected', retryable: true, failureReason: event.reason };
     case 'ambiguous':
+      if (job.state !== 'submitting' && job.state !== 'queued' && job.state !== 'running') return job;
       return { ...job, state: 'ambiguous', retryable: false, failureReason: event.reason };
+    case 'cancelled':
+      if (job.state !== 'queued' && job.state !== 'scheduled') return job;
+      return { ...job, state: 'cancelled', retryable: false, cancelRequested: false };
   }
 }
 
@@ -165,6 +190,13 @@ export interface EligibilityInput {
   capacity?: 'included' | 'paid' | 'unknown' | 'unsupported';
   enabled?: boolean;
   pendingWork?: boolean;
+  ownerLive?: boolean;
+  fresh?: boolean;
+  /** Continuous idle duration and the configured cancellation boundary. */
+  idleForMs?: number;
+  maxIdleMs?: number;
+  /** Strict execution checks fail closed when a required fact is absent. */
+  strict?: boolean;
 }
 
 /**
@@ -176,13 +208,37 @@ export function cancelIf(job: Job, input: EligibilityInput): Job {
   // job record then would misreport what actually happened.
   if (job.state !== 'scheduled' && job.state !== 'queued') return job;
 
-  const cancel = (reason: string): Job => ({ ...job, state: 'cancelled', cancelReason: reason });
+  const cancel = (reason: string): Job => {
+    // Once native queue acceptance happened, local cancellation is only an
+    // intent. The caller must issue thread/queue/delete and advance on its
+    // acknowledgement; claiming cancelled immediately would allow the queued
+    // turn to run while the ledger says it did not.
+    if (job.state === 'queued') return { ...job, cancelRequested: true, cancelReason: reason, retryable: false };
+    return { ...job, state: 'cancelled', cancelReason: reason, retryable: false };
+  };
 
   if (input.enabled === false) return cancel('keepalive is disabled');
-  if (input.userActiveSinceMs !== undefined) return cancel('the user became active');
+  if (input.userActiveSinceMs !== undefined && input.userActiveSinceMs <= input.nowMs) return cancel('the user became active');
   if (input.capacity !== undefined && input.capacity !== 'included') {
     return cancel(`subscription capacity is ${input.capacity}, not confirmed included`);
   }
   if (input.pendingWork === false) return cancel('no pending work remains');
+  if (input.ownerLive === false) return cancel('the existing owner is no longer live');
+  if (input.fresh === false) return cancel('native eligibility facts are stale');
+  if (input.maxIdleMs !== undefined) {
+    if (!Number.isFinite(input.maxIdleMs) || input.maxIdleMs <= 0) return cancel('maximum idle duration is invalid');
+    if (input.idleForMs === undefined || !Number.isFinite(input.idleForMs) || input.idleForMs < 0) {
+      return cancel('idle duration is unknown');
+    }
+    if (input.idleForMs >= input.maxIdleMs) return cancel('maximum continuous idle duration reached');
+  }
+  if (input.strict === true) {
+    if (input.enabled === undefined) return cancel('keepalive eligibility is unknown');
+    if (input.capacity === undefined) return cancel('subscription capacity is unknown');
+    if (input.pendingWork === undefined) return cancel('pending-work eligibility is unknown');
+    if (input.ownerLive === undefined) return cancel('owner liveness is unknown');
+    if (input.fresh === undefined) return cancel('native freshness is unknown');
+    if (input.maxIdleMs !== undefined && input.idleForMs === undefined) return cancel('idle duration is unknown');
+  }
   return job;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { CODEX_DEFAULTS } from '../config';
-import { buildFacts, meterLevel } from '../facts';
+import { buildFacts, meterLevel, readNativeFacts } from '../facts';
+import { parseRateLimitsResponse } from '../native';
 
 const NOW = 1_700_000_000_000;
 const FRESH = NOW - 10_000;
@@ -199,5 +200,14 @@ describe('fact assembly', () => {
     expect(facts.fiveHour).toBeNull();
     expect(facts.unknownBuckets).toHaveLength(1);
     expect(facts.unknownBuckets[0]?.durationMinutes).toBe(15);
+  });
+
+  test('native account/read supplies subscription authentication when no override is given', async () => {
+    const facts = await readNativeFacts({
+      readRateLimits: async () => parseRateLimitsResponse(rateLimits(), NOW),
+      readAccount: async () => ({ kind: 'chatgpt', authenticated: true, planType: 'plus', requiresOpenaiAuth: true, diagnostics: [] })
+    }, CODEX_DEFAULTS, { nowMs: NOW });
+    expect(facts.capacity).toBe('included');
+    expect(facts.automationAllowed).toBe(true);
   });
 });

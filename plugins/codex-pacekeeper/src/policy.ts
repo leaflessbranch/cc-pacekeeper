@@ -33,6 +33,10 @@ export interface PolicyState {
   savedThisCycle: boolean;
   /** Last genuine user activity. Synthetic turns never advance this. */
   lastUserActivityAtMs?: number;
+  /** Last substantive harness/model work; never treated as user presence. */
+  lastWorkAtMs?: number;
+  /** Last tool lifecycle event, retained for idle diagnostics only. */
+  lastToolActivityAtMs?: number;
 }
 
 export interface DecisionInput {
@@ -50,6 +54,8 @@ export interface DecisionInput {
    * emit pacing output or count as user activity.
    */
   synthetic?: boolean;
+  /** Explicit override for harnesses that can distinguish user input. */
+  userActivity?: boolean;
 }
 
 export interface Decision {
@@ -76,22 +82,66 @@ const SILENT_EVENTS: ReadonlySet<PolicyEvent> = new Set<PolicyEvent>([
 export function decide(input: DecisionInput, config: CodexConfig): Decision {
   const { facts, state, nowMs } = input;
 
+  // Synthetic keepalive events have no policy side effects at all. In
+  // particular, do not first apply a new-block reset: doing so clears the
+  // debounce/save state even though the ping must be transparent.
+  if (input.synthetic === true) {
+    return {
+      inject: false,
+      level: null,
+      meter: null,
+      reason: 'synthetic turn: policy output suppressed',
+      nextState: {
+        ...state,
+        levels: { ...state.levels },
+        lastInjectedAtMs: { ...state.lastInjectedAtMs }
+      }
+    };
+  }
+
   // A new block invalidates the levels recorded against the previous one, so
   // the first reminder of the new block is not suppressed by the old one.
   const resetAtMs = facts.fiveHour?.resetsAtMs ?? null;
   const blockChanged = resetAtMs !== null && state.blockResetAtMs !== null && resetAtMs !== state.blockResetAtMs;
   const base: PolicyState = blockChanged
-    ? { levels: {}, lastInjectedAtMs: {}, blockResetAtMs: resetAtMs, savedThisCycle: false, ...(state.lastUserActivityAtMs !== undefined ? { lastUserActivityAtMs: state.lastUserActivityAtMs } : {}) }
-    : { ...state, levels: { ...state.levels }, lastInjectedAtMs: { ...state.lastInjectedAtMs }, blockResetAtMs: resetAtMs ?? state.blockResetAtMs };
+    ? {
+        levels: {},
+        lastInjectedAtMs: {},
+        blockResetAtMs: resetAtMs,
+        savedThisCycle: false,
+        ...(state.lastUserActivityAtMs !== undefined ? { lastUserActivityAtMs: state.lastUserActivityAtMs } : {}),
+        ...(state.lastWorkAtMs !== undefined ? { lastWorkAtMs: state.lastWorkAtMs } : {}),
+        ...(state.lastToolActivityAtMs !== undefined ? { lastToolActivityAtMs: state.lastToolActivityAtMs } : {})
+      }
+    : {
+        ...state,
+        levels: { ...state.levels },
+        lastInjectedAtMs: { ...state.lastInjectedAtMs },
+        blockResetAtMs: resetAtMs ?? state.blockResetAtMs
+      };
 
-  // A synthetic turn is our own keepalive. It must produce no pacing output
-  // and must not look like the user being present.
-  if (input.synthetic === true) {
-    return { inject: false, level: null, meter: null, reason: 'synthetic turn: policy output suppressed', nextState: base };
+  const isUserActivity = input.userActivity ?? input.event === 'UserPromptSubmit';
+  const isToolEvent = input.event === 'PreToolUse' || input.event === 'PostToolUse';
+  const nextState: PolicyState = {
+    ...base,
+    ...(isUserActivity ? { lastUserActivityAtMs: nowMs } : {}),
+    ...(isToolEvent ? { lastToolActivityAtMs: nowMs, lastWorkAtMs: nowMs } : {}),
+    ...(input.event === 'PostCompact' ? { savedThisCycle: false } : {})
+  };
+
+  // PreCompact is the only point at which a context-critical save request is
+  // meaningful. Keep it one-shot for this compaction cycle; PostCompact above
+  // explicitly re-arms the next cycle. The native boundary still cannot turn
+  // this request into a verified save, which is reported by the adapter.
+  if (input.event === 'PreCompact' && facts.context?.level === 'critical' && base.savedThisCycle) {
+    return {
+      inject: false,
+      level: 'critical',
+      meter: 'context',
+      reason: 'context-critical save was already requested in this compaction cycle',
+      nextState
+    };
   }
-
-  const isUserActivity = input.event === 'UserPromptSubmit' || input.event === 'PreToolUse';
-  const nextState: PolicyState = isUserActivity ? { ...base, lastUserActivityAtMs: nowMs } : base;
 
   if (SILENT_EVENTS.has(input.event)) {
     return { inject: false, level: null, meter: null, reason: `${input.event} cannot carry injected context`, nextState };
@@ -152,7 +202,8 @@ export function decide(input: DecisionInput, config: CodexConfig): Decision {
     nextState: {
       ...nextState,
       levels: { ...nextState.levels, [meter]: level },
-      lastInjectedAtMs: { ...nextState.lastInjectedAtMs, [meter]: nowMs }
+      lastInjectedAtMs: { ...nextState.lastInjectedAtMs, [meter]: nowMs },
+      ...(input.event === 'PreCompact' && facts.context?.level === 'critical' ? { savedThisCycle: true } : {})
     }
   };
 }

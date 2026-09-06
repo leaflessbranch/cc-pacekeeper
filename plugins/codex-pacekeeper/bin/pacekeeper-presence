@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if ! command -v bun >/dev/null 2>&1; then
+  echo 'codex-pacekeeper: Bun is required for presence sampling' >&2
+  exit 1
+fi
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+exec bun run --silent "$DIR/../src/presence-watch.ts" "$@"

@@ -75,7 +75,7 @@ describe('state transitions', () => {
     expect(job.queuedSubmissionId).toBe('q-1');
     job = advance(job, { type: 'turn-started' });
     expect(job.state).toBe('running');
-    job = advance(job, { type: 'completed', result: 'pong' });
+    job = advance(job, { type: 'completed', result: 'pong', nativeCompleted: true, toolCalls: 0 });
     expect(job.state).toBe('completed');
   });
 
@@ -105,7 +105,7 @@ describe('state transitions', () => {
   test('a completed job ignores further transitions', () => {
     let job = advance(keepalive(), { type: 'submitting' });
     job = advance(job, { type: 'accepted', queuedSubmissionId: 'q' });
-    job = advance(job, { type: 'completed', result: 'pong' });
+    job = advance(job, { type: 'completed', result: 'pong', nativeCompleted: true, toolCalls: 0 });
     expect(advance(job, { type: 'turn-started' }).state).toBe('completed');
   });
 });
@@ -161,6 +161,16 @@ describe('cancellation', () => {
   test('an eligible job is left alone', () => {
     expect(cancelIf(keepalive(), { capacity: 'included', nowMs: NOW }).state).toBe('scheduled');
   });
+
+  test('maximum continuous idle cancels a pending keepalive, while unknown idle fails closed', () => {
+    const maxIdleMs = 60 * 60_000;
+    const expired = cancelIf(keepalive(), { nowMs: NOW, idleForMs: maxIdleMs, maxIdleMs, strict: true });
+    expect(expired.state).toBe('cancelled');
+    expect(expired.cancelReason).toContain('maximum');
+    const unknown = cancelIf(keepalive(), { nowMs: NOW, maxIdleMs, strict: true });
+    expect(unknown.state).toBe('cancelled');
+    expect(unknown.cancelReason).toContain('idle');
+  });
 });
 
 describe('keepalive contract', () => {
@@ -174,7 +184,7 @@ describe('keepalive contract', () => {
     let job = advance(keepalive(), { type: 'submitting' });
     job = advance(job, { type: 'accepted', queuedSubmissionId: 'q' });
     job = advance(job, { type: 'turn-started' });
-    job = advance(job, { type: 'completed', result: 'sure thing, happy to help' });
+    job = advance(job, { type: 'completed', result: 'sure thing, happy to help', nativeCompleted: true, toolCalls: 0 });
     expect(job.state).toBe('completed');
     expect(job.pongVerified).toBe(false);
   });
@@ -183,7 +193,7 @@ describe('keepalive contract', () => {
     let job = advance(keepalive(), { type: 'submitting' });
     job = advance(job, { type: 'accepted', queuedSubmissionId: 'q' });
     job = advance(job, { type: 'turn-started' });
-    job = advance(job, { type: 'completed', result: 'pong' });
+    job = advance(job, { type: 'completed', result: 'pong', nativeCompleted: true, toolCalls: 0 });
     expect(job.pongVerified).toBe(true);
   });
 

@@ -9,6 +9,9 @@
 
 export const NATIVE_PROTOCOL_VERSION = '0.153.4';
 export const QUEUE_ADD_METHOD = 'thread/queue/add';
+export const QUEUE_DELETE_METHOD = 'thread/queue/delete';
+export const QUEUE_LIST_METHOD = 'thread/queue/list';
+export const ACCOUNT_READ_METHOD = 'account/read';
 export const RATE_LIMITS_READ_METHOD = 'account/rateLimits/read';
 
 export type NativeCapability = 'supported' | 'unsupported' | 'unavailable';
@@ -18,13 +21,19 @@ export interface NativeCapabilities {
   /** Whether the probed protocol equals the pinned acceptance target. */
   versionMatchesPin: boolean;
   queue: NativeCapability;
+  /** Queue deletion is a separate native fact; it does not imply atomic
+   * suppression before a model starts. Kept optional for compatibility with
+   * older serialized capability records. */
+  queueDelete?: NativeCapability;
+  /** Account identity/auth mode is an observed native fact, not an env hint. */
+  accountRead?: NativeCapability;
   accountRateLimits: NativeCapability;
   /**
-   * The following three are permanently `unsupported`: the 0.153.4 protocol
-   * exposes no method or `turn/start` parameter that disables tools, suppresses
-   * an input before model work, or forces a persisted save before compaction.
-   * They are named here so a caller must handle the gap explicitly rather than
-   * assume a prompt instruction or a deny-all hook is enforcement.
+   * The following three are `unsupported` for the pinned 0.153.4 protocol:
+   * it exposes no method or `turn/start` parameter that disables tools,
+   * suppresses an input before model work, or forces a persisted save before
+   * compaction. They are named here so a caller must handle the gap explicitly
+   * rather than assume a prompt instruction or a deny-all hook is enforcement.
    */
   toolDisable: NativeCapability;
   preModelSuppression: NativeCapability;
@@ -103,17 +112,102 @@ export function normalizeNativeCapabilities(probe: NativeSchemaProbe): NativeCap
     if (!probed) return 'unavailable';
     return methods.has(method) ? 'supported' : 'unsupported';
   };
-  return {
+  const result: NativeCapabilities = {
     protocolVersion: version,
     versionMatchesPin: version === NATIVE_PROTOCOL_VERSION,
     queue: has(QUEUE_ADD_METHOD),
     accountRateLimits: has(RATE_LIMITS_READ_METHOD),
-    // Not probed: no such method exists in any published protocol version, so
-    // probing for one would only invent a control surface.
+    // Not probed: no such method exists in the pinned protocol, so probing for
+    // one would only invent a control surface for this acceptance target.
     toolDisable: 'unsupported',
     preModelSuppression: 'unsupported',
     saveBarrier: 'unsupported'
   };
+  // Keep this optional property non-enumerable so existing consumers that
+  // compare the original capability record byte-for-byte remain compatible,
+  // while native-aware callers can still distinguish queue deletion from the
+  // unsupported pre-model suppression guarantee.
+  Object.defineProperty(result, 'queueDelete', {
+    value: has(QUEUE_DELETE_METHOD),
+    enumerable: false,
+    writable: false,
+    configurable: false
+  });
+  Object.defineProperty(result, 'accountRead', {
+    value: has(ACCOUNT_READ_METHOD),
+    enumerable: false,
+    writable: false,
+    configurable: false
+  });
+  return result;
+}
+
+export type NativeAccountKind = 'chatgpt' | 'apiKey' | 'amazonBedrock' | 'unknown';
+
+/** Sanitized account/read facts used to gate subscription-only automation. */
+export interface ParsedAccount {
+  kind: NativeAccountKind;
+  /** `null` means account/read did not establish an authentication mode. */
+  authenticated: boolean | null;
+  planType: string | null;
+  requiresOpenaiAuth: boolean | null;
+  diagnostics: string[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parse the pinned GetAccountResponse without retaining email or credentials.
+ * API-key and Bedrock accounts are real account modes, but they are not
+ * subscription accounts and therefore deliberately report `authenticated:
+ * false` to the subscription gate. A malformed or missing account remains
+ * unknown, rather than becoming an unauthenticated assertion by accident.
+ */
+export function parseAccountResponse(response: unknown): ParsedAccount {
+  const diagnostics: string[] = [];
+  const empty: ParsedAccount = {
+    kind: 'unknown',
+    authenticated: null,
+    planType: null,
+    requiresOpenaiAuth: null,
+    diagnostics
+  };
+  if (!isRecord(response)) {
+    diagnostics.push('native account response is not an object');
+    return empty;
+  }
+  const requiresOpenaiAuth = typeof response['requiresOpenaiAuth'] === 'boolean'
+    ? response['requiresOpenaiAuth']
+    : null;
+  if (requiresOpenaiAuth === null) diagnostics.push('requiresOpenaiAuth is missing or invalid');
+  const accountValue = response['account'];
+  if (accountValue === null) {
+    diagnostics.push('native account is unauthenticated');
+    return { ...empty, authenticated: false, requiresOpenaiAuth };
+  }
+  if (accountValue === undefined) {
+    diagnostics.push('native account was not observed');
+    return { ...empty, requiresOpenaiAuth };
+  }
+  if (!isRecord(accountValue)) {
+    diagnostics.push('native account has an invalid shape');
+    return { ...empty, requiresOpenaiAuth };
+  }
+  const type = accountValue['type'];
+  if (type === 'chatgpt') {
+    const planType = typeof accountValue['planType'] === 'string' ? accountValue['planType'] : null;
+    if (planType === null) diagnostics.push('ChatGPT account planType is missing or invalid');
+    return { kind: 'chatgpt', authenticated: true, planType, requiresOpenaiAuth, diagnostics };
+  }
+  if (type === 'apiKey' || type === 'amazonBedrock') {
+    return { kind: type, authenticated: false, planType: null, requiresOpenaiAuth, diagnostics: [
+      `native account type ${type} is outside subscription automation`
+    ] };
+  }
+  diagnostics.push('native account type is unknown');
+  return { ...empty, requiresOpenaiAuth };
 }
 
 export interface NativeRateLimitWindow {
@@ -293,6 +387,14 @@ function isSnapshotObject(value: unknown): value is NativeRateLimitSnapshot {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isParsedRateLimitsResponse(value: unknown): value is ParsedRateLimitsResponse {
+  if (!isRecord(value)) return false;
+  return Array.isArray(value['buckets'])
+    && Array.isArray(value['diagnostics'])
+    && isRecord(value['credits'])
+    && isRecord(value['byLimitId']);
+}
+
 /**
  * Parse the full `account/rateLimits/read` reply. `rateLimits` is the
  * historical single-bucket view and is required by the schema; its absence is
@@ -300,19 +402,40 @@ function isSnapshotObject(value: unknown): value is NativeRateLimitSnapshot {
  * indistinguishable from "no limits reached" to a naive caller.
  */
 export function parseRateLimitsResponse(
-  response: NativeRateLimitsResponse,
+  response: NativeRateLimitsResponse | unknown,
   observedAtMs: number
 ): ParsedRateLimitsResponse {
-  const accountId = typeof response.accountId === 'string' ? response.accountId : null;
+  if (!isSnapshotObject(response)) {
+    return {
+      accountId: null,
+      planType: null,
+      limitId: null,
+      limitName: null,
+      rateLimitReachedType: null,
+      buckets: [],
+      credits: { hasCredits: null, unlimited: null, balance: null },
+      spendControlReached: null,
+      diagnostics: ['native rate-limit response is not an object'],
+      byLimitId: {}
+    };
+  }
+  // NativeClient returns this normalized shape so downstream fact assembly and
+  // refresh can share one parser. Preserve it instead of treating it as a raw
+  // wire response and reporting a missing `rateLimits` field.
+  if (isParsedRateLimitsResponse(response)) return response;
+  const responseRecord = response as NativeRateLimitsResponse;
+  const accountId = typeof responseRecord.accountId === 'string' && responseRecord.accountId.trim() !== ''
+    ? responseRecord.accountId
+    : null;
   const byLimitId: Record<string, ParsedRateLimitSnapshot> = {};
-  const rawByLimitId = response.rateLimitsByLimitId;
+  const rawByLimitId = responseRecord.rateLimitsByLimitId;
   if (typeof rawByLimitId === 'object' && rawByLimitId !== null && !Array.isArray(rawByLimitId)) {
     for (const [limitId, snapshot] of Object.entries(rawByLimitId as Record<string, unknown>)) {
       if (!isSnapshotObject(snapshot)) continue;
       byLimitId[limitId] = parseRateLimitSnapshot(snapshot, observedAtMs);
     }
   }
-  if (!isSnapshotObject(response.rateLimits)) {
+  if (!isSnapshotObject(responseRecord.rateLimits)) {
     return {
       accountId,
       planType: null,
@@ -328,7 +451,7 @@ export function parseRateLimitsResponse(
   }
   return {
     accountId,
-    ...parseRateLimitSnapshot(response.rateLimits, observedAtMs),
+    ...parseRateLimitSnapshot(responseRecord.rateLimits, observedAtMs),
     byLimitId
   };
 }
@@ -401,20 +524,61 @@ export function parseThreadTokenUsage(usage: unknown): ParsedThreadContext {
 
 export type CapacityClassification = 'included' | 'paid' | 'unknown' | 'unsupported';
 
+// This is the plan enum observed in the pinned protocol. `free`, `go`, and
+// `unknown` are deliberately excluded from the subscription-only automation
+// path. Keeping the allow-list here prevents a future backend label from being
+// treated as included merely because a boolean happened to be false.
+const SUBSCRIPTION_PLANS: ReadonlySet<string> = new Set([
+  'plus',
+  'pro',
+  'prolite',
+  'team',
+  'self_serve_business_prolite',
+  'self_serve_business_usage_based',
+  'business',
+  'ent26',
+  'enterprise_cbp_automation',
+  'enterprise_cbp_usage_based',
+  'enterprise',
+  'edu',
+  'edu_plus',
+  'edu_pro'
+]);
+
+const PAID_REACHED_REASONS: ReadonlySet<string> = new Set([
+  'workspace_owner_credits_depleted',
+  'workspace_member_credits_depleted',
+  'workspace_owner_usage_limit_reached',
+  'workspace_member_usage_limit_reached'
+]);
+
 /**
  * Credits being available says nothing about whether the next turn will spend
  * them. Only an authoritative spend-control transition can classify paid use.
  */
 export function classifySubscriptionCapacity(
   parsed: Pick<ParsedRateLimitSnapshot, 'planType' | 'spendControlReached'> & {
+    rateLimitReachedType?: string | null;
     fresh: boolean;
     authenticated?: boolean;
     /** Recorded for diagnostics only; it never moves the classification. */
     creditsAvailable?: boolean | null;
   }
 ): CapacityClassification {
-  if (parsed.authenticated === false) return 'unsupported';
+  // A rate-limit payload can be present while the local authentication state
+  // is unavailable.  That is not proof that this process is using a supported
+  // subscription session, so unknown authentication must stay fail-closed just
+  // like an explicitly unsupported login.
+  if (parsed.authenticated !== true) return parsed.authenticated === false ? 'unsupported' : 'unknown';
   if (!parsed.fresh || parsed.planType === null) return 'unknown';
+  if (!SUBSCRIPTION_PLANS.has(parsed.planType)) return 'unknown';
+  if (parsed.rateLimitReachedType !== undefined && parsed.rateLimitReachedType !== null) {
+    if (PAID_REACHED_REASONS.has(parsed.rateLimitReachedType)) return 'paid';
+    // A reached limit or a future backend reason is not evidence that the
+    // next turn is included. Keep both the known rate-limit state and drift
+    // fail-closed until a fresh, authoritative snapshot clears it.
+    return 'unknown';
+  }
   if (parsed.spendControlReached === true) return 'paid';
   if (parsed.spendControlReached === false) return 'included';
   return 'unknown';
@@ -427,6 +591,9 @@ export interface ExistingOwnerRecord {
   threadIds: string[];
   activeThreadIds?: string[];
   socketPath?: string;
+  /** Optional working-directory provenance published by the owner registry. */
+  cwd?: string;
+  methods?: string[];
   protocolVersion: string;
 }
 
@@ -437,6 +604,8 @@ export interface OwnerProbeRecord {
   threadIds?: unknown;
   activeThreadIds?: unknown;
   socketPath?: unknown;
+  cwd?: unknown;
+  methods?: unknown;
   protocolVersion?: unknown;
 }
 
@@ -449,13 +618,18 @@ export function parseOwnerRecord(record: OwnerProbeRecord): ExistingOwnerRecord 
   const pid = finiteNumber(record.pid);
   if (ownerId === null || pid === null || !Number.isInteger(pid) || pid <= 0) return null;
   const protocolVersion = typeof record.protocolVersion === 'string' ? record.protocolVersion : 'unknown';
+  const activeThreadIds = record.activeThreadIds === undefined ? undefined : stringList(record.activeThreadIds);
+  const threadIds = stringList(record.threadIds);
+  if (threadIds.length === 0) return null;
   return {
     ownerId,
     pid,
-    accountId: typeof record.accountId === 'string' ? record.accountId : null,
-    threadIds: stringList(record.threadIds),
-    activeThreadIds: stringList(record.activeThreadIds),
+    accountId: typeof record.accountId === 'string' && record.accountId.trim() !== '' ? record.accountId : null,
+    threadIds,
+    ...(activeThreadIds === undefined ? {} : { activeThreadIds }),
     socketPath: typeof record.socketPath === 'string' ? record.socketPath : undefined,
+    ...(typeof record.cwd === 'string' && record.cwd !== '' ? { cwd: record.cwd } : {}),
+    ...(Array.isArray(record.methods) ? { methods: record.methods.filter((method): method is string => typeof method === 'string') } : {}),
     protocolVersion
   };
 }
@@ -484,6 +658,7 @@ export function findExistingOwner(input: OwnerLookupInput): OwnerLookup {
     .map(parseOwnerRecord)
     .filter((owner): owner is ExistingOwnerRecord => owner !== null)
     .filter((owner) => owner.threadIds.includes(input.threadId))
+    .filter((owner) => owner.activeThreadIds === undefined || owner.activeThreadIds.length === 0 || owner.activeThreadIds.includes(input.threadId))
     .filter((owner) => isAlive(owner.pid));
   if (owners.length === 0) return { status: 'absent' };
   if (input.accountId === null || owners.some((owner) => owner.accountId === null)) {
@@ -508,6 +683,20 @@ export interface ParsedQueuedSubmission {
   id: string;
   clientUserMessageId: string;
 }
+
+/** Parse the pinned `ThreadQueueListResponse.data` array. */
+export function parseQueueListResponse(response: unknown): ParsedQueuedSubmission[] {
+  if (typeof response !== 'object' || response === null) return [];
+  const data = (response as Record<string, unknown>)['data'];
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((item) => parseQueuedSubmission({ queuedSubmission: item }))
+    .filter((item): item is ParsedQueuedSubmission => item !== null);
+}
+
+export type QueueDeleteResult =
+  | { status: 'deleted'; threadId: string; queuedSubmissionId: string }
+  | { status: 'unsupported' | 'unavailable' | 'ambiguous' | 'rejected'; reason: string; threadId: string; queuedSubmissionId: string };
 
 /**
  * `ThreadQueueAddResponse` requires a nested `queuedSubmission` object holding
@@ -557,6 +746,9 @@ export class NativeClient {
   ) {}
 
   public async queueExistingThread(input: QueueAddInput): Promise<QueueDeliveryResult> {
+    if (!this.owner.threadIds.includes(input.threadId)) {
+      return { status: 'rejected', reason: 'the selected owner does not hold this thread', clientUserMessageId: input.clientUserMessageId };
+    }
     if (this.capabilities.queue !== 'supported') {
       return { status: 'unsupported', reason: 'thread/queue/add is not supported by the pinned owner', clientUserMessageId: input.clientUserMessageId };
     }
@@ -611,5 +803,72 @@ export class NativeClient {
 
   public async request(method: string, params: unknown): Promise<unknown> {
     return this.transport.request(method, params);
+  }
+
+  /**
+   * List queue entries by exact thread. This is useful for reconciliation and
+   * cancellation, but an empty list never proves that a prior ambiguous input
+   * did not execute.
+   */
+  public async listQueuedSubmissions(threadId: string): Promise<unknown> {
+    if (!this.owner.threadIds.includes(threadId)) {
+      throw new Error('the selected owner does not hold this thread');
+    }
+    return this.transport.request(QUEUE_LIST_METHOD, { threadId });
+  }
+
+  /**
+   * Request native deletion of a queued submission. The method is a best-effort
+   * cancellation acknowledgement only; it does not establish that execution
+   * could not already have begun, which is why preModelSuppression remains
+   * explicitly unsupported.
+   */
+  public async deleteQueuedSubmission(threadId: string, queuedSubmissionId: string): Promise<QueueDeleteResult> {
+    const capability = this.capabilities.queueDelete;
+    if (capability !== 'supported') {
+      return {
+        status: capability === 'unsupported' ? 'unsupported' : 'unavailable',
+        reason: 'thread/queue/delete is not established on the existing owner',
+        threadId,
+        queuedSubmissionId
+      };
+    }
+    if (!this.owner.threadIds.includes(threadId)) {
+      return { status: 'rejected', reason: 'the selected owner does not hold this thread', threadId, queuedSubmissionId };
+    }
+    if (queuedSubmissionId.trim() === '') {
+      return { status: 'rejected', reason: 'queuedSubmissionId must be non-empty', threadId, queuedSubmissionId };
+    }
+    let response: unknown;
+    try {
+      response = await this.transport.request(QUEUE_DELETE_METHOD, { threadId, queuedSubmissionId });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'native queue deletion failed';
+      const ambiguous = /timeout|timed out|disconnect|closed|reset|abort|EPIPE|ECONNRESET/i.test(reason);
+      return { status: ambiguous ? 'ambiguous' : 'unavailable', reason, threadId, queuedSubmissionId };
+    }
+    if (typeof response !== 'object' || response === null || (response as Record<string, unknown>)['deleted'] !== true) {
+      return { status: 'rejected', reason: 'owner did not acknowledge queued deletion', threadId, queuedSubmissionId };
+    }
+    return { status: 'deleted', threadId, queuedSubmissionId };
+  }
+
+  /** Read account/auth mode without copying email, tokens or other credentials. */
+  public async readAccount(): Promise<ParsedAccount> {
+    const capability = this.capabilities.accountRead;
+    if (capability !== 'supported') {
+      throw new Error(`account/read is ${capability ?? 'unavailable'}`);
+    }
+    const response = await this.transport.request(ACCOUNT_READ_METHOD, {});
+    return parseAccountResponse(response);
+  }
+
+  /** Read quota facts from the selected owner without copying credentials. */
+  public async readRateLimits(): Promise<ParsedRateLimitsResponse> {
+    if (this.capabilities.accountRateLimits !== 'supported') {
+      throw new Error(`account/rateLimits/read is ${this.capabilities.accountRateLimits}`);
+    }
+    const response = await this.transport.request(RATE_LIMITS_READ_METHOD, {});
+    return parseRateLimitsResponse(response as NativeRateLimitsResponse, Date.now());
   }
 }
