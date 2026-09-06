@@ -10,6 +10,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   NATIVE_PROTOCOL_VERSION,
+  ACCOUNT_READ_METHOD,
   QUEUE_ADD_METHOD,
   RATE_LIMITS_READ_METHOD,
   NativeClient,
@@ -17,6 +18,7 @@ import {
   classifySubscriptionCapacity,
   findExistingOwner,
   normalizeNativeCapabilities,
+  parseAccountResponse,
   parseRateLimitsResponse,
   parseThreadTokenUsage,
   type NativeTransport
@@ -141,6 +143,52 @@ describe('native capability probing', () => {
     expect(capabilities.queue).toBe('unavailable');
     expect(capabilities.accountRateLimits).toBe('unavailable');
   });
+
+  test('account/read is available only when the owner method list proves it', () => {
+    const capabilities = normalizeNativeCapabilities({ version: NATIVE_PROTOCOL_VERSION, methods: [ACCOUNT_READ_METHOD] });
+    expect(capabilities.accountRead).toBe('supported');
+    expect(normalizeNativeCapabilities({ version: NATIVE_PROTOCOL_VERSION }).accountRead).toBe('unavailable');
+  });
+});
+
+describe('account/read response parsing', () => {
+  test('recognizes a ChatGPT subscription without retaining email', () => {
+    const parsed = parseAccountResponse({
+      account: { type: 'chatgpt', email: 'private@example.invalid', planType: 'plus' },
+      requiresOpenaiAuth: true
+    });
+    expect(parsed).toEqual({
+      kind: 'chatgpt',
+      authenticated: true,
+      planType: 'plus',
+      requiresOpenaiAuth: true,
+      diagnostics: []
+    });
+    expect(JSON.stringify(parsed)).not.toContain('private@example.invalid');
+  });
+
+  test('keeps API-key and Bedrock accounts outside subscription automation', () => {
+    expect(parseAccountResponse({ account: { type: 'apiKey' }, requiresOpenaiAuth: false }).authenticated).toBe(false);
+    expect(parseAccountResponse({ account: { type: 'amazonBedrock' }, requiresOpenaiAuth: false }).authenticated).toBe(false);
+  });
+
+  test('treats missing or malformed account observations as unknown', () => {
+    expect(parseAccountResponse({ requiresOpenaiAuth: true }).authenticated).toBeNull();
+    expect(parseAccountResponse({ account: { type: 'future' }, requiresOpenaiAuth: true }).authenticated).toBeNull();
+    expect(parseAccountResponse(null).authenticated).toBeNull();
+  });
+
+  test('NativeClient reads account mode through the existing owner', async () => {
+    const capabilities = normalizeNativeCapabilities({ version: NATIVE_PROTOCOL_VERSION, methods: [ACCOUNT_READ_METHOD] });
+    let requestedMethod = '';
+    const client = new NativeClient({
+      request: async (method) => { requestedMethod = method; return { account: { type: 'chatgpt', email: null, planType: 'pro' }, requiresOpenaiAuth: true }; }
+    }, capabilities, owner);
+    const parsed = await client.readAccount();
+    expect(requestedMethod).toBe(ACCOUNT_READ_METHOD);
+    expect(parsed.authenticated).toBe(true);
+    expect(parsed.planType).toBe('pro');
+  });
 });
 
 describe('rate limit normalization', () => {
@@ -223,6 +271,13 @@ describe('rate limit normalization', () => {
     expect(parsed.buckets).toEqual([]);
     expect(parsed.diagnostics.length).toBeGreaterThan(0);
   });
+
+  test('a malformed top-level response remains an explicit diagnostic', () => {
+    const parsed = parseRateLimitsResponse(null, 1_700_000_100_000);
+    expect(parsed.accountId).toBeNull();
+    expect(parsed.buckets).toEqual([]);
+    expect(parsed.diagnostics.join(' ')).toContain('not an object');
+  });
 });
 
 describe('subscription capacity classification', () => {
@@ -239,7 +294,7 @@ describe('subscription capacity classification', () => {
 
   test('an authoritative spend-control transition classifies as paid', () => {
     expect(
-      classifySubscriptionCapacity({ planType: 'plus', spendControlReached: true, fresh: true })
+      classifySubscriptionCapacity({ planType: 'plus', spendControlReached: true, fresh: true, authenticated: true })
     ).toBe('paid');
   });
 
@@ -258,6 +313,28 @@ describe('subscription capacity classification', () => {
         authenticated: false
       })
     ).toBe('unsupported');
+  });
+
+  test('an unobserved authentication state never authorizes included capacity', () => {
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        fresh: true
+      })
+    ).toBe('unknown');
+  });
+
+  test('a reached native rate-limit state never reads as included', () => {
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        rateLimitReachedType: 'rate_limit_reached',
+        fresh: true,
+        authenticated: true
+      })
+    ).toBe('unknown');
   });
 });
 
@@ -393,6 +470,17 @@ describe('existing-owner selection', () => {
       findExistingOwner({ records, threadId: 'thread-a', accountId: null, isAlive: () => true })
         .status
     ).toBe('unknown');
+  });
+
+  test('an explicitly empty active-thread list does not invent a match', () => {
+    expect(
+      findExistingOwner({
+        records: [{ ...owner, activeThreadIds: ['other-thread'] }],
+        threadId: 'thread-a',
+        accountId: 'acct-1',
+        isAlive: () => true
+      }).status
+    ).toBe('absent');
   });
 });
 

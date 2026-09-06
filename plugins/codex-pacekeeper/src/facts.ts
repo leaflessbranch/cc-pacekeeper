@@ -13,9 +13,11 @@ import {
   parseThreadTokenUsage,
   type CapacityClassification,
   type NativeRateLimitsResponse,
-  type NormalizedQuotaBucket
+  type NormalizedQuotaBucket,
+  type ParsedAccount
 } from './native';
 import type { CodexConfig } from './config';
+import type { NativeClient } from './native';
 
 export type Level = 'none' | 'notify' | 'warn' | 'critical';
 export type MeterName = 'context' | 'five_hour' | 'weekly';
@@ -55,8 +57,8 @@ export interface FactInputs {
   /** When the rate-limit reading was taken. */
   observedAtMs: number;
   tokenUsage: unknown;
-  /** `false` disables subscription automation outright. */
-  authenticated: boolean;
+  /** `false` disables subscription automation; `null` is unobserved. */
+  authenticated: boolean | null;
 }
 
 export interface CodexFacts {
@@ -119,14 +121,18 @@ export function buildFacts(
 
   const parsed = parseRateLimitsResponse(inputs.rateLimits, inputs.observedAtMs);
   const ageMs = nowMs - inputs.observedAtMs;
-  const stale = ageMs > config.usage_freshness_seconds * 1000;
-  if (stale) blockers.push('the native quota reading is stale');
+  const invalidObservationTime = !Number.isFinite(inputs.observedAtMs) || inputs.observedAtMs > nowMs;
+  const stale = invalidObservationTime || ageMs > config.usage_freshness_seconds * 1000;
+  if (invalidObservationTime) blockers.push('the native quota observation time is invalid');
+  else if (stale) blockers.push('the native quota reading is stale');
+  if (parsed.accountId === null) blockers.push('the native account identity is unknown');
 
   const capacity = classifySubscriptionCapacity({
     planType: parsed.planType,
     spendControlReached: parsed.spendControlReached,
+    rateLimitReachedType: parsed.rateLimitReachedType,
     fresh: !stale,
-    authenticated: inputs.authenticated,
+    ...(inputs.authenticated === null ? {} : { authenticated: inputs.authenticated }),
     creditsAvailable: parsed.credits.hasCredits
   });
   if (capacity !== 'included') {
@@ -149,6 +155,11 @@ export function buildFacts(
     blockers.push('the five-hour window could not be read');
   } else if (fiveHour.rolledOver) {
     blockers.push('the five-hour window rolled over and has not been re-read');
+  } else if (fiveHour.usedPercent >= 100) {
+    blockers.push('the five-hour window is exhausted');
+  }
+  if (parsed.rateLimitReachedType !== null) {
+    blockers.push(`the native rate-limit state is ${parsed.rateLimitReachedType}`);
   }
 
   const usage = inputs.tokenUsage === null ? null : parseThreadTokenUsage(inputs.tokenUsage);
@@ -175,4 +186,27 @@ export function buildFacts(
     blockers,
     diagnostics: [...parsed.diagnostics, ...(usage?.diagnostics ?? [])]
   };
+}
+
+/** Read native facts through a selected existing owner; never falls back to an API. */
+export async function readNativeFacts(
+  client: Pick<NativeClient, 'readRateLimits'> & Partial<Pick<NativeClient, 'readAccount'>>,
+  config: CodexConfig,
+  options: { nowMs?: number; authenticated?: boolean | null; tokenUsage?: unknown } = {}
+): Promise<CodexFacts> {
+  const nowMs = options.nowMs ?? Date.now();
+  try {
+    const [rateLimitsResult, accountResult] = await Promise.allSettled([
+      client.readRateLimits(),
+      client.readAccount?.()
+    ]);
+    if (rateLimitsResult.status !== 'fulfilled') throw rateLimitsResult.reason;
+    const account = accountResult.status === 'fulfilled' ? accountResult.value as ParsedAccount : null;
+    const authenticated = options.authenticated !== undefined
+      ? options.authenticated
+      : account?.authenticated ?? null;
+    return buildFacts({ rateLimits: rateLimitsResult.value, observedAtMs: nowMs, tokenUsage: options.tokenUsage ?? null, authenticated }, config, nowMs);
+  } catch {
+    return buildFacts({ rateLimits: null, observedAtMs: nowMs, tokenUsage: null, authenticated: options.authenticated ?? null }, config, nowMs);
+  }
 }

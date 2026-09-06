@@ -97,10 +97,19 @@ describe('save and list', () => {
 
   test('metadata records harness, account, thread and lane ownership', () => {
     const { store } = checkpoints();
-    const saved = store.save({ lane: 'main', owner, body: 'x' });
+    const saved = store.save({ lane: 'main', owner, body: 'x', branch: 'feat/example', worktree: '/srv/work/example' });
     const raw = readFileSync(saved.file, 'utf8');
     expect(raw).toContain('harness: codex');
+    expect(raw).toContain('branch: "feat/example"');
+    expect(raw).toContain('worktree: "/srv/work/example"');
     expect(store.list()[0]?.owner.threadId).toBe('thread-1');
+    expect(store.list()[0]?.branch).toBe('feat/example');
+  });
+
+  test('reset generation provenance round-trips with the exact checkpoint id', () => {
+    const { store } = checkpoints();
+    const saved = store.save({ lane: 'main', owner, body: 'wake me', resetGeneration: 42 });
+    expect(store.peek(saved.id)?.resetGeneration).toBe(42);
   });
 });
 

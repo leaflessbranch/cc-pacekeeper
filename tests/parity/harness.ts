@@ -16,6 +16,8 @@ import { computeSnapshot, levelForMeter, type Snapshot } from '../../plugins/cc-
 import { DEFAULT_CONFIG, type Config } from '../../plugins/cc-pacekeeper/src/config';
 import type { UsageData } from '../../plugins/cc-pacekeeper/src/vendor/usage-types';
 import type { Level, Meter } from '../../plugins/cc-pacekeeper/src/state';
+import { CODEX_DEFAULTS, type CodexConfig } from '../../plugins/codex-pacekeeper/src/config';
+import { meterLevel as codexMeterLevel } from '../../plugins/codex-pacekeeper/src/facts';
 
 /**
  * Thresholds observed in the live install. They differ from package defaults
@@ -55,6 +57,24 @@ export function effectiveConfig(): Config {
 
 export function defaultConfig(): Config {
   return DEFAULT_CONFIG;
+}
+
+/** The Codex side receives the same explicit scenario settings through its own
+ * config shape; this does not import Claude's loader or runtime state. */
+export function codexConfig(): CodexConfig {
+  return {
+    ...CODEX_DEFAULTS,
+    thresholds: {
+      context: { ...EFFECTIVE_THRESHOLDS.context },
+      five_hour: { ...EFFECTIVE_THRESHOLDS.five_hour },
+      weekly: { ...EFFECTIVE_THRESHOLDS.weekly }
+    },
+    keepalive: { ...CODEX_DEFAULTS.keepalive, ...EFFECTIVE_KEEPALIVE }
+  };
+}
+
+export function codexLevel(percent: number | null, meter: 'context' | 'five_hour' | 'weekly', cfg = codexConfig()): Level | null {
+  return codexMeterLevel(percent, meter, cfg);
 }
 
 /** Run the shipped Claude level ladder for one meter. */

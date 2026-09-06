@@ -156,6 +156,20 @@ describe('block identity and re-arm', () => {
     );
     expect(newBlock.inject).toBe(true);
   });
+
+  test('a context-critical PreCompact save request is one-shot until PostCompact', () => {
+    const critical = facts({
+      context: { currentTokens: 95_000, contextWindow: 100_000, usedPercent: 95, level: 'critical', cache: { cachedInputTokens: null, cacheWriteInputTokens: null } }
+    });
+    const first = decide({ event: 'PreCompact', facts: critical, state: empty, nowMs: NOW }, CODEX_DEFAULTS);
+    expect(first.inject).toBe(true);
+    expect(first.nextState.savedThisCycle).toBe(true);
+    const duplicate = decide({ event: 'PreCompact', facts: critical, state: first.nextState, nowMs: NOW + 1_000 }, CODEX_DEFAULTS);
+    expect(duplicate.inject).toBe(false);
+    expect(duplicate.reason).toContain('already requested');
+    const rearmed = decide({ event: 'PostCompact', facts: critical, state: duplicate.nextState, nowMs: NOW + 2_000 }, CODEX_DEFAULTS);
+    expect(rearmed.nextState.savedThisCycle).toBe(false);
+  });
 });
 
 describe('event mapping', () => {
