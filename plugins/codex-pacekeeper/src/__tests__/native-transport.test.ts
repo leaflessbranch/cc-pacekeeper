@@ -1,36 +1,47 @@
 import { describe, expect, test } from 'bun:test';
-import { createServer } from 'net';
-import { mkdtempSync, unlinkSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { EventEmitter } from 'events';
+import type { Socket } from 'net';
 import { JsonRpcTransport } from '../native-transport';
+
+function fixtureSocket(onRequest: (request: { id?: number; method: string; params?: Record<string, unknown>; }) => unknown): Socket {
+  const socket = new EventEmitter() as EventEmitter & Partial<Socket>;
+  socket.setEncoding = () => socket as unknown as Socket;
+  socket.destroy = () => socket as unknown as Socket;
+  socket.write = (chunk: string | Uint8Array) => {
+    const request = JSON.parse(String(chunk).trim()) as { id?: number; method: string; params?: Record<string, unknown> };
+    const reply = onRequest(request);
+    if (reply !== undefined) queueMicrotask(() => socket.emit('data', JSON.stringify(reply) + '\n'));
+    return true;
+  };
+  queueMicrotask(() => socket.emit('connect'));
+  return socket as unknown as Socket;
+}
 
 describe('bounded native transport', () => {
   test('sends one JSON-RPC request to an existing Unix owner and preserves replies', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'codex-transport-'));
-    const socket = join(root, 'owner.sock');
-    const server = createServer((connection) => {
-      connection.setEncoding('utf8');
-      connection.on('data', (chunk) => {
-        const request = JSON.parse(String(chunk)) as { id: number; method: string; params: unknown };
-        connection.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { method: request.method, params: request.params } }) + '\n');
-      });
+    let initialized = false;
+    const socket = fixtureSocket((request) => {
+      if (request.method === 'initialize') {
+        expect(request.params?.['capabilities']).toEqual({ experimentalApi: true });
+        expect(request.params?.['clientInfo']).toMatchObject({ name: 'codex-pacekeeper', version: '0.1.0' });
+        return { jsonrpc: '2.0', id: request.id, result: { codexHome: '/fixture-codex-home', platformFamily: 'unix', platformOs: 'linux', userAgent: 'codex/0.153.4' } };
+      }
+      if (request.method === 'initialized') {
+        initialized = true;
+        expect(request.id).toBeUndefined();
+        return undefined;
+      }
+      expect(initialized).toBe(true);
+      return { jsonrpc: '2.0', id: request.id, result: { method: request.method, params: request.params } };
     });
-    try {
-      await new Promise<void>((resolve, reject) => server.listen(socket, () => resolve()).once('error', reject));
-    } catch (error) {
-      // The execution runner deliberately refuses Unix sockets below /tmp;
-      // keep that filesystem boundary visible without weakening it for a test.
-      expect((error as NodeJS.ErrnoException).code).toBe('EPERM');
-      return;
-    }
-    try {
-      const transport = new JsonRpcTransport({ endpoint: `unix://${socket}`, timeoutMs: 500 });
-      await expect(transport.request('thread/queue/list', { threadId: 'thread-1' })).resolves.toEqual({ method: 'thread/queue/list', params: { threadId: 'thread-1' } });
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      try { unlinkSync(socket); } catch { /* server cleanup */ }
-    }
+    const transport = new JsonRpcTransport({ endpoint: 'unix:///fixture-owner.sock', timeoutMs: 500, socketFactory: () => socket });
+    await expect(transport.request('thread/queue/list', { threadId: 'thread-1' })).resolves.toEqual({ method: 'thread/queue/list', params: { threadId: 'thread-1' } });
+  });
+
+  test('rejects an owner that does not return the native initialize shape', async () => {
+    const socket = fixtureSocket((request) => ({ jsonrpc: '2.0', id: request.id, result: {} }));
+    const transport = new JsonRpcTransport({ endpoint: 'unix:///fixture-invalid.sock', timeoutMs: 500, socketFactory: () => socket });
+    await expect(transport.request('thread/queue/list', { threadId: 'thread-1' })).rejects.toThrow(/initialize/);
   });
 
   test('rejects non-owner endpoint schemes before opening a socket', () => {

@@ -10,14 +10,6 @@ import { findCodexExecutable, findLiveOwner, readOwnerRegistry } from './live-se
 import { NATIVE_PROTOCOL_VERSION, normalizeNativeCapabilities } from './native';
 import { CodexStore } from './storage';
 
-function observedBoolean(name: string): boolean | null {
-  const value = process.env[name];
-  if (value === undefined) return null;
-  if (value === '1' || value.toLowerCase() === 'true') return true;
-  if (value === '0' || value.toLowerCase() === 'false') return false;
-  return null;
-}
-
 function executableVersion(executable: string | null): string | null {
   if (!executable) return null;
   try { return execFileSync(executable, ['--version'], { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; }
@@ -42,28 +34,62 @@ export function runDoctorCli(): DoctorReport {
   const registry = readOwnerRegistry();
   const threadId = process.env['CODEX_THREAD_ID'];
   const accountId = process.env['CODEX_ACCOUNT_ID'] ?? null;
-  const ownerStatus = threadId ? findLiveOwner(threadId, accountId).status : 'unknown';
+  const ownerLookup = threadId ? findLiveOwner(threadId, accountId) : null;
+  const owner = ownerLookup?.owner;
+  const ownerStatus = ownerLookup?.status ?? 'unknown';
   const executable = findCodexExecutable();
   const version = executableVersion(executable);
-  const protocolVersion = registry.owners.map((owner) => typeof owner.protocolVersion === 'string' ? owner.protocolVersion : null).find((value): value is string => value !== null && value !== 'unknown') ?? 'unknown';
-  // A registry version is an observation, but a method list is still absent.
-  // Therefore queue/rate-limit capabilities remain unavailable until an actual
-  // native handshake supplies the schema.
+  const protocolVersion = owner?.protocolVersion
+    ?? registry.owners.map((candidate) => typeof candidate.protocolVersion === 'string' ? candidate.protocolVersion : null).find((value): value is string => value !== null && value !== 'unknown')
+    ?? 'unknown';
+  // A method list published by the selected owner is an observed capability
+  // record. It is still separate from a successful request, so account facts
+  // and quota freshness remain unknown until a native read supplies them.
+  const capabilities = normalizeNativeCapabilities({ version: protocolVersion, methods: owner?.methods });
+  const protocolObserved = owner !== undefined
+    && owner.protocolVersion !== 'unknown'
+    && owner.methods !== undefined;
+  const timeline = threadId && ownerStatus === 'found'
+    ? new CodexStore().read({ accountId, threadId }, 'timeline')
+    : null;
+  const timelineRow = typeof timeline === 'object' && timeline !== null ? timeline as Record<string, unknown> : null;
+  const lastObservedAtMs = typeof timelineRow?.['quotaObservedAtMs'] === 'number'
+    ? timelineRow['quotaObservedAtMs']
+    : null;
+  const quotaAgeSeconds = lastObservedAtMs === null ? Number.POSITIVE_INFINITY : Math.max(0, (Date.now() - lastObservedAtMs) / 1000);
+  const authObservedAtMs = typeof timelineRow?.['authObservedAtMs'] === 'number' ? timelineRow['authObservedAtMs'] : null;
+  const authenticated = typeof timelineRow?.['authenticated'] === 'boolean'
+    && authObservedAtMs !== null
+    && Date.now() >= authObservedAtMs
+    && Date.now() - authObservedAtMs <= config.config.usage_freshness_seconds * 1000
+    ? timelineRow['authenticated'] as boolean
+    : null;
+  const cache = typeof timelineRow?.['tokenUsage'] === 'object' && timelineRow['tokenUsage'] !== null
+    ? (timelineRow['tokenUsage'] as Record<string, unknown>)['cache']
+    : null;
+  const cacheRow = typeof cache === 'object' && cache !== null ? cache as Record<string, unknown> : null;
   return diagnose({
     protocolVersion: NATIVE_PROTOCOL_VERSION,
-    capabilities: normalizeNativeCapabilities({ version: protocolVersion }),
+    capabilities,
     ownerStatus,
-    authenticated: observedBoolean('CODEX_AUTHENTICATED'),
+    authenticated,
     capacity: 'unknown',
-    quotaAgeSeconds: Number.POSITIVE_INFINITY,
+    quotaAgeSeconds,
     freshnessSeconds: config.config.usage_freshness_seconds,
     configDiagnostics: config.diagnostics,
-    protocolObserved: protocolVersion !== 'unknown',
+    protocolObserved,
     executableObserved: executable !== null,
     executableVersion: version,
-    hookTrust: observedBoolean('CODEX_HOOK_TRUSTED'),
+    // Environment configuration can say a hook is enabled, but it cannot
+    // prove that the harness invoked or trusted it. Keep this unobserved until
+    // an actual hook receipt is available.
+    hookTrust: null,
     permissionsOk: permissionsObserved(),
-    crashCount: crashCountObserved()
+    crashCount: crashCountObserved(),
+    cacheFields: cacheRow === null ? undefined : {
+      cachedInputTokens: cacheRow['cachedInputTokens'] !== null && cacheRow['cachedInputTokens'] !== undefined,
+      cacheWriteInputTokens: cacheRow['cacheWriteInputTokens'] !== null && cacheRow['cacheWriteInputTokens'] !== undefined
+    }
   });
 }
 

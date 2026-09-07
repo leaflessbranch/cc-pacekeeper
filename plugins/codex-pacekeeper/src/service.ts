@@ -8,6 +8,7 @@ import { findLiveOwner } from './live-sessions';
 import { NativeClient, normalizeNativeCapabilities } from './native';
 import { clientForExistingOwner } from './native-transport';
 import { CodexStore, type StateIdentity } from './storage';
+import { buildFacts } from './facts';
 
 export const RESET_WAKE_PREFIX = '[pacekeeper-resume]';
 
@@ -41,9 +42,20 @@ function jobIdentity(job: Job): StateIdentity {
 function isJob(value: unknown): value is Job {
   if (typeof value !== 'object' || value === null) return false;
   const row = value as Record<string, unknown>;
-  return typeof row.id === 'string' && (row.kind === 'keepalive' || row.kind === 'reset-wake')
-    && typeof row.owner === 'object' && row.owner !== null && typeof (row.owner as Record<string, unknown>).threadId === 'string'
-    && typeof row.state === 'string' && typeof row.submissionId === 'string';
+  const owner = row.owner;
+  const ownerRow = typeof owner === 'object' && owner !== null ? owner as Record<string, unknown> : null;
+  const states = new Set(['scheduled', 'submitting', 'queued', 'running', 'completed', 'cancelled', 'rejected', 'ambiguous']);
+  return typeof row.id === 'string' && row.id.trim() !== ''
+    && (row.kind === 'keepalive' || row.kind === 'reset-wake')
+    && ownerRow !== null
+    && typeof ownerRow.threadId === 'string' && ownerRow.threadId.trim() !== ''
+    && (ownerRow.accountId === null || typeof ownerRow.accountId === 'string')
+    && typeof row.dueAtMs === 'number' && Number.isFinite(row.dueAtMs)
+    && typeof row.state === 'string' && states.has(row.state)
+    && typeof row.submissionId === 'string' && row.submissionId.trim() !== ''
+    && typeof row.retryable === 'boolean'
+    && typeof row.pongVerified === 'boolean'
+    && (row.resetGeneration === undefined || (typeof row.resetGeneration === 'number' && Number.isInteger(row.resetGeneration) && row.resetGeneration >= 0));
 }
 
 class StorePersistence implements JobPersistence {
@@ -83,8 +95,47 @@ export class CodexService {
     this.persistence = new StorePersistence(this.store);
     this.now = options.now ?? (() => Date.now());
     this.resolveClient = options.resolveClient ?? defaultResolver();
-    this.eligibility = options.eligibility;
+    this.eligibility = options.eligibility ?? ((job, phase) => this.observeEligibility(job, phase));
     this.consumeCheckpoint = options.consumeCheckpoint;
+  }
+
+  /**
+   * Bootstrap execution gates from facts already observed by the Codex hooks
+   * and the explicit owner registry. This is an evidence adapter, not an
+   * owner provider: missing rows, account identity, quota clocks or pending
+   * state remain unknown and therefore fail closed.
+   */
+  private observeEligibility(job: Job, _phase: 'schedule' | 'execute'): ServiceEligibility {
+    const nowMs = this.now();
+    const timeline = this.store.read({ accountId: job.owner.accountId, threadId: job.owner.threadId }, 'timeline');
+    const row = typeof timeline === 'object' && timeline !== null ? timeline as Record<string, unknown> : {};
+    const rateLimits = typeof row['rateLimits'] === 'object' && row['rateLimits'] !== null
+      ? row['rateLimits'] as Parameters<typeof buildFacts>[0]['rateLimits']
+      : null;
+    const contextObservedAtMs = typeof row['contextObservedAtMs'] === 'number' ? row['contextObservedAtMs'] : Number.NaN;
+    const contextFresh = Number.isFinite(contextObservedAtMs) && nowMs >= contextObservedAtMs && nowMs - contextObservedAtMs <= this.config.usage_freshness_seconds * 1000;
+    const tokenUsage = contextFresh ? row['tokenUsage'] ?? null : null;
+    const quotaObservedAtMs = typeof row['quotaObservedAtMs'] === 'number'
+      ? row['quotaObservedAtMs']
+      : Number.NaN;
+    const authObservedAtMs = typeof row['authObservedAtMs'] === 'number' ? row['authObservedAtMs'] : Number.NaN;
+    const authFresh = Number.isFinite(authObservedAtMs) && nowMs >= authObservedAtMs && nowMs - authObservedAtMs <= this.config.usage_freshness_seconds * 1000;
+    const authenticated = authFresh && typeof row['authenticated'] === 'boolean' ? row['authenticated'] : null;
+    const facts = buildFacts({ rateLimits, observedAtMs: quotaObservedAtMs, tokenUsage, authenticated }, this.config, nowMs);
+    const ownerStatus = findLiveOwner(job.owner.threadId, job.owner.accountId).status;
+    const lastUserActivityAtMs = typeof row['lastUserActivityAtMs'] === 'number' ? row['lastUserActivityAtMs'] : undefined;
+    const pendingWork = typeof row['pendingWork'] === 'boolean' ? row['pendingWork'] : undefined;
+    return {
+      nowMs,
+      enabled: job.kind === 'keepalive' ? this.config.keepalive.enabled : this.config.auto.enabled,
+      capacity: facts.capacity,
+      fresh: !facts.stale,
+      ownerLive: ownerStatus === 'found',
+      ...(pendingWork === undefined ? {} : { pendingWork }),
+      ...(lastUserActivityAtMs === undefined ? {} : { idleForMs: Math.max(0, nowMs - lastUserActivityAtMs) }),
+      strict: true,
+      ...(job.kind === 'keepalive' ? { requirePending: this.config.keepalive.require_pending } : {})
+    };
   }
 
   public jobs(): Job[] {
@@ -92,7 +143,10 @@ export class CodexService {
   }
 
   private existing(kind: Job['kind'], owner: JobOwner, resetGeneration?: number): Job | undefined {
-    return this.jobs().find((job) => job.kind === kind && job.owner.threadId === owner.threadId && job.owner.accountId === owner.accountId && job.resetGeneration === resetGeneration && !['completed', 'cancelled', 'rejected', 'ambiguous'].includes(job.state));
+    // An interrupted submit is still live until its stable client id has been
+    // reconciled. Returning it here prevents a second deterministic schedule
+    // call from sending a duplicate while the first attempt is unknown.
+    return this.jobs().find((job) => job.kind === kind && job.owner.threadId === owner.threadId && job.owner.accountId === owner.accountId && job.resetGeneration === resetGeneration && !['completed', 'cancelled', 'rejected'].includes(job.state));
   }
 
   private schedule(job: Job): Job {
@@ -113,6 +167,7 @@ export class CodexService {
       ...(job.kind === 'keepalive' && phase.maxIdleMs === undefined
         ? { maxIdleMs: this.config.keepalive.max_idle_hours * 60 * 60_000 }
         : {}),
+      ...(job.kind === 'keepalive' ? { requirePending: this.config.keepalive.require_pending } : {}),
       strict: true
     };
   }
@@ -147,6 +202,20 @@ export class CodexService {
     return typeof id === 'string' && id !== '' ? id : null;
   }
 
+  private scheduleNextKeepalive(job: Job): void {
+    if (job.kind !== 'keepalive' || !job.pongVerified || this.config.keepalive.enabled !== true) return;
+    if (this.config.keepalive.require_pending && this.eligibility === undefined) return;
+    const active = this.existing('keepalive', job.owner);
+    if (active !== undefined) return;
+    const next = createJob({
+      kind: 'keepalive',
+      owner: job.owner,
+      dueAtMs: this.now() + this.config.keepalive.interval_min * 60_000,
+      submissionId: stableId()
+    });
+    this.schedule(next);
+  }
+
   /** Execute due scheduled jobs and acknowledge queued cancellations. */
   public async runDueJobs(): Promise<Job[]> {
     const nowMs = this.now();
@@ -154,13 +223,15 @@ export class CodexService {
     for (const original of this.jobs()) {
       let job = original;
       if (job.state === 'queued' && !job.cancelRequested) {
-        const phase = this.eligibility?.(job, 'execute');
-        if (phase) {
-          const checked = cancelIf(job, this.withServiceGates(job, phase, nowMs));
-          if (checked.cancelRequested) {
-            this.persistence.write(checked);
-            job = checked;
-          }
+        const phase = this.eligibility?.(job, 'execute') ?? {
+          nowMs,
+          strict: true,
+          ...(job.kind === 'keepalive' ? { maxIdleMs: this.config.keepalive.max_idle_hours * 60 * 60_000, requirePending: this.config.keepalive.require_pending } : {})
+        };
+        const checked = cancelIf(job, this.withServiceGates(job, phase, nowMs));
+        if (checked.cancelRequested) {
+          this.persistence.write(checked);
+          job = checked;
         }
       }
       if (job.state === 'queued' && job.cancelRequested) {
@@ -169,11 +240,20 @@ export class CodexService {
         results.push(job);
         continue;
       }
+      // Recover an interrupted submission before considering any new send.
+      // A queue miss transitions submitting to ambiguous and remains
+      // non-retryable; it never falls through to deliverJob.
+      if (job.state === 'submitting' || job.state === 'ambiguous') {
+        const client = await this.resolveClient(job.owner);
+        if (client) job = (await reconcileJob(client, job, this.persistence)).job;
+        results.push(job);
+        continue;
+      }
       if (job.state !== 'scheduled' || job.dueAtMs > nowMs) continue;
       const phase = this.eligibility?.(job, 'execute');
       const checked = phase
         ? cancelIf(job, this.withServiceGates(job, phase, nowMs))
-        : cancelIf(job, { nowMs, strict: true, ...(job.kind === 'keepalive' ? { maxIdleMs: this.config.keepalive.max_idle_hours * 60 * 60_000 } : {}) });
+        : cancelIf(job, { nowMs, strict: true, ...(job.kind === 'keepalive' ? { maxIdleMs: this.config.keepalive.max_idle_hours * 60 * 60_000, requirePending: this.config.keepalive.require_pending } : {}) });
       if (checked.state === 'cancelled') { this.persistence.write(checked); results.push(checked); continue; }
       const client = await this.resolveClient(job.owner);
       if (!client) {
@@ -217,6 +297,7 @@ export class CodexService {
     }
     const next = advance(job, { type: 'completed', result, nativeCompleted, toolCalls });
     this.persistence.write(next);
+    this.scheduleNextKeepalive(next);
     return next;
   }
 
@@ -284,8 +365,18 @@ async function main(): Promise<void> {
     process.stdout.write(JSON.stringify(await service.runDueJobs()) + '\n');
     return;
   }
+  if (action === 'watch') {
+    // The service owns the 30-minute cadence. Every pass re-reads the
+    // observed owner/fact gates, so a restart or stale cache cannot silently
+    // inherit a prior eligibility decision.
+    const intervalMs = service.config.keepalive.interval_min * 60_000;
+    while (true) {
+      process.stdout.write(JSON.stringify(await service.runDueJobs()) + '\n');
+      await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
   if (action === 'list') { process.stdout.write(JSON.stringify(service.jobs()) + '\n'); return; }
-  process.stderr.write('usage: pacekeeper-service run|list\n');
+  process.stderr.write('usage: pacekeeper-service run|watch|list\n');
   process.exitCode = 1;
 }
 

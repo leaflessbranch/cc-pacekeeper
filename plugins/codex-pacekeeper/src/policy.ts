@@ -31,6 +31,8 @@ export interface PolicyState {
   blockResetAtMs: number | null;
   /** Whether a context-critical save already ran this compaction cycle. */
   savedThisCycle: boolean;
+  /** A save was requested, but no persisted-save acknowledgement exists yet. */
+  saveRequestedThisCycle?: boolean;
   /** Last genuine user activity. Synthetic turns never advance this. */
   lastUserActivityAtMs?: number;
   /** Last substantive harness/model work; never treated as user presence. */
@@ -56,6 +58,8 @@ export interface DecisionInput {
   synthetic?: boolean;
   /** Explicit override for harnesses that can distinguish user input. */
   userActivity?: boolean;
+  /** Explicit acknowledgement from a persistence-capable caller. */
+  saveAcknowledged?: boolean;
 }
 
 export interface Decision {
@@ -109,6 +113,7 @@ export function decide(input: DecisionInput, config: CodexConfig): Decision {
         lastInjectedAtMs: {},
         blockResetAtMs: resetAtMs,
         savedThisCycle: false,
+        saveRequestedThisCycle: false,
         ...(state.lastUserActivityAtMs !== undefined ? { lastUserActivityAtMs: state.lastUserActivityAtMs } : {}),
         ...(state.lastWorkAtMs !== undefined ? { lastWorkAtMs: state.lastWorkAtMs } : {}),
         ...(state.lastToolActivityAtMs !== undefined ? { lastToolActivityAtMs: state.lastToolActivityAtMs } : {})
@@ -126,14 +131,25 @@ export function decide(input: DecisionInput, config: CodexConfig): Decision {
     ...base,
     ...(isUserActivity ? { lastUserActivityAtMs: nowMs } : {}),
     ...(isToolEvent ? { lastToolActivityAtMs: nowMs, lastWorkAtMs: nowMs } : {}),
-    ...(input.event === 'PostCompact' ? { savedThisCycle: false } : {})
+    ...(input.event === 'PostCompact' ? { savedThisCycle: false, saveRequestedThisCycle: false } : {}),
+    ...(input.event === 'PreCompact' && input.saveAcknowledged ? { savedThisCycle: true, saveRequestedThisCycle: false } : {})
   };
+
+  if (input.event === 'PreCompact' && facts.context?.level === 'critical' && input.saveAcknowledged === true) {
+    return {
+      inject: false,
+      level: 'critical',
+      meter: 'context',
+      reason: 'context-critical save was acknowledged for this compaction cycle',
+      nextState
+    };
+  }
 
   // PreCompact is the only point at which a context-critical save request is
   // meaningful. Keep it one-shot for this compaction cycle; PostCompact above
   // explicitly re-arms the next cycle. The native boundary still cannot turn
   // this request into a verified save, which is reported by the adapter.
-  if (input.event === 'PreCompact' && facts.context?.level === 'critical' && base.savedThisCycle) {
+  if (input.event === 'PreCompact' && facts.context?.level === 'critical' && (base.savedThisCycle || base.saveRequestedThisCycle === true)) {
     return {
       inject: false,
       level: 'critical',
@@ -176,7 +192,7 @@ export function decide(input: DecisionInput, config: CodexConfig): Decision {
   const escalated = rank(level) > rank(previous);
   const lastAtMs = base.lastInjectedAtMs[meter];
   const debounceElapsed =
-    lastAtMs === undefined || nowMs - lastAtMs >= config.debounce_seconds * 1000;
+    lastAtMs === undefined || nowMs - lastAtMs > config.debounce_seconds * 1000;
 
   if (rank(level) < rank(previous)) {
     return {
@@ -203,7 +219,7 @@ export function decide(input: DecisionInput, config: CodexConfig): Decision {
       ...nextState,
       levels: { ...nextState.levels, [meter]: level },
       lastInjectedAtMs: { ...nextState.lastInjectedAtMs, [meter]: nowMs },
-      ...(input.event === 'PreCompact' && facts.context?.level === 'critical' ? { savedThisCycle: true } : {})
+      ...(input.event === 'PreCompact' && facts.context?.level === 'critical' ? { saveRequestedThisCycle: true } : {})
     }
   };
 }

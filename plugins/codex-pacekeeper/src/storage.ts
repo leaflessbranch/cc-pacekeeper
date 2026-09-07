@@ -57,21 +57,6 @@ function realOrResolve(target: string): string {
   }
 }
 
-function assertNoSymlinkPath(target: string): void {
-  const absolute = path.resolve(target);
-  let cursor = path.parse(absolute).root;
-  for (const component of path.relative(cursor, absolute).split(path.sep).filter(Boolean)) {
-    cursor = path.join(cursor, component);
-    try {
-      if (fs.lstatSync(cursor).isSymbolicLink()) throw new Error('Codex state cache contains a symlink');
-    } catch (error) {
-      if (error instanceof Error && error.message.includes('contains a symlink')) throw error;
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') break;
-      throw new Error('Codex state cache cannot be inspected');
-    }
-  }
-}
-
 /** Refuse symlinked state directories that could redirect Codex writes. */
 function assertContained(root: string, target: string): void {
   const rootResolved = path.resolve(root);
@@ -109,8 +94,12 @@ export class CodexStore {
   private readonly cacheRoot: string;
 
   public constructor(cacheHome: string = defaultCacheHome()) {
-    this.cacheRoot = path.resolve(cacheHome);
-    assertNoSymlinkPath(this.cacheRoot);
+    // Canonicalize the cache root before checking descendants. macOS exposes
+    // legitimate system aliases (for example /var -> /private/var); rejecting
+    // every ancestor symlink makes an otherwise safe cache unusable. The
+    // canonical root is then treated as the trust boundary and all paths
+    // created below it remain subject to assertContained's symlink checks.
+    this.cacheRoot = realOrResolve(cacheHome);
     this.root = path.join(this.cacheRoot, 'cc-pacekeeper', 'codex');
     this.assertSafe();
   }
@@ -132,7 +121,9 @@ export class CodexStore {
   public read(identity: StateIdentity, kind: RecordKind): unknown {
     try {
       this.assertSafe();
-      return JSON.parse(fs.readFileSync(this.pathFor(identity, kind), 'utf8'));
+      const file = this.pathFor(identity, kind);
+      if (fs.lstatSync(file).isSymbolicLink()) return null;
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
     } catch {
       // Absent, unreadable or corrupt all mean the same thing to a caller.
       return null;
@@ -179,7 +170,11 @@ export class CodexStore {
       return fs.readdirSync(dir)
         .filter((name) => name.endsWith('.json'))
         .map((name) => {
-          try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')) as unknown; } catch { return null; }
+          try {
+            const file = path.join(dir, name);
+            if (fs.lstatSync(file).isSymbolicLink()) return null;
+            return JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+          } catch { return null; }
         })
         .filter((value): value is unknown => value !== null);
     } catch { return []; }

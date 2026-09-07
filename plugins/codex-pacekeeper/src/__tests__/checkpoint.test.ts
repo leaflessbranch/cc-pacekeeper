@@ -138,14 +138,17 @@ describe('isolation from Claude lanes', () => {
   });
 });
 
-describe('resume consumption', () => {
-  test('resume returns content and archives the file exactly once', () => {
+describe('resume claim and acknowledgement', () => {
+  test('resume returns content without archiving until acknowledgement', () => {
     const { store } = checkpoints();
     const saved = store.save({ lane: 'main', owner, body: 'resume me' });
     const first = store.resume(saved.id);
-    expect(first.status).toBe('resumed');
-    if (first.status !== 'resumed') throw new Error('unreachable');
+    expect(first.status).toBe('claimed');
+    if (first.status !== 'claimed') throw new Error('unreachable');
     expect(first.body).toContain('resume me');
+    expect(existsSync(saved.file)).toBe(true);
+    expect(store.list()).toHaveLength(1);
+    expect(store.acknowledge(first.id, first.token).status).toBe('resumed');
     expect(existsSync(saved.file)).toBe(false);
     expect(store.list()).toHaveLength(0);
 
@@ -171,15 +174,43 @@ describe('resume consumption', () => {
   test('a single lane resumes unambiguously', () => {
     const { store } = checkpoints();
     store.save({ lane: 'main', owner, body: 'only' });
-    expect(store.resumeLane(undefined).status).toBe('resumed');
+    const result = store.resumeLane(undefined);
+    expect(result.status).toBe('claimed');
+    if (result.status === 'claimed') expect(store.acknowledge(result.id, result.token).status).toBe('resumed');
   });
 
   test('archived content survives so a failed consumer can retry', () => {
     const { store } = checkpoints();
     const saved = store.save({ lane: 'main', owner, body: 'precious' });
-    store.resume(saved.id);
+    const claim = store.resume(saved.id);
+    if (claim.status === 'claimed') store.acknowledge(claim.id, claim.token);
     const archived = store.listArchived();
     expect(archived).toHaveLength(1);
     expect(archived[0]?.body).toContain('precious');
+    expect(archived[0]?.disposition).toBe('consumed');
+  });
+
+  test('a claimed lane cannot be superseded and archives record distinct dispositions', () => {
+    const { store } = checkpoints();
+    const saved = store.save({ lane: 'main', owner, body: 'in flight' });
+    const claim = store.claim(saved.id, owner);
+    expect(claim.status).toBe('claimed');
+    expect(() => store.save({ lane: 'main', owner, body: 'replacement' })).toThrow(/in-flight|claim/i);
+    expect(store.discard(saved.id, owner).status).toBe('in-flight');
+
+    const other = checkpoints().store;
+    const first = other.save({ lane: 'main', owner, body: 'old' });
+    const second = other.save({ lane: 'main', owner, body: 'new' });
+    expect(other.peek(first.id)?.disposition).toBe('superseded');
+    expect(other.peek(second.id)?.disposition).toBeUndefined();
+    expect(other.discard(second.id, owner).status).toBe('resumed');
+    expect(other.peek(second.id)?.disposition).toBe('discarded');
+  });
+
+  test('replacement from a different owner requires an explicit prior discard', () => {
+    const { store } = checkpoints();
+    const first = store.save({ lane: 'main', owner, body: 'owned' });
+    expect(() => store.save({ lane: 'main', owner: { accountId: 'acct-2', threadId: 'thread-2' }, body: 'foreign' })).toThrow(/another owner|discard/i);
+    expect(store.discard(first.id, owner).status).toBe('resumed');
   });
 });

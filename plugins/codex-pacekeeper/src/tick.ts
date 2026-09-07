@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** Event-specific Codex hook adapter. Native acquisition stays outside policy. */
-import { buildContract, checkpointCliPath, effectivePause, formatPauseDirective, hasHandoff, listHandoffs, type ContractInput } from './agent-budget';
+import { buildContract, checkpointCliPath, dispatchAdvice, effectivePause, formatPauseDirective, hasHandoff, listHandoffs, type ContractInput } from './agent-budget';
 import { loadCodexConfig, type CodexConfig } from './config';
 import { buildFacts, type CodexFacts } from './facts';
 import { shouldPause } from './agent-budget';
@@ -8,6 +8,7 @@ import { decide, type PolicyEvent, type PolicyState } from './policy';
 import { CodexStore, type StateIdentity } from './storage';
 import type { NativeRateLimitsResponse } from './native';
 import { readFileSync } from 'fs';
+import { CodexService } from './service';
 
 const KEEPALIVE_MARKER = '[pacekeeper-keepalive]';
 
@@ -32,6 +33,16 @@ export interface TickInput {
   rate_limits?: unknown;
   tokenUsage?: unknown;
   token_usage?: unknown;
+  /** Set only when an external persistence caller has verified a saved file. */
+  save_acknowledged?: unknown;
+  checkpoint_saved?: unknown;
+  planned_agents?: unknown;
+  job_id?: unknown;
+  job_result?: unknown;
+  native_completed?: unknown;
+  tool_calls?: unknown;
+  pending_work?: unknown;
+  pendingWork?: unknown;
 }
 
 export interface TickOptions {
@@ -65,7 +76,7 @@ function identityFor(input: TickInput, facts: CodexFacts): StateIdentity {
 }
 
 function initialState(value: unknown): PolicyState {
-  if (typeof value !== 'object' || value === null) return { levels: {}, lastInjectedAtMs: {}, blockResetAtMs: null, savedThisCycle: false };
+  if (typeof value !== 'object' || value === null) return { levels: {}, lastInjectedAtMs: {}, blockResetAtMs: null, savedThisCycle: false, saveRequestedThisCycle: false };
   const candidate = value as Record<string, unknown>;
   const levels = typeof candidate.levels === 'object' && candidate.levels !== null ? candidate.levels as PolicyState['levels'] : {};
   const injected = typeof candidate.lastInjectedAtMs === 'object' && candidate.lastInjectedAtMs !== null ? candidate.lastInjectedAtMs as PolicyState['lastInjectedAtMs'] : {};
@@ -74,6 +85,7 @@ function initialState(value: unknown): PolicyState {
     lastInjectedAtMs: { ...injected },
     blockResetAtMs: typeof candidate.blockResetAtMs === 'number' ? candidate.blockResetAtMs : null,
     savedThisCycle: candidate.savedThisCycle === true,
+    saveRequestedThisCycle: candidate.saveRequestedThisCycle === true,
     ...(typeof candidate.lastUserActivityAtMs === 'number' ? { lastUserActivityAtMs: candidate.lastUserActivityAtMs } : {}),
     ...(typeof candidate.lastWorkAtMs === 'number' ? { lastWorkAtMs: candidate.lastWorkAtMs } : {}),
     ...(typeof candidate.lastToolActivityAtMs === 'number' ? { lastToolActivityAtMs: candidate.lastToolActivityAtMs } : {})
@@ -101,6 +113,14 @@ export function formatFacts(facts: CodexFacts): string {
 
 function output(event: PolicyEvent, additionalContext?: string): string {
   if (!additionalContext || additionalContext.trim() === '') return '{}';
+  if (event === 'Stop' || event === 'SubagentStop') {
+    return JSON.stringify({ decision: 'block', reason: additionalContext });
+  }
+  if (event === 'PreCompact') {
+    // Codex's compaction hook accepts continue=false to defer compaction. It
+    // does not accept hookSpecificOutput.additionalContext as a save barrier.
+    return JSON.stringify({ continue: false, stopReason: additionalContext });
+  }
   return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext } });
 }
 
@@ -111,28 +131,35 @@ function isSynthetic(input: TickInput): boolean {
 }
 
 function cachedTimeline(store: CodexStore, input: TickInput): Record<string, unknown> | null {
-  const identity: StateIdentity = { accountId: stringValue(input.account_id) ?? null, threadId: stringValue(input.thread_id) ?? stringValue(input.session_id) ?? 'unknown-thread' };
-  const value = store.read(identity, 'timeline');
-  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : null;
+  const accountId = stringValue(input.account_id) ?? null;
+  const threadId = stringValue(input.thread_id) ?? stringValue(input.session_id) ?? 'unknown-thread';
+  const direct = store.read({ accountId, threadId }, 'timeline');
+  if (accountId !== null && typeof direct === 'object' && direct !== null) return direct as Record<string, unknown>;
+
+  // Some hook payloads omit account_id even though the refresh observer saved
+  // native readings under the authoritative account. Recover only an
+  // unambiguous same-thread record; two accounts sharing a thread id remain
+  // unknown rather than crossing account state.
+  const candidates = store.list('timeline').filter((candidate): candidate is Record<string, unknown> => {
+    if (typeof candidate !== 'object' || candidate === null) return false;
+    const row = candidate as Record<string, unknown>;
+    if (row['threadId'] !== threadId) return false;
+    return accountId === null || row['accountId'] === accountId;
+  });
+  if (candidates.length === 1) return candidates[0] ?? null;
+  // A legacy record without explicit identity metadata is not safe to reuse
+  // when the hook omitted the account: it could belong to another account's
+  // thread with the same id. Ignore it rather than falling back across scope.
+  return null;
 }
 
 function cachedRateLimits(value: Record<string, unknown> | null): NativeRateLimitsResponse | null {
   const stored = value?.['rateLimits'];
   if (typeof stored !== 'object' || stored === null) return null;
-  const row = stored as Record<string, unknown>;
-  const buckets = Array.isArray(row['buckets']) ? row['buckets'] : [];
-  const windows = buckets.filter((bucket): bucket is Record<string, unknown> => typeof bucket === 'object' && bucket !== null)
-    .map((bucket) => ({ usedPercent: bucket['usedPercent'], windowDurationMins: bucket['durationMinutes'], resetsAt: bucket['resetsAtMs'] }));
-  return {
-    accountId: typeof row['accountId'] === 'string' ? row['accountId'] : undefined,
-    rateLimits: {
-      planType: typeof row['planType'] === 'string' ? row['planType'] : undefined,
-      rateLimitReachedType: typeof row['rateLimitReachedType'] === 'string' ? row['rateLimitReachedType'] : undefined,
-      spendControlReached: typeof row['spendControlReached'] === 'boolean' ? row['spendControlReached'] : undefined,
-      primary: windows[0],
-      secondary: windows[1]
-    }
-  };
+  // refreshObservations stores the parser's complete sanitized response. Keep
+  // its by-limit map, labels and credit metadata intact so a later hook does
+  // not silently collapse multi-bucket evidence into two positional windows.
+  return stored as NativeRateLimitsResponse;
 }
 
 function cachedTokenUsage(value: Record<string, unknown> | null): unknown | null {
@@ -142,23 +169,30 @@ function cachedTokenUsage(value: Record<string, unknown> | null): unknown | null
   const cache = typeof row['cache'] === 'object' && row['cache'] !== null ? row['cache'] as Record<string, unknown> : {};
   return {
     modelContextWindow: row['contextWindow'],
-    last: { inputTokens: row['currentTokens'], cachedInputTokens: cache['cachedInputTokens'], cacheWriteInputTokens: cache['cacheWriteInputTokens'] }
+    last: { totalTokens: row['currentTokens'], cachedInputTokens: cache['cachedInputTokens'], cacheWriteInputTokens: cache['cacheWriteInputTokens'] }
   };
 }
 
 function factsFrom(input: TickInput, config: CodexConfig, nowMs: number, store: CodexStore): CodexFacts {
   const cached = cachedTimeline(store, input);
   const rateLimits = (input.rateLimits ?? input.rate_limits) as Parameters<typeof buildFacts>[0]['rateLimits'] | null | undefined ?? cachedRateLimits(cached);
-  const tokenUsage = input.tokenUsage ?? input.token_usage ?? cachedTokenUsage(cached);
-  const observedAtMs = numberValue(input.observed_at_ms) ?? numberValue(cached?.['lastObservedAtMs']) ?? nowMs;
-  const authenticated = boolValue(input.authenticated) ?? (typeof cached?.['authenticated'] === 'boolean' ? cached['authenticated'] : null);
+  const cachedContextAt = numberValue(cached?.['contextObservedAtMs']);
+  const cachedContextFresh = cachedContextAt !== undefined && nowMs >= cachedContextAt && nowMs - cachedContextAt <= config.usage_freshness_seconds * 1000;
+  const tokenUsage = input.tokenUsage ?? input.token_usage ?? (cachedContextFresh ? cachedTokenUsage(cached) : null);
+  const observedAtMs = numberValue(input.observed_at_ms)
+    ?? (rateLimits !== null && rateLimits !== undefined
+      ? numberValue(cached?.['quotaObservedAtMs']) ?? numberValue(cached?.['lastObservedAtMs']) ?? nowMs
+      : nowMs);
+  const cachedAuthAt = numberValue(cached?.['authObservedAtMs']);
+  const cachedAuthFresh = cachedAuthAt !== undefined && nowMs >= cachedAuthAt && nowMs - cachedAuthAt <= config.usage_freshness_seconds * 1000;
+  const authenticated = boolValue(input.authenticated) ?? (cachedAuthFresh && typeof cached?.['authenticated'] === 'boolean' ? cached['authenticated'] : null);
   return buildFacts({ rateLimits: rateLimits ?? null, observedAtMs, tokenUsage, authenticated }, config, nowMs);
 }
 
 function saveTimeline(store: CodexStore, identity: StateIdentity, value: Record<string, unknown>): void {
   const existing = store.read(identity, 'timeline');
   const prior = typeof existing === 'object' && existing !== null ? existing as Record<string, unknown> : {};
-  store.write(identity, 'timeline', { ...prior, ...value });
+  store.write(identity, 'timeline', { ...prior, accountId: identity.accountId, threadId: identity.threadId, ...value });
 }
 
 function buildSubagentText(input: TickInput, facts: CodexFacts, config: CodexConfig): string {
@@ -170,6 +204,21 @@ function buildSubagentText(input: TickInput, facts: CodexFacts, config: CodexCon
   }
   const contract: ContractInput = { agentId, agentType, cliPath: checkpointCliPath(), fiveHourPercentAtSpawn: five };
   return `${formatFacts(facts)}\n\n${buildContract(contract, config).text}`;
+}
+
+function recordCompletionEnvelope(input: TickInput, event: PolicyEvent, config: CodexConfig, store: CodexStore, nowMs: number): void {
+  if (event !== 'Stop' && event !== 'SubagentStop' && event !== 'SessionEnd') return;
+  const jobId = stringValue(input.job_id);
+  const result = typeof input.job_result === 'string' ? input.job_result : undefined;
+  const nativeCompleted = boolValue(input.native_completed);
+  const toolCalls = numberValue(input.tool_calls);
+  if (jobId === undefined || result === undefined || nativeCompleted === undefined || toolCalls === undefined) return;
+  // This adapter accepts completion only when a caller supplies all three
+  // independent facts. It never treats a hook name or queue acknowledgement
+  // as model completion, and it has no effect for ordinary hooks without the
+  // explicit envelope.
+  const service = new CodexService({ config, store, now: () => nowMs });
+  service.recordCompletion(jobId, result, nativeCompleted, toolCalls);
 }
 
 export function runTick(input: TickInput, options: TickOptions = {}): TickResult {
@@ -188,7 +237,8 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
     nowMs,
     synthetic,
     continuationActive: boolValue(input.continuation_active) ?? boolValue(input.stop_hook_active),
-    userActivity: boolValue(input.user_activity)
+    userActivity: boolValue(input.user_activity),
+    saveAcknowledged: boolValue(input.save_acknowledged) ?? boolValue(input.checkpoint_saved)
   }, config);
 
   if (!synthetic) {
@@ -197,12 +247,14 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
       lastEventAtMs: nowMs,
       ...(event === 'UserPromptSubmit' ? { lastUserActivityAtMs: nowMs } : {}),
       ...(event === 'PreToolUse' || event === 'PostToolUse' ? { lastWorkAtMs: nowMs, lastToolActivityAtMs: nowMs } : {}),
+      ...(boolValue(input.pending_work) !== undefined ? { pendingWork: boolValue(input.pending_work) } : boolValue(input.pendingWork) !== undefined ? { pendingWork: boolValue(input.pendingWork) } : {}),
       ...(event === 'SessionStart' ? { sessionStartedAtMs: nowMs } : {}),
       ...(event === 'SessionEnd' ? { sessionEndedAtMs: nowMs } : {})
     });
     if (event === 'SubagentStart' && stringValue(input.agent_id) && facts.fiveHour?.usedPercent !== null && facts.fiveHour?.usedPercent !== undefined) {
       saveTimeline(store, identity, { spawnFiveHourPercent: facts.fiveHour.usedPercent, parentThreadId: stringValue(input.thread_id) ?? stringValue(input.session_id) ?? 'unknown-thread' });
     }
+    recordCompletionEnvelope(input, event, config, store, nowMs);
   }
 
   if (synthetic) return { output: '{}', facts, decision, identity };
@@ -211,7 +263,7 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
   if (event === 'SubagentStart') context = buildSubagentText(input, facts, config);
   else if (event === 'SubagentStop') {
     const agentId = stringValue(input.agent_id);
-    const pending = agentId && hasHandoff(String(input.cwd ?? process.cwd()), config.checkpoint_dir_name, agentId);
+    const pending = agentId && hasHandoff(String(input.cwd ?? process.cwd()), config.checkpoint_dir_name, agentId, config.checkpoint_subdir);
     context = pending ? `${formatFacts(facts)}\n\n[pacekeeper] A handoff is pending for ${agentId}; the parent must absorb it once, then run ${checkpointCliPath()} handoffs archive ${agentId}.` : formatFacts(facts);
   } else if (event === 'PreCompact' && facts.context?.level === 'critical' && decision.inject) {
     context = `${formatFacts(facts)}\n\n[pacekeeper] Context is critical. Save a resumable checkpoint now with ${checkpointCliPath()} before continuing. The native hook boundary does not prove a save barrier, so do not claim the checkpoint exists until the CLI verifies it.`;
@@ -237,6 +289,11 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
     const startAgentId = agentId ?? 'unknown-agent';
     const pause = effectivePause(config, facts.fiveHour.usedPercent);
     if (facts.fiveHour.usedPercent >= pause) context += `\n\n${formatPauseDirective({ agentId: startAgentId, pausePercent: pause })}`;
+  }
+  const plannedAgents = numberValue(input.planned_agents);
+  if (plannedAgents !== undefined && plannedAgents > 1) {
+    const advice = dispatchAdvice({ plannedAgents, fiveHourPercent: facts.fiveHour?.usedPercent ?? null }, config);
+    if (advice.message !== null) context += `${context ? '\n\n' : ''}[pacekeeper] ${advice.message}`;
   }
   return { output: output(event, context), facts, decision, identity };
 }

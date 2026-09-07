@@ -115,16 +115,31 @@ export function parseWhoRemoteTtys(output: string): string[] {
   }).filter((value): value is string => value !== null);
 }
 
-export function probeSsh(nowMs: number, idleMs: number): Signal {
-  const output = command('who', []);
+export interface SshProbeDeps {
+  who?: () => string | null;
+  statAtimeMs?: (ttyPath: string) => number;
+}
+
+export function probeSsh(nowMs: number, idleMs: number, deps: SshProbeDeps = {}): Signal {
+  const output = deps.who ? deps.who() : command('who', []);
   if (output === null) return unavailable('ssh', 'who is unavailable');
   const ttys = parseWhoRemoteTtys(output);
   if (ttys.length === 0) return { name: 'ssh', state: 'idle', detail: 'no remote logins' };
   let newest = 0;
+  let unreadable = 0;
   for (const tty of ttys) {
-    try { newest = Math.max(newest, fs.statSync(path.join('/dev', tty)).atimeMs); } catch { /* ignore one tty */ }
+    try {
+      const atimeMs = deps.statAtimeMs ? deps.statAtimeMs(path.join('/dev', tty)) : fs.statSync(path.join('/dev', tty)).atimeMs;
+      newest = Math.max(newest, atimeMs);
+    } catch {
+      unreadable += 1;
+    }
   }
-  return newest === 0 ? { name: 'ssh', state: 'idle', detail: 'remote tty activity unavailable' } : classify('ssh', newest, nowMs, idleMs);
+  // A remote login with no readable tty activity is an unavailable signal.
+  // Treating it as idle would incorrectly route work away from an active SSH
+  // user when permissions or a platform-specific /dev layout hide atime.
+  if (unreadable > 0) return unavailable('ssh', 'remote tty activity was unreadable');
+  return newest === 0 ? unavailable('ssh', 'remote tty activity was unavailable') : classify('ssh', newest, nowMs, idleMs);
 }
 
 export function probeLoginctl(nowMs: number, idleMs: number): Signal {
@@ -154,6 +169,8 @@ export interface PresenceSample {
   signals: Signal[];
   lastActivityMs: number | null;
   checkedAtMs: number;
+  /** A transition is emitted once by the sampler that atomically published it. */
+  transition?: { from: Presence; to: Presence; atMs: number };
 }
 
 function cacheRoot(cacheHome?: string): string {
@@ -192,9 +209,18 @@ export function fuse(signals: Signal[], hookGapMs: number | null, idleMs: number
 }
 
 export function samplePresence(config: CodexConfig, nowMs = Date.now(), hookGapMs: number | null = null, cacheHome?: string): PresenceSample {
+  const previous = readPresenceState(cacheHome);
   const signals = probeAll(config, nowMs);
   const fused = fuse(signals, hookGapMs, config.presence.idle_minutes * 60_000);
-  const sample = { state: fused.state, signals, lastActivityMs: fused.lastActivityMs, checkedAtMs: nowMs };
+  const sample: PresenceSample = {
+    state: fused.state,
+    signals,
+    lastActivityMs: fused.lastActivityMs,
+    checkedAtMs: nowMs,
+    ...(previous !== null && previous.state !== fused.state
+      ? { transition: { from: previous.state, to: fused.state, atMs: nowMs } }
+      : {})
+  };
   const file = presenceStateFile(cacheHome);
   const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
   try {
@@ -215,7 +241,8 @@ const PresenceSampleSchema = z.object({
   state: z.enum(['online', 'afk', 'unknown']),
   signals: z.array(z.object({ name: z.string(), state: z.enum(['active', 'idle', 'unavailable']), lastActivityMs: z.number().optional(), detail: z.string().optional() })),
   lastActivityMs: z.number().nullable(),
-  checkedAtMs: z.number()
+  checkedAtMs: z.number(),
+  transition: z.object({ from: z.enum(['online', 'afk', 'unknown']), to: z.enum(['online', 'afk', 'unknown']), atMs: z.number() }).optional()
 });
 
 export function readPresenceState(cacheHome?: string): PresenceSample | null {

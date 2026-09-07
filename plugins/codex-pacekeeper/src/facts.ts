@@ -102,7 +102,22 @@ export function buildFacts(
   nowMs: number
 ): CodexFacts {
   const blockers: string[] = [];
+  const usage = inputs.tokenUsage === null || inputs.tokenUsage === undefined
+    ? null
+    : parseThreadTokenUsage(inputs.tokenUsage);
+  const context: ContextFact | null = usage === null
+    ? null
+    : {
+        currentTokens: usage.currentTokens,
+        contextWindow: usage.contextWindow,
+        usedPercent: usage.usedPercent,
+        level: meterLevel(usage.usedPercent, 'context', config),
+        cache: usage.cache
+      };
 
+  // Context usage is independent of quota acquisition. Keep a readable
+  // current-turn meter even when the rate-limit owner is unavailable; only the
+  // quota-dependent automation gates should fail closed in that case.
   if (inputs.rateLimits === null) {
     return {
       accountId: null,
@@ -110,12 +125,12 @@ export function buildFacts(
       fiveHour: null,
       weekly: null,
       unknownBuckets: [],
-      context: null,
+      context,
       stale: true,
       capacity: 'unknown',
       automationAllowed: false,
       blockers: ['no native rate-limit reading is available'],
-      diagnostics: ['rate limits were not read']
+      diagnostics: ['rate limits were not read', ...(usage?.diagnostics ?? [])]
     };
   }
 
@@ -162,17 +177,6 @@ export function buildFacts(
     blockers.push(`the native rate-limit state is ${parsed.rateLimitReachedType}`);
   }
 
-  const usage = inputs.tokenUsage === null ? null : parseThreadTokenUsage(inputs.tokenUsage);
-  const context: ContextFact | null = usage === null
-    ? null
-    : {
-        currentTokens: usage.currentTokens,
-        contextWindow: usage.contextWindow,
-        usedPercent: usage.usedPercent,
-        level: meterLevel(usage.usedPercent, 'context', config),
-        cache: usage.cache
-      };
-
   return {
     accountId: parsed.accountId,
     planType: parsed.planType,
@@ -205,8 +209,16 @@ export async function readNativeFacts(
     const authenticated = options.authenticated !== undefined
       ? options.authenticated
       : account?.authenticated ?? null;
-    return buildFacts({ rateLimits: rateLimitsResult.value, observedAtMs: nowMs, tokenUsage: options.tokenUsage ?? null, authenticated }, config, nowMs);
+    const rateLimits = account?.planType !== null && account?.planType !== undefined && rateLimitsResult.value.planType === null
+      ? { ...rateLimitsResult.value, planType: account.planType }
+      : rateLimitsResult.value;
+    return buildFacts({ rateLimits, observedAtMs: nowMs, tokenUsage: options.tokenUsage ?? null, authenticated }, config, nowMs);
   } catch {
-    return buildFacts({ rateLimits: null, observedAtMs: nowMs, tokenUsage: null, authenticated: options.authenticated ?? null }, config, nowMs);
+    return buildFacts({
+      rateLimits: null,
+      observedAtMs: nowMs,
+      tokenUsage: options.tokenUsage ?? null,
+      authenticated: options.authenticated ?? null
+    }, config, nowMs);
   }
 }

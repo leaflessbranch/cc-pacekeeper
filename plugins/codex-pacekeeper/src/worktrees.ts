@@ -154,12 +154,15 @@ export function cleanupWorktrees(options: WorktreeListOptions & { apply?: boolea
 
 function main(): void {
   const [verb = 'list', value] = process.argv.slice(2);
+  // Resolve the repository root for Git operations, but retain the checkout
+  // from which this command was actually invoked. A --cwd pointing at the
+  // main root must never make the caller's worktree eligible for removal.
+  const invokingCwd = canonical(process.cwd());
   const cwdFlagIndex = process.argv.findIndex((arg) => arg === '--cwd');
   const cwdFlag = cwdFlagIndex >= 0 ? process.argv[cwdFlagIndex + 1] : undefined;
   const cwd = resolveProjectRoot({
     cwdFlag,
-    processCwd: process.cwd(),
-    allowUnsafe: process.env['CODEX_PACEKEEPER_ALLOW_UNSAFE_ROOT'] === '1'
+    processCwd: process.cwd()
   });
   if (verb === 'list') {
     const rows = listWorktrees({ cwd });
@@ -169,7 +172,7 @@ function main(): void {
   if (verb === 'new') { process.stdout.write(`${createWorktree(cwd, value ?? 'scratch')}\n`); return; }
   if (verb === 'cleanup') {
     const apply = process.argv.includes('--apply');
-    process.stdout.write(JSON.stringify(cleanupWorktrees({ cwd, apply }), null, 2) + '\n');
+    process.stdout.write(JSON.stringify(cleanupWorktrees({ cwd, apply, currentCwd: invokingCwd }), null, 2) + '\n');
     return;
   }
   process.stderr.write('usage: pacekeeper-worktrees list|new <name>|cleanup [--apply]\n');

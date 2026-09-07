@@ -75,15 +75,15 @@ describe('fact assembly', () => {
     expect(stale.blockers.join(' ')).toContain('stale');
   });
 
-  test('fresh included capacity permits automation', () => {
+  test('a fresh subscription reading without included-capacity evidence stays unknown', () => {
     const facts = buildFacts(
       { rateLimits: rateLimits(), observedAtMs: FRESH, tokenUsage: null, authenticated: true },
       CODEX_DEFAULTS,
       NOW
     );
-    expect(facts.capacity).toBe('included');
-    expect(facts.automationAllowed).toBe(true);
-    expect(facts.blockers).toEqual([]);
+    expect(facts.capacity).toBe('unknown');
+    expect(facts.automationAllowed).toBe(false);
+    expect(facts.blockers.join(' ')).toContain('not confirmed included');
   });
 
   test('paid capacity disables automation, with no purchase path', () => {
@@ -207,7 +207,7 @@ describe('fact assembly', () => {
       readRateLimits: async () => parseRateLimitsResponse(rateLimits(), NOW),
       readAccount: async () => ({ kind: 'chatgpt', authenticated: true, planType: 'plus', requiresOpenaiAuth: true, diagnostics: [] })
     }, CODEX_DEFAULTS, { nowMs: NOW });
-    expect(facts.capacity).toBe('included');
-    expect(facts.automationAllowed).toBe(true);
+    expect(facts.capacity).toBe('unknown');
+    expect(facts.automationAllowed).toBe(false);
   });
 });

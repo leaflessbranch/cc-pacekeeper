@@ -4,6 +4,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { CODEX_DEFAULTS } from '../config';
 import { NativeClient, normalizeNativeCapabilities } from '../native';
+import { advance } from '../jobs';
 import { CodexService } from '../service';
 import { CodexStore } from '../storage';
 
@@ -23,6 +24,32 @@ function fakeClient(calls: string[]): NativeClient {
 }
 
 describe('Codex durable service', () => {
+  test('rescheduling an unresolved submission returns the same job', async () => {
+    const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-service-unresolved-')));
+    const service = new CodexService({ config: CODEX_DEFAULTS, store, now: () => NOW, resolveClient: async () => fakeClient([]), eligibility: () => ({ nowMs: NOW, enabled: true, capacity: 'included', pendingWork: true, ownerLive: true, fresh: true, idleForMs: 0, strict: true }) });
+    const scheduled = service.scheduleKeepalive(owner, NOW);
+    const submitting = advance(scheduled, { type: 'submitting' });
+    store.write({ accountId: owner.accountId, threadId: owner.threadId, agentId: `job-${scheduled.id}` }, 'job', submitting);
+    expect(service.scheduleKeepalive(owner, NOW + 1_000).id).toBe(scheduled.id);
+    const reconciled = (await service.runDueJobs())[0];
+    expect(reconciled?.state).toBe('ambiguous');
+    expect(service.scheduleKeepalive(owner, NOW + 2_000).id).toBe(scheduled.id);
+  });
+
+  test('a recovered submitting job is reconciled before any new send', async () => {
+    const calls: string[] = [];
+    const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-service-recover-')));
+    const service = new CodexService({ config: CODEX_DEFAULTS, store, now: () => NOW, resolveClient: async () => fakeClient(calls), eligibility: () => ({ nowMs: NOW, enabled: true, capacity: 'included', pendingWork: true, ownerLive: true, fresh: true, idleForMs: 0, strict: true }) });
+    const scheduled = service.scheduleKeepalive(owner, NOW);
+    const submitting = advance(scheduled, { type: 'submitting' });
+    store.write({ accountId: owner.accountId, threadId: owner.threadId, agentId: `job-${scheduled.id}` }, 'job', submitting);
+    // fakeClient's queue list is empty, so this becomes ambiguous and no add
+    // call is made; this is the conservative recovery boundary.
+    const result = (await service.runDueJobs())[0];
+    expect(result?.state).toBe('ambiguous');
+    expect(calls.filter((call) => call.startsWith('thread/queue/add'))).toHaveLength(0);
+  });
+
   test('runs an eligible keepalive through an existing owner and verifies completion separately', async () => {
     const calls: string[] = [];
     const service = new CodexService({ config: CODEX_DEFAULTS, store: new CodexStore(mkdtempSync(join(tmpdir(), 'codex-service-'))), now: () => NOW, resolveClient: async () => fakeClient(calls), eligibility: () => ({ nowMs: NOW, enabled: true, capacity: 'included', pendingWork: true, ownerLive: true, fresh: true, idleForMs: 0, strict: true }) });

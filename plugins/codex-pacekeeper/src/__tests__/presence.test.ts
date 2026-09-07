@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { fusePresence, type ProbeResult } from '../presence';
+import { fusePresence, probeSsh, type ProbeResult } from '../presence';
 
 const unavailable: ProbeResult = { status: 'unavailable' };
 const attachedActive: ProbeResult = { status: 'attached', idleSeconds: 10 };
@@ -71,5 +71,16 @@ describe('non-Linux fallback', () => {
     expect(
       fusePresence({ tmux: unavailable, tty: unavailable, ssh: unavailable, loginctl: unavailable }, IDLE_SECONDS)
     ).toBe('unknown');
+  });
+});
+
+describe('SSH probe', () => {
+  test('remote logins with unreadable tty activity are unavailable, not idle', () => {
+    const result = probeSsh(Date.now(), IDLE_SECONDS * 1000, {
+      who: () => 'user pts/9 2026-09-07 10:00 (fixture.invalid)',
+      statAtimeMs: () => { throw new Error('permission denied'); }
+    });
+    expect(result.state).toBe('unavailable');
+    expect(result.detail).toContain('unreadable');
   });
 });

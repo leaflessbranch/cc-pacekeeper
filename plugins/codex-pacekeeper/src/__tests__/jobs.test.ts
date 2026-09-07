@@ -130,6 +130,14 @@ describe('reconciliation after a crash', () => {
     expect(result.retryable).toBe(false);
   });
 
+  test('a persisted submitting job is reconciled without creating a new id', () => {
+    const submitting = advance(keepalive(), { type: 'submitting' });
+    const result = reconcile(submitting, [{ id: 'q-recovered', clientUserMessageId: 'sub-1' }]);
+    expect(result.state).toBe('queued');
+    expect(result.submissionId).toBe('sub-1');
+    expect(result.queuedSubmissionId).toBe('q-recovered');
+  });
+
   test('reconciling never invents a new submission id', () => {
     let job = advance(keepalive(), { type: 'submitting' });
     job = advance(job, { type: 'ambiguous', reason: 'crash' });
@@ -160,6 +168,10 @@ describe('cancellation', () => {
 
   test('an eligible job is left alone', () => {
     expect(cancelIf(keepalive(), { capacity: 'included', nowMs: NOW }).state).toBe('scheduled');
+  });
+
+  test('require_pending=false does not cancel solely because pending work is false', () => {
+    expect(cancelIf(keepalive(), { capacity: 'included', pendingWork: false, requirePending: false, nowMs: NOW }).state).toBe('scheduled');
   });
 
   test('maximum continuous idle cancels a pending keepalive, while unknown idle fails closed', () => {

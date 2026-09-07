@@ -25,6 +25,9 @@ export interface NativeCapabilities {
    * suppression before a model starts. Kept optional for compatibility with
    * older serialized capability records. */
   queueDelete?: NativeCapability;
+  /** Queue listing is needed for crash reconciliation; acceptance alone does
+   * not prove that a submission completed or never ran. */
+  queueList?: NativeCapability;
   /** Account identity/auth mode is an observed native fact, not an env hint. */
   accountRead?: NativeCapability;
   accountRateLimits: NativeCapability;
@@ -129,6 +132,12 @@ export function normalizeNativeCapabilities(probe: NativeSchemaProbe): NativeCap
   // unsupported pre-model suppression guarantee.
   Object.defineProperty(result, 'queueDelete', {
     value: has(QUEUE_DELETE_METHOD),
+    enumerable: false,
+    writable: false,
+    configurable: false
+  });
+  Object.defineProperty(result, 'queueList', {
+    value: has(QUEUE_LIST_METHOD),
     enumerable: false,
     writable: false,
     configurable: false
@@ -534,11 +543,9 @@ const SUBSCRIPTION_PLANS: ReadonlySet<string> = new Set([
   'prolite',
   'team',
   'self_serve_business_prolite',
-  'self_serve_business_usage_based',
   'business',
   'ent26',
   'enterprise_cbp_automation',
-  'enterprise_cbp_usage_based',
   'enterprise',
   'edu',
   'edu_plus',
@@ -554,12 +561,21 @@ const PAID_REACHED_REASONS: ReadonlySet<string> = new Set([
 
 /**
  * Credits being available says nothing about whether the next turn will spend
- * them. Only an authoritative spend-control transition can classify paid use.
+ * them. An authoritative spend-control transition can classify paid use, but
+ * the inverse (`false`) is not an included-capacity promise; that requires a
+ * separate authoritative observation.
  */
 export function classifySubscriptionCapacity(
   parsed: Pick<ParsedRateLimitSnapshot, 'planType' | 'spendControlReached'> & {
     rateLimitReachedType?: string | null;
     fresh: boolean;
+    /**
+     * A separate, authoritative included-capacity observation. The pinned
+     * rate-limit schema does not provide one; `spendControlReached: false`
+     * only says that this backend control is not currently reached and must
+     * not be promoted into a spending promise.
+     */
+    includedCapacity?: boolean | null;
     authenticated?: boolean;
     /** Recorded for diagnostics only; it never moves the classification. */
     creditsAvailable?: boolean | null;
@@ -580,7 +596,7 @@ export function classifySubscriptionCapacity(
     return 'unknown';
   }
   if (parsed.spendControlReached === true) return 'paid';
-  if (parsed.spendControlReached === false) return 'included';
+  if (parsed.includedCapacity === true) return 'included';
   return 'unknown';
 }
 
@@ -590,7 +606,10 @@ export interface ExistingOwnerRecord {
   accountId: string | null;
   threadIds: string[];
   activeThreadIds?: string[];
+  /** Native owner registries may call this field `endpoint`; normalize it to
+   * socketPath at the boundary so the transport never guesses a target. */
   socketPath?: string;
+  endpoint?: string;
   /** Optional working-directory provenance published by the owner registry. */
   cwd?: string;
   methods?: string[];
@@ -604,6 +623,7 @@ export interface OwnerProbeRecord {
   threadIds?: unknown;
   activeThreadIds?: unknown;
   socketPath?: unknown;
+  endpoint?: unknown;
   cwd?: unknown;
   methods?: unknown;
   protocolVersion?: unknown;
@@ -627,7 +647,9 @@ export function parseOwnerRecord(record: OwnerProbeRecord): ExistingOwnerRecord 
     accountId: typeof record.accountId === 'string' && record.accountId.trim() !== '' ? record.accountId : null,
     threadIds,
     ...(activeThreadIds === undefined ? {} : { activeThreadIds }),
-    socketPath: typeof record.socketPath === 'string' ? record.socketPath : undefined,
+    socketPath: typeof record.socketPath === 'string'
+      ? record.socketPath
+      : typeof record.endpoint === 'string' ? record.endpoint : undefined,
     ...(typeof record.cwd === 'string' && record.cwd !== '' ? { cwd: record.cwd } : {}),
     ...(Array.isArray(record.methods) ? { methods: record.methods.filter((method): method is string => typeof method === 'string') } : {}),
     protocolVersion
@@ -690,7 +712,7 @@ export function parseQueueListResponse(response: unknown): ParsedQueuedSubmissio
   const data = (response as Record<string, unknown>)['data'];
   if (!Array.isArray(data)) return [];
   return data
-    .map((item) => parseQueuedSubmission({ queuedSubmission: item }))
+    .map((item) => parseQueuedSubmission(item) ?? parseQueuedSubmission({ queuedSubmission: item }))
     .filter((item): item is ParsedQueuedSubmission => item !== null);
 }
 
@@ -813,6 +835,13 @@ export class NativeClient {
   public async listQueuedSubmissions(threadId: string): Promise<unknown> {
     if (!this.owner.threadIds.includes(threadId)) {
       throw new Error('the selected owner does not hold this thread');
+    }
+    // Older serialized capability records may omit the optional field. An
+    // omitted probe is unavailable, never permission to guess that listing
+    // works and issue a request anyway.
+    const capability = this.capabilities.queueList ?? 'unavailable';
+    if (capability !== 'supported') {
+      throw new Error(`thread/queue/list is ${capability}`);
     }
     return this.transport.request(QUEUE_LIST_METHOD, { threadId });
   }

@@ -175,6 +175,8 @@ export interface Handoff {
 export interface WriteHandoffInput {
   cwd: string;
   checkpointDirName: string;
+  /** Matches CodexCheckpoints' configured isolated subtree. */
+  checkpointSubdir?: string;
   agentId: string;
   agentType?: string;
   trigger: string;
@@ -193,10 +195,11 @@ function safeContractToken(value: string, name: string): string {
   return value;
 }
 
-function handoffRoot(cwd: string, checkpointDirName: string): string {
+function handoffRoot(cwd: string, checkpointDirName: string, checkpointSubdir = 'codex'): string {
   safeSegment(checkpointDirName, 'checkpoint directory');
+  safeSegment(checkpointSubdir, 'checkpoint subdir');
   const root = realOrResolve(cwd);
-  const target = path.join(root, checkpointDirName, 'codex', 'handoffs');
+  const target = path.join(root, checkpointDirName, checkpointSubdir, 'handoffs');
   assertHandoffConfined(root, target);
   return target;
 }
@@ -218,13 +221,13 @@ function assertHandoffConfined(root: string, target: string): void {
   }
 }
 
-export function handoffsDir(cwd: string, checkpointDirName: string): string {
-  return handoffRoot(cwd, checkpointDirName);
+export function handoffsDir(cwd: string, checkpointDirName: string, checkpointSubdir = 'codex'): string {
+  return handoffRoot(cwd, checkpointDirName, checkpointSubdir);
 }
 
-function handoffFile(cwd: string, checkpointDirName: string, agentId: string): string {
+function handoffFile(cwd: string, checkpointDirName: string, agentId: string, checkpointSubdir = 'codex'): string {
   safeSegment(agentId, 'agent id');
-  return path.join(handoffRoot(cwd, checkpointDirName), `${agentId}.md`);
+  return path.join(handoffRoot(cwd, checkpointDirName, checkpointSubdir), `${agentId}.md`);
 }
 
 function emitHandoffFrontmatter(frontmatter: HandoffFrontmatter): string {
@@ -236,6 +239,7 @@ function emitHandoffFrontmatter(frontmatter: HandoffFrontmatter): string {
 
 function parseHandoff(file: string): Handoff | null {
   try {
+    if (fs.lstatSync(file).isSymbolicLink()) return null;
     const raw = fs.readFileSync(file, 'utf8');
     const match = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(raw);
     if (match === null) return null;
@@ -268,7 +272,7 @@ function parseHandoff(file: string): Handoff | null {
 
 /** Persist a handoff before returning the pause marker. */
 export function writeHandoff(input: WriteHandoffInput): string {
-  const target = handoffFile(input.cwd, input.checkpointDirName, input.agentId);
+  const target = handoffFile(input.cwd, input.checkpointDirName, input.agentId, input.checkpointSubdir);
   if (input.body.trim() === '') throw new Error('handoff body must not be empty');
   if (input.agentType !== undefined) safeContractToken(input.agentType, 'agent type');
   const trigger = input.trigger || 'budget_pause';
@@ -297,8 +301,8 @@ export function writeHandoff(input: WriteHandoffInput): string {
   return target;
 }
 
-export function listHandoffs(cwd: string, checkpointDirName: string): Handoff[] {
-  const dir = handoffRoot(cwd, checkpointDirName);
+export function listHandoffs(cwd: string, checkpointDirName: string, checkpointSubdir = 'codex'): Handoff[] {
+  const dir = handoffRoot(cwd, checkpointDirName, checkpointSubdir);
   let names: string[];
   try { names = fs.readdirSync(dir); } catch { return []; }
   return names
@@ -308,15 +312,16 @@ export function listHandoffs(cwd: string, checkpointDirName: string): Handoff[] 
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
-export function hasHandoff(cwd: string, checkpointDirName: string, agentId: string): boolean {
-  try { return parseHandoff(handoffFile(cwd, checkpointDirName, agentId)) !== null; } catch { return false; }
+export function hasHandoff(cwd: string, checkpointDirName: string, agentId: string, checkpointSubdir = 'codex'): boolean {
+  try { return parseHandoff(handoffFile(cwd, checkpointDirName, agentId, checkpointSubdir)) !== null; } catch { return false; }
 }
 
-export function archiveHandoff(cwd: string, checkpointDirName: string, agentId: string): string | null {
+export function archiveHandoff(cwd: string, checkpointDirName: string, agentId: string, checkpointSubdir = 'codex'): string | null {
   let source: string;
-  try { source = handoffFile(cwd, checkpointDirName, agentId); } catch { return null; }
+  try { source = handoffFile(cwd, checkpointDirName, agentId, checkpointSubdir); } catch { return null; }
   if (!fs.existsSync(source)) return null;
-  const archive = path.join(handoffRoot(cwd, checkpointDirName), 'archive');
+  if (fs.lstatSync(source).isSymbolicLink()) return null;
+  const archive = path.join(handoffRoot(cwd, checkpointDirName, checkpointSubdir), 'archive');
   fs.mkdirSync(archive, { recursive: true });
   assertHandoffConfined(realOrResolve(cwd), archive);
   let target = path.join(archive, `${agentId}.md`);

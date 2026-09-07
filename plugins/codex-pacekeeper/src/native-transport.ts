@@ -5,12 +5,38 @@ import { NativeClient, type ExistingOwnerRecord, type NativeCapabilities } from 
 export interface JsonRpcTransportOptions {
   endpoint: string;
   timeoutMs?: number;
+  /** Injectable only for deterministic protocol fixtures; production uses net.createConnection. */
+  socketFactory?: (socketPath: string) => Socket;
 }
 
 interface JsonRpcReply {
   id?: unknown;
   result?: unknown;
   error?: { code?: unknown; message?: unknown; data?: unknown };
+}
+
+const INITIALIZE_METHOD = 'initialize';
+const INITIALIZED_METHOD = 'initialized';
+const CLIENT_INFO = {
+  name: 'codex-pacekeeper',
+  title: 'Codex Pacekeeper',
+  version: '0.1.0'
+} as const;
+
+function initializeParams(): Record<string, unknown> {
+  return {
+    clientInfo: CLIENT_INFO,
+    capabilities: { experimentalApi: true }
+  };
+}
+
+function isInitializeResponse(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  return typeof row['codexHome'] === 'string'
+    && typeof row['platformFamily'] === 'string'
+    && typeof row['platformOs'] === 'string'
+    && typeof row['userAgent'] === 'string';
 }
 
 function errorWithCode(error: { code?: unknown; message?: unknown; data?: unknown }): Error & { code?: unknown; data?: unknown } {
@@ -33,10 +59,11 @@ function parseEndpoint(endpoint: string): { kind: 'unix' | 'ws'; value: string }
 class UnixJsonRpcTransport {
   private nextId = 1;
 
-  public constructor(private readonly socketPath: string, private readonly timeoutMs: number) {}
+  public constructor(private readonly socketPath: string, private readonly timeoutMs: number, private readonly socketFactory: (socketPath: string) => Socket = createConnection) {}
 
   public request(method: string, params: unknown): Promise<unknown> {
-    const id = this.nextId++;
+    const initializeId = this.nextId++;
+    const requestId = this.nextId++;
     return new Promise((resolve, reject) => {
       let socket: Socket | null = null;
       let buffer = '';
@@ -56,7 +83,7 @@ class UnixJsonRpcTransport {
         else resolve(result);
       };
       try {
-        socket = createConnection(this.socketPath);
+        socket = this.socketFactory(this.socketPath);
         socket.setEncoding('utf8');
         socket.on('data', (chunk: string | Buffer) => {
           buffer += chunk.toString();
@@ -68,7 +95,18 @@ class UnixJsonRpcTransport {
             if (line === '') continue;
             let reply: JsonRpcReply;
             try { reply = JSON.parse(line) as JsonRpcReply; } catch { continue; }
-            if (reply.id !== id) continue;
+            if (reply.id === initializeId) {
+              if (reply.error !== undefined) {
+                finish(errorWithCode(reply.error));
+              } else if (!isInitializeResponse(reply.result)) {
+                finish(new Error('native initialize returned an invalid response'));
+              } else {
+                socket?.write(`${JSON.stringify({ jsonrpc: '2.0', method: INITIALIZED_METHOD })}\n`);
+                socket?.write(`${JSON.stringify({ jsonrpc: '2.0', id: requestId, method, params })}\n`);
+              }
+              continue;
+            }
+            if (reply.id !== requestId) continue;
             if (reply.error !== undefined) finish(errorWithCode(reply.error));
             else finish(undefined, reply.result);
             return;
@@ -79,7 +117,7 @@ class UnixJsonRpcTransport {
           if (!settled) finish(new Error('native endpoint closed before the JSON-RPC response'));
         });
         socket.once('connect', () => {
-          socket?.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+          socket?.write(`${JSON.stringify({ jsonrpc: '2.0', id: initializeId, method: INITIALIZE_METHOD, params: initializeParams() })}\n`);
         });
       } catch (error) {
         finish(error instanceof Error ? error : new Error(String(error)));
@@ -94,7 +132,8 @@ class WebSocketJsonRpcTransport {
   public constructor(private readonly endpoint: string, private readonly timeoutMs: number) {}
 
   public request(method: string, params: unknown): Promise<unknown> {
-    const id = this.nextId++;
+    const initializeId = this.nextId++;
+    const requestId = this.nextId++;
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(this.endpoint);
       let settled = false;
@@ -113,13 +152,24 @@ class WebSocketJsonRpcTransport {
         else resolve(result);
       };
       ws.addEventListener('open', () => {
-        ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+        ws.send(JSON.stringify({ jsonrpc: '2.0', id: initializeId, method: INITIALIZE_METHOD, params: initializeParams() }));
       });
       ws.addEventListener('message', (event) => {
         const data = typeof event.data === 'string' ? event.data : String(event.data);
         let reply: JsonRpcReply;
         try { reply = JSON.parse(data) as JsonRpcReply; } catch { return; }
-        if (reply.id !== id) return;
+        if (reply.id === initializeId) {
+          if (reply.error !== undefined) {
+            finish(errorWithCode(reply.error));
+          } else if (!isInitializeResponse(reply.result)) {
+            finish(new Error('native initialize returned an invalid response'));
+          } else {
+            ws.send(JSON.stringify({ jsonrpc: '2.0', method: INITIALIZED_METHOD }));
+            ws.send(JSON.stringify({ jsonrpc: '2.0', id: requestId, method, params }));
+          }
+          return;
+        }
+        if (reply.id !== requestId) return;
         if (reply.error !== undefined) finish(errorWithCode(reply.error));
         else finish(undefined, reply.result);
       });
@@ -139,7 +189,7 @@ export class JsonRpcTransport {
     const timeoutMs = options.timeoutMs ?? 2000;
     if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) throw new Error('native transport timeout must be positive');
     this.delegate = endpoint.kind === 'unix'
-      ? new UnixJsonRpcTransport(endpoint.value, timeoutMs)
+      ? new UnixJsonRpcTransport(endpoint.value, timeoutMs, options.socketFactory)
       : new WebSocketJsonRpcTransport(endpoint.value, timeoutMs);
   }
 
@@ -150,6 +200,7 @@ export class JsonRpcTransport {
 
 /** Construct a client only for an owner record that already supplied an endpoint. */
 export function clientForExistingOwner(owner: ExistingOwnerRecord, capabilities: NativeCapabilities, timeoutMs = 2000): NativeClient | null {
-  if (!owner.socketPath) return null;
-  return new NativeClient(new JsonRpcTransport({ endpoint: owner.socketPath, timeoutMs }), capabilities, owner);
+  const endpoint = owner.socketPath ?? owner.endpoint;
+  if (!endpoint) return null;
+  return new NativeClient(new JsonRpcTransport({ endpoint, timeoutMs }), capabilities, owner);
 }
