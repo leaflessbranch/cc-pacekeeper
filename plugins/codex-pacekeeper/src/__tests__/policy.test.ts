@@ -163,12 +163,16 @@ describe('block identity and re-arm', () => {
     });
     const first = decide({ event: 'PreCompact', facts: critical, state: empty, nowMs: NOW }, CODEX_DEFAULTS);
     expect(first.inject).toBe(true);
-    expect(first.nextState.savedThisCycle).toBe(true);
+    expect(first.nextState.savedThisCycle).toBe(false);
+    expect(first.nextState.saveRequestedThisCycle).toBe(true);
     const duplicate = decide({ event: 'PreCompact', facts: critical, state: first.nextState, nowMs: NOW + 1_000 }, CODEX_DEFAULTS);
     expect(duplicate.inject).toBe(false);
     expect(duplicate.reason).toContain('already requested');
     const rearmed = decide({ event: 'PostCompact', facts: critical, state: duplicate.nextState, nowMs: NOW + 2_000 }, CODEX_DEFAULTS);
     expect(rearmed.nextState.savedThisCycle).toBe(false);
+    const acknowledged = decide({ event: 'PreCompact', facts: critical, state: rearmed.nextState, nowMs: NOW + 3_000, saveAcknowledged: true }, CODEX_DEFAULTS);
+    expect(acknowledged.inject).toBe(false);
+    expect(acknowledged.nextState.savedThisCycle).toBe(true);
   });
 });
 

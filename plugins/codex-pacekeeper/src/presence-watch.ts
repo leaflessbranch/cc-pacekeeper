@@ -10,8 +10,8 @@ async function main(): Promise<void> {
   for (;;) {
     const now = Date.now();
     const current = samplePresence(loadCodexConfig().config, now, null);
-    if (current.state !== 'unknown' && current.state !== previous?.state) {
-      process.stdout.write(`[pacekeeper-presence] ${current.state}\n`);
+    if (current.transition !== undefined && current.transition.to !== 'unknown' && current.transition.to !== previous?.state) {
+      process.stdout.write(`[pacekeeper-presence] ${current.transition.to}\n`);
     }
     previous = current;
     if (once) return;
@@ -22,4 +22,3 @@ async function main(): Promise<void> {
 if (import.meta.main) {
   main().catch(() => { process.stderr.write(`presence state unavailable at ${presenceStateFile()}\n`); process.exitCode = 1; });
 }
-

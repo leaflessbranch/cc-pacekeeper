@@ -19,6 +19,7 @@ import {
   parseThreadTokenUsage
 } from '../../plugins/codex-pacekeeper/src/native';
 import { decide, type PolicyState } from '../../plugins/codex-pacekeeper/src/policy';
+import { shouldInjectAndRecord } from '../../plugins/cc-pacekeeper/src/state';
 import { buildFacts } from '../../plugins/codex-pacekeeper/src/facts';
 import { KEEPALIVE_PING } from '../../plugins/codex-pacekeeper/src/jobs';
 import { createJob } from '../../plugins/codex-pacekeeper/src/jobs';
@@ -154,6 +155,29 @@ describe('Codex policy corpus (rows 4-8)', () => {
     expect(escalation.inject).toBe(true);
   });
 
+  test('Codex debounce decisions match the shipped Claude state machine at the boundary', () => {
+    const previousHome = process.env.HOME;
+    process.env.HOME = mkdtempSync(join(tmpdir(), 'parity-claude-debounce-'));
+    try {
+      const claudeFirst = shouldInjectAndRecord('parity-thread', 'five_hour', 'warn', OBSERVED_AT / 1000, effectiveConfig().debounce_seconds);
+      const claudeBoundary = shouldInjectAndRecord('parity-thread', 'five_hour', 'warn', OBSERVED_AT / 1000 + effectiveConfig().debounce_seconds, effectiveConfig().debounce_seconds);
+      const claudeAfter = shouldInjectAndRecord('parity-thread', 'five_hour', 'warn', OBSERVED_AT / 1000 + effectiveConfig().debounce_seconds + 1, effectiveConfig().debounce_seconds);
+
+      const codexFirst = decide({ event: 'UserPromptSubmit', facts: facts(81), state: state(), nowMs: OBSERVED_AT }, cfg);
+      const codexBoundary = decide({ event: 'UserPromptSubmit', facts: facts(81), state: codexFirst.nextState, nowMs: OBSERVED_AT + cfg.debounce_seconds * 1000 }, cfg);
+      const codexAfter = decide({ event: 'UserPromptSubmit', facts: facts(81), state: codexBoundary.nextState, nowMs: OBSERVED_AT + (cfg.debounce_seconds + 1) * 1000 }, cfg);
+
+      expect([codexFirst.inject, codexBoundary.inject, codexAfter.inject]).toEqual([
+        claudeFirst.shouldInject,
+        claudeBoundary.shouldInject,
+        claudeAfter.shouldInject
+      ]);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
   test('reset and synthetic turns preserve the separate Codex state contract', () => {
     const first = decide({ event: 'UserPromptSubmit', facts: facts(81), state: state(), nowMs: OBSERVED_AT }, cfg);
     const reset = decide({ event: 'UserPromptSubmit', facts: facts(81, OBSERVED_AT + 4_000_000, OBSERVED_AT + 7_200_000), state: { ...first.nextState, blockResetAtMs: OBSERVED_AT + 3_600_000 }, nowMs: OBSERVED_AT + 4_000_000 }, cfg);
@@ -213,6 +237,7 @@ describe('cross-harness executable scenarios', () => {
       authenticated: true
     }, { config: codexConfig(), store });
     expect(result.facts.context?.level).toBe('critical');
+    expect(result.output).toContain('continue');
     expect(result.output).toContain('Save a resumable checkpoint');
     expect(levelOf(claudeSnapshot({ contextPercent: 95, fiveHourPercent: 10 }, effectiveConfig(), OBSERVED_AT), 'context')).toBe('critical');
   });
@@ -310,6 +335,9 @@ describe('paid-credit-transition (row 1)', () => {
     ).toBe('paid');
     expect(
       classifySubscriptionCapacity({ planType: 'plus', spendControlReached: false, fresh: true, authenticated: true })
+    ).toBe('unknown');
+    expect(
+      classifySubscriptionCapacity({ planType: 'plus', spendControlReached: false, fresh: true, authenticated: true, includedCapacity: true })
     ).toBe('included');
   });
 });

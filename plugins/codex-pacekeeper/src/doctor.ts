@@ -48,6 +48,9 @@ export interface DoctorInput {
     cachedInputTokens: boolean;
     cacheWriteInputTokens: boolean;
   };
+  /** Persistent sampler state is local; proactive native notification needs a
+   * separate, observed harness delivery boundary. */
+  presenceDelivery?: 'observed' | 'unavailable' | 'unknown';
   /** Accepted so a caller need not strip them; never included in the report. */
   accountId?: string;
   threadId?: string;
@@ -187,6 +190,14 @@ export function diagnose(input: DoctorInput): DoctorReport {
       ? 'native cache read/write fields were not observed'
       : `cachedInputTokens=${input.cacheFields.cachedInputTokens ? 'observed' : 'missing'}, `
         + `cacheWriteInputTokens=${input.cacheFields.cacheWriteInputTokens ? 'observed' : 'missing'}`
+  });
+
+  checks.push({
+    name: 'presence delivery',
+    status: input.presenceDelivery === 'observed' ? 'ok' : 'blocked',
+    detail: input.presenceDelivery === 'observed'
+      ? 'presence transitions have an observed native notification path'
+      : 'local presence transitions are sampled and persisted, but a proactive native notification path was not observed'
   });
 
   checks.push({

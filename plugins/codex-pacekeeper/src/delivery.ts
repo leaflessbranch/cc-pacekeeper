@@ -76,9 +76,9 @@ export interface ReconciliationResult {
   queued: QueuedSubmissionRecord[];
 }
 
-/** Reconcile an ambiguous submission by stable client id; absence stays ambiguous. */
+/** Reconcile an interrupted submission by stable client id; absence stays non-retryable. */
 export async function reconcileJob(client: NativeClient, job: Job, store?: JobPersistence): Promise<ReconciliationResult> {
-  if (job.state !== 'ambiguous') return { job, queued: [] };
+  if (job.state !== 'ambiguous' && job.state !== 'submitting') return { job, queued: [] };
   let raw: unknown;
   try { raw = await client.listQueuedSubmissions(job.owner.threadId); }
   catch (error) {

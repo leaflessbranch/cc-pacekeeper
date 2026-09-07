@@ -10,10 +10,15 @@ import { decide, type PolicyState } from '../policy';
 import { advance, cancelIf, createJob } from '../jobs';
 import { diagnose } from '../doctor';
 import { resolveProjectRoot } from '../resolve-root';
+import { refreshObservations } from '../refresh';
+import { CodexStore } from '../storage';
+import { cleanupDecision } from '../worktrees';
+import { runTick } from '../tick';
 import {
   NATIVE_PROTOCOL_VERSION,
   QUEUE_ADD_METHOD,
   QUEUE_DELETE_METHOD,
+  QUEUE_LIST_METHOD,
   NativeClient,
   normalizeNativeCapabilities,
   parseQueueListResponse,
@@ -55,9 +60,25 @@ describe('review repair regressions', () => {
     expect(() => new CodexCheckpoints(join(FIXTURE_ROOT, 'project'), { ...CODEX_DEFAULTS, checkpoint_subdir: '..' }, { isUnsafeRoot: fixtureUnsafe })).toThrow(/subdir|path|checkpoint/i);
   });
 
+  test('canonicalizes a legitimate cache-root alias while retaining descendant containment', () => {
+    const real = join(FIXTURE_ROOT, `cache-real-${Date.now()}`);
+    const alias = join(FIXTURE_ROOT, `cache-alias-${Date.now()}`);
+    mkdirSync(real, { recursive: true });
+    symlinkSync(real, alias);
+    const store = new CodexStore(alias);
+    const identity = { accountId: 'acct-1', threadId: 'thread-1' };
+    store.write(identity, 'timeline', { observed: true });
+    expect(store.read(identity, 'timeline')).toEqual({ observed: true });
+  });
+
   test('an unsafe explicit CLI root cannot fall through to another checkout', () => {
     const unsafe = mkdtempSync(join(tmpdir(), 'codex-pacekeeper-unsafe-root-'));
     expect(() => resolveProjectRoot({ cwdFlag: unsafe, processCwd: unsafe })).toThrow(/explicit project root is unsafe/);
+  });
+
+  test('cleanup always protects the actual invoking checkout', () => {
+    const invoking = join(FIXTURE_ROOT, 'invoking-worktree');
+    expect(cleanupDecision({ path: invoking, bare: false, detached: false, locked: false, dirty: false, liveOwners: 0 }, invoking).removable).toBe(false);
   });
 
   test('claims a checkpoint durably and archives only after acknowledgement', () => {
@@ -171,11 +192,31 @@ describe('review repair regressions', () => {
   });
 
   test('queue deletion is represented separately from pre-model suppression', async () => {
-    const capabilities = normalizeNativeCapabilities({ version: NATIVE_PROTOCOL_VERSION, methods: [QUEUE_ADD_METHOD, QUEUE_DELETE_METHOD] });
-    const transport: NativeTransport = { request: async (method) => method === 'thread/queue/list' ? { data: [{ id: 'q-1', clientUserMessageId: 'submission-1', input: [] }] } : { deleted: true } };
+    const capabilities = normalizeNativeCapabilities({ version: NATIVE_PROTOCOL_VERSION, methods: [QUEUE_ADD_METHOD, QUEUE_DELETE_METHOD, QUEUE_LIST_METHOD] });
+    const transport: NativeTransport = { request: async (method) => method === QUEUE_LIST_METHOD ? { data: [{ id: 'q-1', clientUserMessageId: 'submission-1', input: [] }] } : { deleted: true } };
     const client = new NativeClient(transport, capabilities, { ownerId: 'o', pid: 1, accountId: 'acct-1', threadIds: ['thread-1'], protocolVersion: NATIVE_PROTOCOL_VERSION });
     expect(parseQueueListResponse(await client.listQueuedSubmissions('thread-1')).map((row) => row.id)).toEqual(['q-1']);
     expect((await client.deleteQueuedSubmission('thread-1', 'q-1')).status).toBe('deleted');
     expect(capabilities.preModelSuppression).toBe('unsupported');
+  });
+
+  test('an empty refresh does not renew quota freshness or discard bucket evidence', () => {
+    const home = mkdtempSync(join(FIXTURE_ROOT, `facts-${Date.now()}`));
+    const store = new CodexStore(home);
+    const limits = {
+      accountId: 'acct-1',
+      rateLimits: { planType: 'plus', spendControlReached: false, primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: (NOW + 3_600_000) / 1000 } },
+      rateLimitsByLimitId: { premium: { planType: 'plus', limitId: 'premium', limitName: 'Premium', primary: { usedPercent: 34, windowDurationMins: 10_080, resetsAt: (NOW + 86_400_000) / 1000 }, credits: { hasCredits: true, unlimited: false, balance: '12' } } }
+    };
+    const identity = refreshObservations({ thread_id: owner.threadId, account_id: owner.accountId, now_ms: NOW, rateLimits: limits, tokenUsage: { modelContextWindow: 100, last: { totalTokens: 10 } }, authenticated: true }, store);
+    refreshObservations({ thread_id: owner.threadId, account_id: owner.accountId, now_ms: NOW + 600_000 }, store);
+    const timeline = store.read(identity, 'timeline') as Record<string, unknown>;
+    expect(timeline['quotaObservedAtMs']).toBe(NOW);
+    expect(timeline['contextObservedAtMs']).toBe(NOW);
+    expect((timeline['rateLimits'] as Record<string, unknown>)['byLimitId']).toBeDefined();
+    const stale = buildFacts({ rateLimits: limits, observedAtMs: timeline['quotaObservedAtMs'] as number, tokenUsage: null, authenticated: true }, CODEX_DEFAULTS, NOW + 600_000);
+    expect(stale.stale).toBe(true);
+    expect(stale.unknownBuckets.length).toBeGreaterThanOrEqual(0);
+    expect(runTick({ hook_event_name: 'SessionStart', thread_id: owner.threadId, account_id: owner.accountId, now_ms: NOW + 600_000 }, { config: CODEX_DEFAULTS, store }).facts.context).toBeNull();
   });
 });

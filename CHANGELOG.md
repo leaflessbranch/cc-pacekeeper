@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- An independent, explicit opt-in Codex package with native fact parsing,
+  existing-owner queue delivery, isolated checkpoints, durable job state,
+  presence probes, worktree helpers, and diagnostics. Native no-tools,
+  execution-race suppression, and compaction save-barrier guarantees remain
+  blocked where the pinned interface does not provide them; model/window
+  arbitrage and away routing remain deferred for Codex.
+- The Codex repair pass now negotiates the native handshake before business
+  requests, keeps separate fact freshness clocks and complete sanitized quota
+  observations, reconciles interrupted submissions without replay, and uses
+  explicit checkpoint claim/ack with consumed/superseded/discarded outcomes.
+
 ## [0.8.2]
 
 One fix: a `Stop`-hook directive no longer runs the turn into Claude Code's

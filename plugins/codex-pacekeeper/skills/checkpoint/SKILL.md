@@ -25,23 +25,26 @@ Saving supersedes only the same lane. A different lane is left alone.
 
 ## Resuming
 
-Always resume by exact checkpoint id. Resuming archives the checkpoint, so a
-stale one is not re-surfaced later.
+Always resume by exact checkpoint id. `resume`/`claim` prints the body and a
+durable consumer token while leaving the active file in place; acknowledge it
+only after the consumer has received the body.
 
 - Resuming an id that was already consumed reports `already-consumed`. That is
   the correct answer, not an error to retry around: the work was already
   picked up, and repeating it would redo finished work.
 - A bare resume with more than one active lane reports the lanes and consumes
   **nothing**. Choose one explicitly.
-- Archived content is retained, so a consumer that fails after resuming can
-  still recover the text.
+- Archived content is retained, so a consumer that fails after acknowledgement
+  can still inspect the consumed text; a consumer that fails before ack can
+  retry the active claim by token.
 
 The concrete command is `pacekeeper-checkpoint`; the package also embeds its
 absolute path in subagent contracts. Use `list` first, then pass the exact id
-to `peek`, `resume`, `discard`, or the durable `claim`/`acknowledge` API. A
-claim keeps the active file in place while a consumer works; only an
-acknowledgement archives it. Queue acceptance and a reset wake are separate
-from checkpoint consumption.
+to `peek`, `resume`, `discard`, or the durable `claim`/`ack` API. A claim keeps
+the active file in place while a consumer works; only an acknowledgement
+archives it. The CLI `ack` requires the exact token printed by `claim`/`resume`
+and the owning thread id. Queue acceptance and a reset wake are separate from
+checkpoint consumption.
 
 Codex's native PreCompact hook does not prove a save barrier. When the hook
 reports critical context, run `save` and verify the printed file before

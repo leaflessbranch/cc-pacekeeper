@@ -71,6 +71,30 @@ Presence probes are Linux-only for now (macOS support is deferred for lack of a 
 
 Requires [Claude Code](https://claude.com/claude-code) and [Bun](https://bun.sh) on PATH. On macOS, the first usage fetch may show a Keychain prompt for `bun` — choose "Always Allow" so the 5h/weekly meters can read Claude Code's OAuth credential. Linux and macOS are supported; native Windows is not (the hook entrypoints are bash).
 
+## Codex package
+
+The repository also contains an independent, explicit opt-in package at
+`plugins/codex-pacekeeper/`. It keeps its configuration input, state, and
+checkpoint lanes separate from the shipped Claude package. Enable it only in a
+Codex profile that has an existing native owner and a locally observed
+subscription account; API-key, paid-credit, unknown-owner, and stale-fact
+states fail closed. Run `bin/pacekeeper-doctor` before enabling hooks and read
+[`docs/codex-acceptance.md`](docs/codex-acceptance.md) for the supported native
+boundary and the capabilities that remain blocked or deferred. The pinned
+quota schema does not make `spendControlReached: false` an included-spending
+guarantee, so automated spending stays disabled until that fact is observed
+authoritatively.
+
+The Codex package never starts a second server for an open thread, never asks
+for a channel destination, and does not write the Claude configuration file.
+Its service can run one pass with `bin/pacekeeper-service run` or keep the
+30-minute cadence with `bin/pacekeeper-service watch`; unknown owner, account,
+capacity, freshness and pending-work facts remain fail-closed. Checkpoint
+`resume`/`claim` prints an exact id plus a durable token and leaves the file
+active until `ack --token ...` confirms receipt. Native no-tools,
+execution-race suppression and model-generated PreCompact save barriers remain
+blocked by the examined interface.
+
 ## Usage
 
 Once installed, every prompt gets a one-line status prefix injected into Claude's context:

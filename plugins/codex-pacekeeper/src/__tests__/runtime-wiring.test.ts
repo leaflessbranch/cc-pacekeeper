@@ -56,7 +56,17 @@ describe('Codex runtime wiring', () => {
     refreshObservations({ hook_event_name: 'PostToolUse', thread_id: 'thread-1', account_id: 'acct-1', now_ms: NOW, rateLimits: limits, tokenUsage: null, authenticated: true }, store);
     const result = runTick({ hook_event_name: 'Stop', thread_id: 'thread-1', account_id: 'acct-1', now_ms: NOW + 1000 }, { config: CODEX_DEFAULTS, store });
     expect(result.facts.fiveHour?.usedPercent).toBe(86);
-    expect(result.facts.capacity).toBe('included');
+    expect(result.facts.capacity).toBe('unknown');
+  });
+
+  test('stop and precompact use their event-specific native output fields', () => {
+    const home = mkdtempSync(join(tmpdir(), 'codex-runtime-events-'));
+    const store = new CodexStore(home);
+    const stop = runTick({ hook_event_name: 'Stop', thread_id: 'thread-1', account_id: 'acct-1', now_ms: NOW, observed_at_ms: NOW, rateLimits: limits, tokenUsage: { modelContextWindow: 100, last: { totalTokens: 1 } }, authenticated: true }, { config: CODEX_DEFAULTS, store });
+    expect(JSON.parse(stop.output)).toMatchObject({ decision: 'block' });
+    const compact = runTick({ hook_event_name: 'PreCompact', thread_id: 'thread-2', account_id: 'acct-1', now_ms: NOW, observed_at_ms: NOW, rateLimits: limits, tokenUsage: { modelContextWindow: 100, last: { totalTokens: 95 } }, authenticated: true }, { config: CODEX_DEFAULTS, store });
+    expect(JSON.parse(compact.output)).toMatchObject({ continue: false });
+    expect(JSON.parse(compact.output).hookSpecificOutput).toBeUndefined();
   });
 
   test('delivery records submitting intent before queue acceptance and preserves stable id', async () => {

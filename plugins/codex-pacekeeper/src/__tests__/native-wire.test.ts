@@ -304,6 +304,26 @@ describe('subscription capacity classification', () => {
     ).toBe('unknown');
   });
 
+  test('an explicit included-capacity observation is required before automation', () => {
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        fresh: true,
+        authenticated: true,
+        includedCapacity: true
+      })
+    ).toBe('included');
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        fresh: true,
+        authenticated: true
+      })
+    ).toBe('unknown');
+  });
+
   test('an unauthenticated account is unsupported, never included', () => {
     expect(
       classifySubscriptionCapacity({

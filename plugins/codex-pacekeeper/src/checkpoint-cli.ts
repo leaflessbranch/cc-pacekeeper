@@ -79,13 +79,15 @@ function selector(args: ParsedArgs, checkpoints: CodexCheckpoints): string | und
 
 function printUsage(): void {
   process.stdout.write([
-    'pacekeeper-checkpoint <save|list|peek|resume|discard|cleanup|handoffs>',
+    'pacekeeper-checkpoint <save|list|peek|claim|resume|ack|discard|cleanup|handoffs>',
     '',
     'save --thread-id <id> [--account-id <id>] [--body <text>|--body-file <file>]',
     'list [--archived]',
     'peek <checkpoint-id>',
-    'resume <checkpoint-id>  (claims and acknowledges the exact id)',
-    'discard <checkpoint-id>',
+    'claim <checkpoint-id> [--thread-id <id>]  (prints body and durable token; leaves file active)',
+    'resume <checkpoint-id> [--thread-id <id>]  (alias for claim; ack is separate)',
+    'ack <checkpoint-id> --token <token> --thread-id <id>',
+    'discard <checkpoint-id> --thread-id <id>',
     'cleanup [--apply]',
     'handoffs list|write <agent-id>|archive <agent-id>',
     '',
@@ -98,8 +100,7 @@ function projectRootFor(args: ParsedArgs): string {
   return resolveProjectRoot({
     cwdFlag: stringFlag(args, 'cwd'),
     transcriptPath: stringFlag(args, 'transcript-path'),
-    processCwd: process.cwd(),
-    allowUnsafe: process.env['CODEX_PACEKEEPER_ALLOW_UNSAFE_ROOT'] === '1'
+    processCwd: process.cwd()
   });
 }
 
@@ -119,10 +120,10 @@ async function main(): Promise<void> {
   if (args.verb === 'help' || args.verb === '--help') { printUsage(); return; }
   const loaded = loadCodexConfig(process.env['XDG_CONFIG_HOME']);
   if (args.verb === 'handoffs') {
-    const root = resolveProjectRoot({ cwdFlag: stringFlag(args, 'cwd'), processCwd: process.cwd(), allowUnsafe: process.env['CODEX_PACEKEEPER_ALLOW_UNSAFE_ROOT'] === '1' });
+    const root = resolveProjectRoot({ cwdFlag: stringFlag(args, 'cwd'), processCwd: process.cwd() });
     const sub = args.positionals[0];
     if (sub === 'list') {
-      const items = listHandoffs(root, loaded.config.checkpoint_dir_name);
+      const items = listHandoffs(root, loaded.config.checkpoint_dir_name, loaded.config.checkpoint_subdir);
       if (items.length === 0) process.stdout.write('No pending handoffs.\n');
       else for (const item of items) process.stdout.write(`${item.frontmatter.agent_id} ${item.frontmatter.agent_type ?? '?'} ${item.frontmatter.trigger} ${item.path}\n`);
       return;
@@ -130,14 +131,14 @@ async function main(): Promise<void> {
     const agentId = args.positionals[1];
     if (!agentId) throw new Error('handoffs requires an agent id');
     if (sub === 'archive') {
-      const archived = archiveHandoff(root, loaded.config.checkpoint_dir_name, agentId);
+      const archived = archiveHandoff(root, loaded.config.checkpoint_dir_name, agentId, loaded.config.checkpoint_subdir);
       if (!archived) throw new Error('handoff was not found or could not be archived');
       process.stdout.write(`Archived handoff: ${archived}\n`);
       return;
     }
     if (sub === 'write') {
       const body = bodyFrom(args, await readStdin());
-      const target = writeHandoff({ cwd: root, checkpointDirName: loaded.config.checkpoint_dir_name, agentId, agentType: stringFlag(args, 'agent-type'), trigger: stringFlag(args, 'trigger') ?? 'budget_pause', body });
+      const target = writeHandoff({ cwd: root, checkpointDirName: loaded.config.checkpoint_dir_name, checkpointSubdir: loaded.config.checkpoint_subdir, agentId, agentType: stringFlag(args, 'agent-type'), trigger: stringFlag(args, 'trigger') ?? 'budget_pause', body });
       process.stdout.write(`Wrote handoff: ${target}\n`);
       return;
     }
@@ -176,12 +177,31 @@ async function main(): Promise<void> {
     printEntry(entry);
     return;
   }
-  if (args.verb === 'resume' || args.verb === 'discard') {
+  if (args.verb === 'claim' || args.verb === 'resume') {
     const id = selector(args, checkpoints);
     if (!id) throw new Error(`${args.verb} requires an exact checkpoint id; use list first`);
-    const result = args.verb === 'resume' ? checkpoints.resume(id) : checkpoints.discard(id);
+    const result = checkpoints.claim(id, ownerFrom(args));
+    if (!('id' in result) || !('token' in result)) throw new Error(`checkpoint ${result.status}`);
+    // The active file and claim survive a broken pipe or consumer crash. The
+    // caller must explicitly invoke ack with this token after receipt.
+    process.stdout.write(JSON.stringify({ status: result.status, id: result.id, lane: result.lane, token: result.token, body: result.body }) + '\n');
+    return;
+  }
+  if (args.verb === 'ack') {
+    const id = selector(args, checkpoints);
+    const token = stringFlag(args, 'token');
+    if (!id || !token) throw new Error('ack requires an exact checkpoint id and --token');
+    const result = checkpoints.acknowledge(id, token, ownerFrom(args));
+    if (result.status !== 'resumed' && result.status !== 'already-consumed') throw new Error(`checkpoint ${result.status}`);
+    process.stdout.write(`${result.status === 'already-consumed' ? 'Already consumed' : 'Acknowledged'} checkpoint ${id}\n`);
+    return;
+  }
+  if (args.verb === 'discard') {
+    const id = selector(args, checkpoints);
+    if (!id) throw new Error('discard requires an exact checkpoint id; use list first');
+    const result = checkpoints.discard(id, ownerFrom(args));
     if (result.status !== 'resumed') throw new Error(`checkpoint ${result.status}`);
-    process.stdout.write(`${args.verb === 'resume' ? 'Resumed' : 'Discarded'} checkpoint ${result.id}\n${result.body}\n`);
+    process.stdout.write(`Discarded checkpoint ${result.id}\n${result.body}\n`);
     return;
   }
   if (args.verb === 'cleanup') {

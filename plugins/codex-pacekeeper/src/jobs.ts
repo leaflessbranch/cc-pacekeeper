@@ -171,9 +171,16 @@ export interface QueuedSubmissionRecord {
  * stays ambiguous and non-retryable rather than being reset for another try.
  */
 export function reconcile(job: Job, queued: readonly QueuedSubmissionRecord[]): Job {
-  if (job.state !== 'ambiguous') return job;
+  if (job.state !== 'ambiguous' && job.state !== 'submitting') return job;
   const match = queued.find((record) => record.clientUserMessageId === job.submissionId);
-  if (match === undefined) return job;
+  if (match === undefined) {
+    // A successful queue read that does not contain the stable client id is
+    // still not proof that the message never ran. Preserve the no-replay
+    // boundary, but make the unresolved state visible to later reconciliation.
+    return job.state === 'submitting'
+      ? { ...job, state: 'ambiguous', retryable: false, failureReason: 'submission was not present in the owner queue; execution remains unknown' }
+      : job;
+  }
   return {
     ...job,
     state: 'queued',
@@ -197,6 +204,8 @@ export interface EligibilityInput {
   maxIdleMs?: number;
   /** Strict execution checks fail closed when a required fact is absent. */
   strict?: boolean;
+  /** When false, pending-work is deliberately outside this job's contract. */
+  requirePending?: boolean;
 }
 
 /**
@@ -222,7 +231,7 @@ export function cancelIf(job: Job, input: EligibilityInput): Job {
   if (input.capacity !== undefined && input.capacity !== 'included') {
     return cancel(`subscription capacity is ${input.capacity}, not confirmed included`);
   }
-  if (input.pendingWork === false) return cancel('no pending work remains');
+  if (input.requirePending !== false && input.pendingWork === false) return cancel('no pending work remains');
   if (input.ownerLive === false) return cancel('the existing owner is no longer live');
   if (input.fresh === false) return cancel('native eligibility facts are stale');
   if (input.maxIdleMs !== undefined) {
@@ -235,7 +244,7 @@ export function cancelIf(job: Job, input: EligibilityInput): Job {
   if (input.strict === true) {
     if (input.enabled === undefined) return cancel('keepalive eligibility is unknown');
     if (input.capacity === undefined) return cancel('subscription capacity is unknown');
-    if (input.pendingWork === undefined) return cancel('pending-work eligibility is unknown');
+    if (input.requirePending !== false && input.pendingWork === undefined) return cancel('pending-work eligibility is unknown');
     if (input.ownerLive === undefined) return cancel('owner liveness is unknown');
     if (input.fresh === undefined) return cancel('native freshness is unknown');
     if (input.maxIdleMs !== undefined && input.idleForMs === undefined) return cancel('idle duration is unknown');
