@@ -119,6 +119,32 @@ describe('reminderMetersToFire', () => {
         expect(keyFor(r2)).not.toBe('window-1-key');
     });
 
+    // The lookup-root memo inside the tick must key on the cwd it is given:
+    // an unkeyed memo would answer for the FIRST cwd this process ever saw,
+    // and every call here passes a fresh temp dir.
+    test('two different cwds are resolved independently', () => {
+        const snap = weeklySnap(72);
+        const other = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-unit-other-'));
+        try {
+            const r = weeklyReading(snap);
+            const covered: SessionEntry = {
+                sessionStartedAt: 0, lastEventAt: 0,
+                reminderCoverage: { weekly: { level: 'warn', resetKey: keyFor(r) } }
+            };
+            // A checkpoint in `other` covers the level only for `other`.
+            saveCheckpoint({
+                cwd: other, checkpointDirName: cfg.checkpoint_dir_name,
+                frontmatter: { name: 'lane', meters: { weekly_pct: 72, weekly_resets_at: r.resetsAt } },
+                body: '## Goal\nG\n'
+            });
+            expect(reminderMetersToFire(undefined, snap, other, cfg)).toHaveLength(0);
+            expect(reminderMetersToFire(undefined, snap, CWD, cfg).map(m => m.meter)).toContain('weekly');
+            expect(reminderMetersToFire(covered, snap, other, cfg)).toHaveLength(0);
+        } finally {
+            fs.rmSync(other, { recursive: true, force: true });
+        }
+    });
+
     test('ignores stale readings', () => {
         // Reset in the past → five_hour reading is stale, level none.
         const snap = computeSnapshot(

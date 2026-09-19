@@ -19,6 +19,8 @@ export interface CheckpointFrontmatter {
     worktree?: string;
     files_touched?: string[];
     discard_reason?: string;
+    /** True when this save changed the lane's Goal with --goal-changed (see laneGoalAnchor). */
+    goal_changed?: boolean;
     resumed_at?: string;
     resumed_by_session?: string;
     /** ISO time the auto-loop scheduled a wake one-shot for (block reset + wake_delay_min). */
@@ -154,7 +156,10 @@ function parseYaml(yaml: string): Record<string, unknown> {
                 const dedented = childLines.map(l => l.replace(/^\s{2}/, '')).join('\n');
                 out[key] = parseYaml(dedented);
             } else {
-                out[key] = {};
+                // `key:` with nothing after it and no indented children is an
+                // empty scalar. (`{}` here made `session_id?: string` a lie for
+                // blank values and broke `=== undefined` guards downstream.)
+                out[key] = '';
             }
             i = j;
         } else {
@@ -297,6 +302,87 @@ export function listArchive(cwd: string, checkpointDirName: string): Checkpoint[
 
 export function listActive(cwd: string, checkpointDirName: string): Checkpoint[] {
     return listLive(cwd, checkpointDirName).filter(c => c.frontmatter.status === 'active');
+}
+
+/**
+ * Newest checkpoint created — or resumed — at or after `sinceMs` BY
+ * `sessionId`, live or archived, any status. Used to re-orient after an
+ * in-session compaction: a checkpoint that was already resumed (archived)
+ * this session is still the best record of the goal — status is about the
+ * registry, not about relevance. Recency counts `resumed_at` as well as
+ * `created_at` (the same rule as laneGoalAnchor): yesterday's checkpoint
+ * picked up this morning is this session's record, and goal lock refuses to
+ * re-save it under a paraphrased goal, so nothing newer may exist.
+ * A checkpoint stamped with another session's id is skipped
+ * (concurrent sessions share a project); one saved without `--session-id`
+ * cannot be attributed away, so it is kept. An explicitly discarded
+ * checkpoint is never "the record".
+ */
+export function newestSince(
+    cwd: string,
+    checkpointDirName: string,
+    sinceMs: number,
+    sessionId: string
+): Checkpoint | null {
+    const stamp = (c: Checkpoint): number => Math.max(
+        Date.parse(c.frontmatter.created_at) || 0,
+        c.frontmatter.resumed_at ? (Date.parse(c.frontmatter.resumed_at) || 0) : 0
+    );
+    // Every checkpoint saved while the skill named a nonexistent env var got a
+    // blank `session_id:` line, and any `--session-id ""` still would. Blank
+    // means unstamped, not someone else's.
+    const mine = (c: Checkpoint): boolean => {
+        const sid = c.frontmatter.session_id;
+        return typeof sid !== 'string' || sid === '' || sid === sessionId;
+    };
+    const candidates = [...listLive(cwd, checkpointDirName), ...listArchive(cwd, checkpointDirName)]
+        .filter(c => stamp(c) > 0 && stamp(c) >= sinceMs && c.frontmatter.discard_reason === undefined)
+        .sort((a, b) => stamp(b) - stamp(a));
+    // This session's own save wins; with none, the newest candidate is still
+    // better than nothing — `claude --continue` can hand the Bash tool the
+    // startup id while the hooks report the resumed one, and a stamp mismatch
+    // must not cost the session its orientation.
+    return candidates.find(mine) ?? candidates[0] ?? null;
+}
+
+/** Full text of the `## Goal` section (trimmed), or null if absent or empty. */
+export function goalSection(body: string): string | null {
+    const m = /(^|\n)## Goal[ \t]*\n([\s\S]*?)(?=\n## |\n*$)/.exec(body);
+    const goal = (m?.[2] ?? '').trim();
+    return goal === '' ? null : goal;
+}
+
+/** Whitespace-insensitive form for comparing goals: re-wrapping is not a change. */
+export function normalizeGoal(goal: string): string {
+    return goal.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The lane's goal anchor: the newest checkpoint in `lane`, live or archived,
+ * whose status is active or resumed, that has a Goal section, and that was
+ * created or resumed within `maxAgeDays`. Superseded and stale ones never
+ * anchor (superseded = replaced by a newer save; stale = the lane went quiet).
+ * Recency counts resumed_at as well as created_at: an old checkpoint picked
+ * up today is today's goal. Null means the lane has no goal to carry forward.
+ */
+export function laneGoalAnchor(
+    cwd: string,
+    checkpointDirName: string,
+    lane: string,
+    maxAgeDays: number,
+    now: number = Date.now()
+): Checkpoint | null {
+    const stamp = (c: Checkpoint): number => Math.max(
+        Date.parse(c.frontmatter.created_at) || 0,
+        c.frontmatter.resumed_at ? (Date.parse(c.frontmatter.resumed_at) || 0) : 0
+    );
+    const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
+    return [...listLive(cwd, checkpointDirName), ...listArchive(cwd, checkpointDirName)]
+        .filter(c => laneOf(c.frontmatter) === lane)
+        .filter(c => c.frontmatter.status === 'active' || c.frontmatter.status === 'resumed')
+        .filter(c => goalSection(c.body) !== null)
+        .filter(c => stamp(c) > 0 && now - stamp(c) <= maxAgeMs)
+        .sort((a, b) => stamp(b) - stamp(a))[0] ?? null;
 }
 
 /**

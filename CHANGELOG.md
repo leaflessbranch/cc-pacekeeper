@@ -4,6 +4,83 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The context meter now follows Claude Code's own compaction point — including the 200K
+hold under `CLAUDE_CODE_DISABLE_1M_CONTEXT` — and an in-session compaction re-orients
+Claude from the checkpoint it saved.
+
+### Added
+
+- **Goal lock.** `save` carries a lane's `## Goal` forward verbatim: a save whose Goal
+  differs from the lane's current goal (its newest active-or-resumed checkpoint within
+  `checkpoint.stale_after_days`) is refused with both goals printed, unless
+  `--goal-changed` is passed, in which case the file records `goal_changed: true` and
+  `list` shows it. Observed live: 15 saves in one lane over 16 hours rewrote the Goal
+  five times and accreted progress notes into it — each rewrite authored from a summary
+  plus the previous checkpoint. Legacy bodies without a Goal section are never refused —
+  and because such a save supersedes the lane's anchor, it also dissolves the lock for that
+  lane until the next save with a Goal section sets a new one.
+
+### Fixed
+
+- **A save from a linked worktree landed in the main checkout's lane.** The checkpoint
+  is written at the main repo root, and the lane was derived from that root's branch —
+  so every worktree session saved into lane `main`. The lane now follows the worktree's
+  own branch (the goal-lock anchor uses the same lane, so repeat saves still match).
+- **Post-compaction tick, first live run.** Two fixes from the first real `/compact` on
+  the branch: the tick now looks for checkpoints at the main repo root (where the CLI
+  anchors them) instead of the hook's worktree cwd, and on a compact `SessionStart` it
+  treats the context as unknown until the `compact_boundary` line is the newest transcript
+  entry — Claude Code fires the hook before flushing that line — and disarms the ctx
+  auto-save explicitly.
+- **Checkpoints were saved without a session id or context meter.** The skill named
+  `$CLAUDE_SESSION_ID` and `$CLAUDE_TRANSCRIPT_PATH`, neither of which exists in the
+  Bash tool (every checkpoint on disk had `session_id:` blank and no `context_pct`).
+  The skill now passes `CLAUDE_CODE_SESSION_ID`, which Claude Code does export, and
+  `save` finds the transcript from the id. `doctor` reports whether the id is visible.
+- **Frontmatter parser: an empty scalar (`session_id:`) now reads as `''`, not `{}`.**
+- **ctx% was ~20% high on 1M-window models.** The denominator was ccstatusline's
+  0.8 × window; Claude Code compacts 1M-window models at ~967K and other models at
+  their full window (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` / the `autoCompactWindow`
+  setting override both). Observed live: three consecutive sessions each read
+  `ctx 91–95%` at a real ~760K, fired the critical auto-save, and were restarted
+  fresh — ~200K of usable context and the whole conversation discarded per cycle,
+  with a one-page checkpoint as the only carrier. ctx% now reads 100% exactly when
+  compaction is due (`autoCompactWindow()` in `ctx-tokens.ts`; `doctor` reports
+  the source).
+- **First tick after compaction no longer reports the discarded conversation's
+  size.** `readContextTokens` recognizes Claude Code's `compact_boundary` transcript
+  entry and reports its `postTokens` until the next assistant turn.
+- **Wake prompt with nothing pending** now ends in one word instead of asking for a
+  `resume` that has nothing to consume (Claude Code 2.1.234+ continues a session at
+  usage-limit reset on its own, so the wake can arrive second).
+
+### Changed
+
+- **SessionStart with `source: "compact"` injects the body of the newest checkpoint
+  saved this session — active or already archived — plus pending handoffs.** The
+  compaction summary is lossy; the checkpoint is the record for goal, constraints
+  and next step. Previously only an *active* checkpoint got a one-line pointer, and
+  a checkpoint resumed in-session is archived, so post-compaction orientation was
+  usually empty. The newest checkpoint is scoped to this session when the save
+  recorded a session id, and never a discarded one. Without a checkpoint this
+  session, Claude is asked to restate the goal and next step and save one at the
+  next natural break.
+- **The ctx-critical directive now says not to start a new session** for a full
+  context; compaction plus re-injection is the designed path. With auto-compaction
+  off (`DISABLE_AUTO_COMPACT` / `autoCompactEnabled: false`) it says the opposite:
+  start a fresh session from the checkpoint before the limit.
+- **Keepalive dedup reads the Stop hook's `session_crons`** (the harness's own cron
+  registry) when present, falling back to the transcript scan on older Claude Code.
+
+### Removed
+
+- **The PreCompact hook.** Per the hooks reference it cannot inject context
+  (`systemMessage` discarded; no `additionalContext`), its only power is blocking
+  compaction, and nothing can run between it and the summary. Its checkpoint nudge
+  never reached Claude.
+
 ## [0.8.2]
 
 One fix: a `Stop`-hook directive no longer runs the turn into Claude Code's

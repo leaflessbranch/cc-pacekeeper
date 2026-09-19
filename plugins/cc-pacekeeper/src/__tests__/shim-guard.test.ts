@@ -15,7 +15,7 @@ function run(shim: string) {
 }
 
 describe('shims without bun on PATH', () => {
-    test.each(['pacekeeper-tick', 'pacekeeper-approve', 'pacekeeper-precompact'])(
+    test.each(['pacekeeper-tick', 'pacekeeper-approve'])(
         'hook shim %s degrades to {} with exit 0', (shim) => {
             const res = run(shim);
             expect(res.status).toBe(0);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { spawnSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -28,7 +28,14 @@ beforeEach(() => {
 
 afterEach(() => {
     try { fs.rmSync(HOME, { recursive: true, force: true }); } catch { /* ignore */ }
+    for (const f of fixtures.splice(0)) {
+        try { fs.rmSync(f, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
 });
+
+/** Git fixtures that must sit outside the tmpdir to pass isUnsafeRoot. */
+const FIXTURE_BASE = path.join(import.meta.dir, '.tick-fixtures');
+const fixtures: string[] = [];
 
 function writeUsage(sessionUsage: number, resetInMs = 3 * 3600_000): string {
     const resetAt = new Date(Date.now() + resetInMs).toISOString();
@@ -49,10 +56,15 @@ function writeTranscript(contextTokens: number): string {
     return p;
 }
 
-function runTick(payload: Record<string, unknown>): string {
+function runTick(payload: Record<string, unknown>, extraEnv: Record<string, string> = {}): string {
+    const env: Record<string, string | undefined> = {
+        ...process.env, HOME, CLAUDE_CONFIG_DIR: path.join(HOME, '.claude'), ...extraEnv
+    };
+    // The developer's own auto-compact window override must not steer ctx% here.
+    delete env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
     const res = spawnSync('bun', ['run', '--silent', TICK], {
         input: JSON.stringify({ cwd: path.join(HOME, 'proj'), ...payload }),
-        env: { ...process.env, HOME, CLAUDE_CONFIG_DIR: path.join(HOME, '.claude') },
+        env,
         encoding: 'utf8'
     });
     return res.stdout ?? '';
@@ -166,10 +178,10 @@ describe('auto-loop (main thread)', () => {
 });
 
 describe('ctx auto-save crossing re-arm [G4]', () => {
-    // usable window = 200k * 0.8 = 160k; critical at 90% = 144k.
+    // denominator = the 200k auto-compact point; critical at 90% = 180k.
     test('fires at critical, stays quiet while armed, re-fires after dipping below warn', () => {
         const sid = newSid();
-        const transcript = writeTranscript(150_000); // ~94% — critical
+        const transcript = writeTranscript(190_000); // ~95% — critical
 
         const first = runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read', transcript_path: transcript });
         expect(first).toContain('Context window at critical');
@@ -179,19 +191,35 @@ describe('ctx auto-save crossing re-arm [G4]', () => {
         expect(second).not.toContain('Context window at critical');
 
         // Compaction happened: ctx drops below warn → disarm.
-        writeTranscript(50_000); // ~31%
+        writeTranscript(50_000); // ~25%
         runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read', transcript_path: transcript });
 
         // Climb again → re-fire.
-        writeTranscript(150_000);
+        writeTranscript(190_000);
         const fourth = runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read', transcript_path: transcript });
         expect(fourth).toContain('Context window at critical');
+    });
+
+    // With auto-compaction off the session stops at the limit instead of
+    // compacting, so "pacekeeper re-injects this checkpoint" would be false.
+    test('with DISABLE_AUTO_COMPACT set, the directive says to start a fresh session', () => {
+        const sid = newSid();
+        const transcript = writeTranscript(190_000);
+        const out = runTick(
+            { session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read', transcript_path: transcript },
+            { DISABLE_AUTO_COMPACT: '1' }
+        );
+        expect(out).toContain('Context window at critical');
+        expect(out).toContain('start a fresh session from that checkpoint');
+        expect(out).not.toContain('re-injects this checkpoint');
+        // There is no compaction to wait for, so it must not say to wait for one.
+        expect(out).not.toContain('until compaction runs');
     });
 
     test('combined 5h+ctx: single auto-loop directive covers both, ctx directive suppressed', () => {
         writeUsage(86, 10 * 60_000);
         const sid = newSid();
-        const transcript = writeTranscript(150_000);
+        const transcript = writeTranscript(190_000);
         const out = runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read', transcript_path: transcript });
         expect(out).toContain('auto-renewal');
         expect(out).toContain('context also critical — one save covers both');
@@ -380,5 +408,161 @@ describe('stop_hook_active continuation guard', () => {
         expect(runTick({ session_id: sid, hook_event_name: 'Stop' })).toContain('auto-renewal');
         expect(runTick({ session_id: sid, hook_event_name: 'Stop' })).toBe('{}');
         expect(runTick({ session_id: sid, hook_event_name: 'Stop' })).toBe('{}');
+    });
+});
+
+describe('SessionStart(compact) re-orientation', () => {
+    /** Transcript: a huge pre-compaction usage, then the boundary Claude Code writes. */
+    function writeCompactedTranscript(): string {
+        const p = path.join(HOME, 't.jsonl');
+        fs.writeFileSync(p, [
+            JSON.stringify({ type: 'assistant', message: { role: 'assistant', usage: { input_tokens: 32, cache_read_input_tokens: 830_000 } } }),
+            JSON.stringify({ type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'auto', preTokens: 830_032, postTokens: 21_531 } })
+        ].join('\n') + '\n');
+        return p;
+    }
+
+    test('injects this session\'s checkpoint body and reports the post-compaction ctx', () => {
+        const sid = newSid();
+        writeUsage(40);
+        const transcript = writeCompactedTranscript();
+        // A prior tick establishes sessionStartedAt.
+        runTick({ session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: 'hi', transcript_path: transcript });
+        saveCheckpoint({
+            cwd: path.join(HOME, 'proj'), checkpointDirName: '.claude-checkpoints',
+            frontmatter: { name: 'lane' }, body: '## Goal\nFinish the migration\n\n## Next\n1. Run bun test\n'
+        });
+        const out = runTick({ session_id: sid, hook_event_name: 'SessionStart', source: 'compact', transcript_path: transcript });
+        const ctx = JSON.parse(out).hookSpecificOutput.additionalContext as string;
+        expect(ctx).toContain('Context was just compacted');
+        expect(ctx).toContain('Finish the migration');
+        expect(ctx).toContain('1. Run bun test');
+        // The 830k pre-compaction reading must not leak into this tick.
+        expect(ctx).not.toContain('Context window at critical');
+        expect(ctx).not.toMatch(/ctx (8|9)\d%/);
+    });
+
+    /** HOME/proj as a git repo with a linked worktree at HOME/proj/.worktrees/wt. */
+    function projectWithWorktree(): { proj: string; wt: string } {
+        // NOT under HOME: everything below the tmpdir is an unsafe root, which
+        // lookupRoot refuses (it is where the CLI would refuse to save).
+        fs.mkdirSync(FIXTURE_BASE, { recursive: true });
+        const proj = fs.mkdtempSync(path.join(FIXTURE_BASE, 'proj-'));
+        fixtures.push(proj);
+        // Sandboxed HOME and no global config: a contributor's gpgsign or
+        // core.hooksPath must not decide whether this test can run.
+        const env = { ...process.env, HOME, GIT_CONFIG_GLOBAL: '/dev/null' };
+        execFileSync('git', ['init', '-q', proj], { env });
+        execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-q', '-m', 'init'], { cwd: proj, env });
+        const wt = path.join(proj, '.worktrees', 'wt');
+        execFileSync('git', ['worktree', 'add', '-q', '-b', 'wt', wt], { cwd: proj, env });
+        return { proj, wt };
+    }
+
+    // The CLI anchors saves at the main repo root, so a session running inside
+    // a linked worktree must look there too.
+    test('a session in a linked worktree finds the checkpoint saved at the main root', () => {
+        const { proj, wt } = projectWithWorktree();
+        const sid = newSid();
+        writeUsage(40);
+        const transcript = writeCompactedTranscript();
+        runTick({ session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: 'hi', transcript_path: transcript, cwd: wt });
+        saveCheckpoint({
+            cwd: proj, checkpointDirName: '.claude-checkpoints',
+            frontmatter: { name: 'lane' }, body: '## Goal\nFinish the migration\n\n## Next\n1. Run bun test\n'
+        });
+        const out = runTick({ session_id: sid, hook_event_name: 'SessionStart', source: 'compact', transcript_path: transcript, cwd: wt });
+        const ctx = JSON.parse(out).hookSpecificOutput.additionalContext as string;
+        expect(ctx).toContain('Finish the migration');
+        expect(ctx).not.toContain('no checkpoint was saved this session');
+    });
+
+    test('the startup banner in a worktree points at the main root checkpoint', () => {
+        const { proj, wt } = projectWithWorktree();
+        writeUsage(40);
+        saveCheckpoint({
+            cwd: proj, checkpointDirName: '.claude-checkpoints',
+            frontmatter: { name: 'lane' }, body: '## Goal\nFinish the migration\n'
+        });
+        const out = runTick({ session_id: newSid(), hook_event_name: 'SessionStart', source: 'startup', cwd: wt });
+        const ctx = JSON.parse(out).hookSpecificOutput.additionalContext as string;
+        expect(ctx).toContain('Active checkpoint found');
+    });
+
+    // Claude Code fires SessionStart(compact) ~200 ms before it flushes the
+    // boundary line, so the transcript still describes the discarded
+    // conversation: report nothing rather than its size.
+    test('a compact start before the boundary is flushed reports no context and disarms the auto-save', () => {
+        const sid = newSid();
+        writeUsage(40);
+        const transcript = writeTranscript(190_000); // pre-compaction size, no boundary yet
+        // Arm ctxAutoSaveArmed the way a real critical climb would.
+        expect(runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read', transcript_path: transcript }))
+            .toContain('Context window at critical');
+        expect(sessionState()[sid]?.ctxAutoSaveArmed).toBe(true);
+
+        const out = runTick({ session_id: sid, hook_event_name: 'SessionStart', source: 'compact', transcript_path: transcript });
+        const ctx = JSON.parse(out).hookSpecificOutput.additionalContext as string;
+        expect(ctx).toContain('Context was just compacted');
+        expect(ctx).not.toContain('Context window at critical');
+        expect(ctx).not.toContain('ctx 9');
+        expect(sessionState()[sid]?.ctxAutoSaveArmed).toBe(false);
+    });
+
+    // The auto-loop fires on the very tick that disarms, and must not re-arm:
+    // the 5h climb happens between the two ticks, in the same block, so the
+    // once-per-block directive is still pending when the compaction lands.
+    test('the auto-loop firing on a compact start does not re-arm the ctx auto-save', () => {
+        const sid = newSid();
+        const resetAt = writeUsage(40); // below auto.five_hour_pct: no auto directive yet
+        const transcript = writeTranscript(190_000);
+        expect(runTick({ session_id: sid, hook_event_name: 'PreToolUse', tool_name: 'Read', transcript_path: transcript }))
+            .toContain('Context window at critical');
+        expect(sessionState()[sid]?.ctxAutoSaveArmed).toBe(true);
+        expect(sessionState()[sid]?.lastAutoFireResetAt).toBeUndefined();
+
+        // Same block (identical sessionResetAt), now above auto.five_hour_pct.
+        fs.writeFileSync(
+            path.join(HOME, '.cache', 'cc-pacekeeper', 'usage.json'),
+            JSON.stringify({ sessionUsage: 90, sessionResetAt: resetAt, weeklyUsage: 40, fetchedAt: Date.now() })
+        );
+        const out = runTick({ session_id: sid, hook_event_name: 'SessionStart', source: 'compact', transcript_path: transcript });
+        expect(out).toContain('5h 90%');
+        // SessionStart does not surface the auto directive's text, but the
+        // once-per-block stamp is written by that block and nothing else, so
+        // it proves the guarded branch ran on this tick.
+        expect(sessionState()[sid]?.lastAutoFireResetAt).toBeTruthy();
+        expect(sessionState()[sid]?.ctxAutoSaveArmed).toBe(false);
+    });
+
+    test('a compact start does not ask the one-time channel onboarding question', () => {
+        fs.mkdirSync(path.join(HOME, '.config', 'cc-pacekeeper'), { recursive: true });
+        fs.writeFileSync(
+            path.join(HOME, '.config', 'cc-pacekeeper', 'config.json'),
+            JSON.stringify({ channels: { preferred: [], target: '', asked: false } })
+        );
+        const sid = newSid();
+        writeUsage(40);
+        const transcript = writeCompactedTranscript();
+        runTick({ session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: 'hi', transcript_path: transcript });
+        const compact = runTick({ session_id: sid, hook_event_name: 'SessionStart', source: 'compact', transcript_path: transcript });
+        expect(compact).not.toContain('No away-channel is configured');
+        // The same state on a real startup still asks — this is a compact-only gate.
+        const startup = runTick({ session_id: newSid(), hook_event_name: 'SessionStart', source: 'startup' });
+        expect(startup).toContain('No away-channel is configured');
+    });
+
+    test('a normal startup still gets the pointer banner, not the body', () => {
+        const sid = newSid();
+        writeUsage(40);
+        saveCheckpoint({
+            cwd: path.join(HOME, 'proj'), checkpointDirName: '.claude-checkpoints',
+            frontmatter: { name: 'lane' }, body: '## Goal\nFinish the migration\n\n## Next\n1. Run bun test\n'
+        });
+        const out = runTick({ session_id: sid, hook_event_name: 'SessionStart', source: 'startup' });
+        const ctx = JSON.parse(out).hookSpecificOutput.additionalContext as string;
+        expect(ctx).toContain('Active checkpoint found');
+        expect(ctx).toContain('checkpoint resume');
+        expect(ctx).not.toContain('1. Run bun test');
     });
 });

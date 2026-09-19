@@ -23,16 +23,21 @@ const HookStdinSchema = z.object({
     // depth). Absent on the main thread — that absence is how tick.ts tells
     // main-thread vs. subagent branches apart.
     agent_id: z.string().optional(),
-    agent_type: z.string().optional()
+    agent_type: z.string().optional(),
+    // Stop only (Claude Code ≥ 2.1.2xx): the session-scoped crons the harness
+    // itself knows about (CronCreate, ScheduleWakeup, /loop), each
+    // { id, schedule, recurring, prompt }. Ground truth for "is a keepalive or
+    // wake job scheduled" — no transcript scan needed when present. Kept
+    // untyped here on purpose: a stricter schema would fail the WHOLE stdin
+    // parse on one odd entry and silently no-op the tick. keepalive.ts
+    // validates entries one by one.
+    session_crons: z.array(z.unknown()).optional()
 });
 
 export type HookStdin = z.infer<typeof HookStdinSchema>;
 
-export async function readStdinJson(): Promise<HookStdin> {
-    let raw = '';
-    for await (const chunk of process.stdin) {
-        raw += chunk.toString();
-    }
+/** Pure parser for the hook's stdin JSON. Anything unparseable is `{}`. */
+export function parseHookStdin(raw: string): HookStdin {
     if (raw.trim() === '') return {};
     try {
         const parsed = HookStdinSchema.safeParse(JSON.parse(raw));
@@ -40,6 +45,14 @@ export async function readStdinJson(): Promise<HookStdin> {
     } catch {
         return {};
     }
+}
+
+export async function readStdinJson(): Promise<HookStdin> {
+    let raw = '';
+    for await (const chunk of process.stdin) {
+        raw += chunk.toString();
+    }
+    return parseHookStdin(raw);
 }
 
 export function emitAdditionalContext(eventName: string, text: string): void {

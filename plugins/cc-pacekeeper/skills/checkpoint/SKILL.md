@@ -9,7 +9,7 @@ Persistent resumable handoff files for cc-pacekeeper. All operations run via the
 
 ## Lanes
 
-Checkpoints are organized into named **lanes** — parallel active checkpoints that don't supersede one another. A lane defaults to the sanitized current git branch name (lowercase, non-`[a-z0-9]` runs collapsed to `-`), or `default` outside a repo / on detached HEAD. Pass `--name <slug>` to `save` to pick a lane explicitly.
+Checkpoints are organized into named **lanes** — parallel active checkpoints that don't supersede one another. A lane defaults to the sanitized current git branch name (lowercase, non-`[a-z0-9]` runs collapsed to `-`), or `default` outside a repo / on detached HEAD; from a linked worktree it is the *worktree's* branch, not the main checkout's, even though the file is written at the main repo root. Pass `--name <slug>` to `save` to pick a lane explicitly.
 
 Saving into a lane only supersedes the *previous active checkpoint in that same lane* — actives in other lanes are left untouched. This is what lets you keep a checkpoint alive on `main` while iterating on a feature branch in a worktree, for instance.
 
@@ -19,7 +19,7 @@ Legacy checkpoints saved before lanes existed have no `name` in frontmatter; the
 
 | Verb | When to use |
 |---|---|
-| `save [--name <slug>]` | User wants to preserve current state. Limits nearing critical. Before `PreCompact`. End of a working session. Lane defaults to the current branch. |
+| `save [--name <slug>] [--goal-changed]` | User wants to preserve current state. Limits nearing critical. When the context meter is at warn or critical (compaction is coming; after it runs, pacekeeper re-injects this checkpoint automatically). End of a working session. Lane defaults to the current branch. |
 | `resume [name\|N] [--worktree]` | New session in a project that has active checkpoints. Bare `resume` picks the sole active lane, or lists all lanes and asks you to choose if there are several (nothing is archived in that case). `--worktree` re-enters (or creates) a worktree for the resumed checkpoint afterward. |
 | `peek <name\|N>` | Preview a checkpoint's body without archiving or mutating anything — use when checking a lane before committing to resume it. |
 | `list [--archived]` | User asks "what checkpoints do I have here?" or wants to choose a non-default lane to resume. Shows index, lane name, branch, worktree, age, and first Goal line. |
@@ -47,7 +47,9 @@ The CLI expects a markdown body with the canonical sections (Goal / Status / In 
 
 In a Claude Code session, you (Claude) compose the body from the current conversation: the explicit goal the user gave you, the steps already done, the exact in-flight step, the next concrete step, anything blocked on user input, plus relevant plan/PR/file references. Then invoke the CLI with `--body-file` so YAML-unfriendly content (colons, hashes) is safe.
 
-**Always pass `--transcript-path $CLAUDE_TRANSCRIPT_PATH`** (and `--session-id $CLAUDE_SESSION_ID`) when available: frontmatter captures live meter readings, and the CLI uses the transcript to anchor the checkpoint to the project root. <!-- Anchoring: transcript cwd → --cwd → git root → process cwd; refuses transient dirs so the file lands where git can track it. -->
+**The Goal section is locked per lane.** On the first save in a lane, write the user's request in their own words, quoted verbatim, plus at most one line of scope. On every later save in the same lane, copy the lane's Goal **verbatim** — do not paraphrase, shorten, or add progress notes, ETAs, or user quotes to it; those go under Status. The CLI refuses a save whose Goal differs from the lane's current goal (exit 2, both goals printed). Pass `--goal-changed` only when the user explicitly redirected the work in this session; the checkpoint then records `goal_changed: true` and `list` shows it. Never pass the flag to make an error go away.
+
+**Always pass `--session-id "$CLAUDE_CODE_SESSION_ID"`** (Claude Code exports it to the Bash tool; it matches the hook's `session_id`). The CLI finds the session transcript from that id, so frontmatter captures live meter readings and the checkpoint is anchored to the project root; `--transcript-path <path>` is only needed to override that. <!-- Anchoring: transcript cwd → --cwd → git root → process cwd; refuses transient dirs so the file lands where git can track it. -->
 
 > **Anchoring is internal mechanics — never mention `/tmp`, root resolution, or anchoring to the user. Just save and report the saved checkpoint path.**
 

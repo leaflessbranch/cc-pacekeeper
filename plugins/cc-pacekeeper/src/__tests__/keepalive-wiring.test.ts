@@ -30,13 +30,14 @@ function writePendingCheckpoint(cwd: string): void {
         '---\nstatus: active\ncreated_at: 2026-07-04T10:00:00.000Z\n---\n\nwork in progress\n'
     );
 }
-function runStopTick(home: string): string {
+function runStopTick(home: string, extra: Record<string, unknown> = {}): string {
     const res = spawnSync('bun', ['run', TICK], {
         input: JSON.stringify({
             session_id: 'ka-wiring',
             hook_event_name: 'Stop',
             cwd: path.join(home, 'proj'),
-            transcript_path: path.join(home, 't.jsonl')
+            transcript_path: path.join(home, 't.jsonl'),
+            ...extra
         }),
         env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: path.join(home, '.claude') },
         encoding: 'utf8'
@@ -169,5 +170,57 @@ describe('Stop hook keepalive wiring', () => {
         fs.rmSync(home, { recursive: true, force: true });
 
         expect(out).not.toContain('[pacekeeper-keepalive]');
+    });
+
+    test('session_crons with a keepalive job suppresses the schedule directive even with a bare transcript', () => {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-ka-'));
+        fs.mkdirSync(path.join(home, '.cache', 'cc-pacekeeper'), { recursive: true });
+        fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+        fs.writeFileSync(
+            path.join(home, '.cache', 'cc-pacekeeper', 'usage.json'),
+            JSON.stringify({
+                sessionUsage: 45,
+                sessionResetAt: new Date(Date.now() + 3 * 3600_000).toISOString(),
+                weeklyUsage: 40,
+                fetchedAt: Date.now()
+            })
+        );
+        fs.writeFileSync(
+            path.join(home, 't.jsonl'),
+            JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-4-8', role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }) + '\n'
+        );
+        writePendingCheckpoint(path.join(home, 'proj'));
+
+        const out = runStopTick(home, {
+            session_crons: [{ id: 'cron-2', schedule: '13,43 * * * *', recurring: true, prompt: '[pacekeeper-keepalive] Keep the prompt cache warm.' }]
+        });
+        fs.rmSync(home, { recursive: true, force: true });
+
+        expect(out).not.toContain('ensure a RECURRING keepalive job exists');
+    });
+
+    test('an empty session_crons array means nothing is scheduled: the directive is emitted', () => {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-ka-'));
+        fs.mkdirSync(path.join(home, '.cache', 'cc-pacekeeper'), { recursive: true });
+        fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+        fs.writeFileSync(
+            path.join(home, '.cache', 'cc-pacekeeper', 'usage.json'),
+            JSON.stringify({
+                sessionUsage: 45,
+                sessionResetAt: new Date(Date.now() + 3 * 3600_000).toISOString(),
+                weeklyUsage: 40,
+                fetchedAt: Date.now()
+            })
+        );
+        fs.writeFileSync(
+            path.join(home, 't.jsonl'),
+            JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-4-8', role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }) + '\n'
+        );
+        writePendingCheckpoint(path.join(home, 'proj'));
+
+        const out = runStopTick(home, { session_crons: [] });
+        fs.rmSync(home, { recursive: true, force: true });
+
+        expect(out).toContain('ensure a RECURRING keepalive job exists');
     });
 });

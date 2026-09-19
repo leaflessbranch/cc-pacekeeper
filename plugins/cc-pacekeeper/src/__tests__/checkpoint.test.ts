@@ -7,10 +7,14 @@ import { execFileSync } from 'child_process';
 
 import {
     archiveCheckpoint,
+    goalSection,
+    laneGoalAnchor,
     laneOf,
     listActive,
     listArchive,
     listLive,
+    newestSince,
+    normalizeGoal,
     readCheckpoint,
     resolveLaneName,
     sanitizeLaneName,
@@ -262,5 +266,217 @@ describe('frontmatter parser', () => {
         expect(back.frontmatter.trigger).toBe('a:b');
         expect((back.frontmatter.meters as Record<string, number>)?.context_pct).toBe(78);
         expect(back.frontmatter.files_touched).toEqual(['src/main.ts', 'src/foo:bar.ts']);
+    });
+});
+
+describe('newestSince', () => {
+    const SID = 'sess-1';
+
+    test('returns null with no checkpoints or only older ones', () => {
+        expect(newestSince(CWD, CHECKPOINT_DIR, Date.now(), SID)).toBeNull();
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'old', created_at: '2026-01-01T00:00:00.000Z' }, body: '## Goal\nOld\n'
+        });
+        expect(newestSince(CWD, CHECKPOINT_DIR, Date.parse('2026-06-01T00:00:00.000Z'), SID)).toBeNull();
+    });
+
+    test('picks the newest by created_at across live and archive, any status', () => {
+        const since = Date.parse('2026-06-01T00:00:00.000Z');
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'lane', created_at: '2026-06-01T01:00:00.000Z' }, body: '## Goal\nFirst\n'
+        });
+        // Superseded by a later save in the same lane → moves to archive/.
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'lane', created_at: '2026-06-01T02:00:00.000Z' }, body: '## Goal\nSecond\n'
+        });
+        // Resume the active one → archived as resumed; it must STILL be found.
+        const active = listActive(CWD, CHECKPOINT_DIR)[0]!;
+        archiveCheckpoint(active, 'resumed', CWD, CHECKPOINT_DIR, { resumed_at: '2026-06-01T02:05:00.000Z' });
+        expect(listActive(CWD, CHECKPOINT_DIR)).toHaveLength(0);
+
+        const found = newestSince(CWD, CHECKPOINT_DIR, since, SID)!;
+        expect(found.body).toContain('Second');
+        expect(found.frontmatter.status).toBe('resumed');
+    });
+
+    // Yesterday's checkpoint, resumed this morning, IS this session's record.
+    // Goal lock refuses a paraphrased re-save, so without this the
+    // post-compaction context would have nothing left to re-inject.
+    test('a checkpoint created before `since` but resumed after it still counts', () => {
+        const since = Date.parse('2026-06-01T00:00:00.000Z');
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'lane', created_at: '2026-05-31T09:00:00.000Z' }, body: '## Goal\nYesterday\n'
+        });
+        archiveCheckpoint(listActive(CWD, CHECKPOINT_DIR)[0]!, 'resumed', CWD, CHECKPOINT_DIR, { resumed_at: '2026-06-01T01:00:00.000Z' });
+        const found = newestSince(CWD, CHECKPOINT_DIR, since, SID);
+        expect(found).not.toBeNull();
+        expect(found!.body).toContain('Yesterday');
+    });
+
+    test('skips another session\'s checkpoint but keeps an unstamped one', () => {
+        const since = Date.parse('2026-06-01T00:00:00.000Z');
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'mine', created_at: '2026-06-01T01:00:00.000Z', session_id: SID },
+            body: '## Goal\nMine\n'
+        });
+        // A concurrent session in the same project saves later — not "this session".
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'theirs', created_at: '2026-06-01T02:00:00.000Z', session_id: 'sess-2' },
+            body: '## Goal\nTheirs\n'
+        });
+        expect(newestSince(CWD, CHECKPOINT_DIR, since, SID)!.body).toContain('Mine');
+
+        // Saved without --session-id: kept, since it cannot be attributed away.
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'unstamped', created_at: '2026-06-01T03:00:00.000Z' },
+            body: '## Goal\nUnstamped\n'
+        });
+        expect(newestSince(CWD, CHECKPOINT_DIR, since, SID)!.body).toContain('Unstamped');
+    });
+
+    // What every checkpoint saved before the skill named the real env var has
+    // on disk: the key with an empty value, from a flag that expanded to
+    // nothing. It is this session's record as much as an unstamped one.
+    test('keeps a checkpoint whose session_id line is present but empty', () => {
+        const since = Date.parse('2026-06-01T00:00:00.000Z');
+        const dir = path.join(CWD, CHECKPOINT_DIR);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'lane-2026-06-01T01-00-00.md'),
+            '---\nstatus: active\ncreated_at: 2026-06-01T01:00:00.000Z\nname: lane\nsession_id:\n---\n\n## Goal\nBlank-stamped\n'
+        );
+        const found = newestSince(CWD, CHECKPOINT_DIR, since, SID);
+        expect(found).not.toBeNull();
+        expect(found!.body).toContain('Blank-stamped');
+    });
+
+    // `claude --continue` can hand the Bash tool the startup id while the hooks
+    // see the resumed one, so a stamp mismatch must never leave a session with
+    // nothing to re-orient from — the concurrent-session guard only decides
+    // WHICH candidate wins when this session has one of its own.
+    test('falls back to the newest candidate when no stamp matches this session', () => {
+        const since = Date.parse('2026-06-01T00:00:00.000Z');
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'lane', created_at: '2026-06-01T01:00:00.000Z', session_id: 'other' },
+            body: '## Goal\nOnly candidate\n'
+        });
+        expect(newestSince(CWD, CHECKPOINT_DIR, since, SID)!.body).toContain('Only candidate');
+    });
+
+    test('prefers this session\'s stamped save over a newer one from another session', () => {
+        const since = Date.parse('2026-06-01T00:00:00.000Z');
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'mine', created_at: '2026-06-01T01:00:00.000Z', session_id: SID },
+            body: '## Goal\nMine\n'
+        });
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'theirs', created_at: '2026-06-01T02:00:00.000Z', session_id: 'other' },
+            body: '## Goal\nTheirs\n'
+        });
+        expect(newestSince(CWD, CHECKPOINT_DIR, since, SID)!.body).toContain('Mine');
+    });
+
+    test('skips a checkpoint the user explicitly discarded', () => {
+        const since = Date.parse('2026-06-01T00:00:00.000Z');
+        saveCheckpoint({
+            cwd: CWD, checkpointDirName: CHECKPOINT_DIR,
+            frontmatter: { name: 'lane', created_at: '2026-06-01T01:00:00.000Z', session_id: SID },
+            body: '## Goal\nDropped\n'
+        });
+        archiveCheckpoint(listActive(CWD, CHECKPOINT_DIR)[0]!, 'superseded', CWD, CHECKPOINT_DIR, { discard_reason: 'wrong track' });
+        expect(newestSince(CWD, CHECKPOINT_DIR, since, SID)).toBeNull();
+    });
+});
+
+describe('goalSection / normalizeGoal', () => {
+    test('extracts the whole Goal section, not just its first line', () => {
+        const body = '## Goal\nShip the thing.\nUser said: "no ETAs".\n\n## Status\n- step 1\n';
+        expect(goalSection(body)).toBe('Ship the thing.\nUser said: "no ETAs".');
+    });
+
+    test('null when there is no Goal section; empty section is null too', () => {
+        expect(goalSection('## Status\n- x\n')).toBeNull();
+        expect(goalSection('## Goal\n\n## Status\n- x\n')).toBeNull();
+    });
+
+    test('normalizeGoal collapses whitespace so re-wrapping is not a change', () => {
+        expect(normalizeGoal('Ship  the\nthing. ')).toBe('Ship the thing.');
+        expect(normalizeGoal('Ship the thing.')).toBe(normalizeGoal('  Ship\n  the thing.\n'));
+    });
+});
+
+describe('laneGoalAnchor', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = Date.parse('2026-06-15T00:00:00.000Z');
+
+    test('null with no checkpoints, or none in this lane', () => {
+        expect(laneGoalAnchor(CWD, CHECKPOINT_DIR, 'lane', 14, now)).toBeNull();
+        saveCheckpoint({ cwd: CWD, checkpointDirName: CHECKPOINT_DIR, frontmatter: { name: 'other', created_at: '2026-06-14T00:00:00.000Z' }, body: '## Goal\nOther\n' });
+        expect(laneGoalAnchor(CWD, CHECKPOINT_DIR, 'lane', 14, now)).toBeNull();
+    });
+
+    test('the active checkpoint in the lane is the anchor', () => {
+        saveCheckpoint({ cwd: CWD, checkpointDirName: CHECKPOINT_DIR, frontmatter: { name: 'lane', created_at: '2026-06-14T00:00:00.000Z' }, body: '## Goal\nA\n' });
+        expect(laneGoalAnchor(CWD, CHECKPOINT_DIR, 'lane', 14, now)?.body).toContain('A');
+    });
+
+    test('a resumed (archived) checkpoint is still the anchor — the post-compaction case', () => {
+        saveCheckpoint({ cwd: CWD, checkpointDirName: CHECKPOINT_DIR, frontmatter: { name: 'lane', created_at: '2026-06-14T00:00:00.000Z' }, body: '## Goal\nA\n' });
+        archiveCheckpoint(listActive(CWD, CHECKPOINT_DIR)[0]!, 'resumed', CWD, CHECKPOINT_DIR, { resumed_at: '2026-06-14T01:00:00.000Z' });
+        expect(listActive(CWD, CHECKPOINT_DIR)).toHaveLength(0);
+        expect(laneGoalAnchor(CWD, CHECKPOINT_DIR, 'lane', 14, now)?.frontmatter.status).toBe('resumed');
+    });
+
+    test('superseded and stale checkpoints are never anchors; the newest eligible wins', () => {
+        saveCheckpoint({ cwd: CWD, checkpointDirName: CHECKPOINT_DIR, frontmatter: { name: 'lane', created_at: '2026-06-13T00:00:00.000Z' }, body: '## Goal\nOld\n' });
+        saveCheckpoint({ cwd: CWD, checkpointDirName: CHECKPOINT_DIR, frontmatter: { name: 'lane', created_at: '2026-06-14T00:00:00.000Z' }, body: '## Goal\nNew\n' });
+        // First is now superseded in archive/; second is active.
+        expect(laneGoalAnchor(CWD, CHECKPOINT_DIR, 'lane', 14, now)?.body).toContain('New');
+        archiveCheckpoint(listActive(CWD, CHECKPOINT_DIR)[0]!, 'stale', CWD, CHECKPOINT_DIR);
+        expect(laneGoalAnchor(CWD, CHECKPOINT_DIR, 'lane', 14, now)).toBeNull();
+    });
+
+    test('older than maxAgeDays by created_at is ignored unless resumed recently', () => {
+        saveCheckpoint({ cwd: CWD, checkpointDirName: CHECKPOINT_DIR, frontmatter: { name: 'lane', created_at: new Date(now - 30 * DAY).toISOString() }, body: '## Goal\nA\n' });
+        expect(laneGoalAnchor(CWD, CHECKPOINT_DIR, 'lane', 14, now)).toBeNull();
+        archiveCheckpoint(listActive(CWD, CHECKPOINT_DIR)[0]!, 'resumed', CWD, CHECKPOINT_DIR, { resumed_at: new Date(now - 1 * DAY).toISOString() });
+        expect(laneGoalAnchor(CWD, CHECKPOINT_DIR, 'lane', 14, now)?.body).toContain('A');
+    });
+
+    test('a checkpoint without a Goal section is not an anchor', () => {
+        saveCheckpoint({ cwd: CWD, checkpointDirName: CHECKPOINT_DIR, frontmatter: { name: 'lane', created_at: '2026-06-14T00:00:00.000Z' }, body: '## Status\n- x\n' });
+        expect(laneGoalAnchor(CWD, CHECKPOINT_DIR, 'lane', 14, now)).toBeNull();
+    });
+});
+
+describe('parseYaml empty scalars', () => {
+    test('a key with no value and no children reads back as an empty string, not {}', () => {
+        const dir = path.join(CWD, CHECKPOINT_DIR);
+        fs.mkdirSync(dir, { recursive: true });
+        const file = path.join(dir, 'lane-2026-06-01T00-00-00Z.md');
+        fs.writeFileSync(file, '---\nstatus: active\ncreated_at: "2026-06-01T00:00:00.000Z"\nsession_id:\nname: lane\n---\n\n## Goal\nG\n');
+        const ckpt = readCheckpoint(file)!;
+        expect(ckpt.frontmatter.session_id).toBe('');
+        expect(ckpt.frontmatter.name).toBe('lane');
+    });
+
+    test('a key followed by indented children is still an object or array', () => {
+        const dir = path.join(CWD, CHECKPOINT_DIR);
+        fs.mkdirSync(dir, { recursive: true });
+        const file = path.join(dir, 'lane-2026-06-01T00-00-01Z.md');
+        fs.writeFileSync(file, '---\nstatus: active\ncreated_at: "2026-06-01T00:00:00.000Z"\nmeters:\n  five_hour_pct: 37\nfiles_touched:\n  - a.ts\n---\n\nbody\n');
+        const fm = readCheckpoint(file)!.frontmatter;
+        expect(fm.meters).toEqual({ five_hour_pct: 37 });
+        expect(fm.files_touched).toEqual(['a.ts']);
     });
 });

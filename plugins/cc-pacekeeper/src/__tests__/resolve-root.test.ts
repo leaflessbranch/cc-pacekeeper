@@ -1,10 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { isUnsafeRoot, projectRootFromTranscript, resolveProjectRoot, worktreeInfo } from '../resolve-root';
+import { isUnsafeRoot, lookupRoot, projectRootFromTranscript, resolveProjectRoot, transcriptPathForSession, worktreeInfo } from '../resolve-root';
 
 // Fixtures must live OUTSIDE the tmp roots and $HOME, since resolveProjectRoot
 // refuses those. We stage them under the test file's own directory tree.
@@ -176,5 +176,84 @@ describe('worktreeInfo', () => {
         // Use the filesystem root's parent-less sentinel: a path with no repo
         // above it. os.tmpdir() is not under a git repo on CI/dev machines.
         expect(worktreeInfo(os.tmpdir())).toBeUndefined();
+    });
+});
+
+describe('lookupRoot', () => {
+    /** A throwaway HOME so git never reads the developer's global config. */
+    const GIT_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-git-home-'));
+    afterAll(() => { try { fs.rmSync(GIT_HOME, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+    /** Keep git off the developer's own ~/.gitconfig (gpg signing, hooksPath). */
+    function gitEnv(): NodeJS.ProcessEnv {
+        return { ...process.env, HOME: GIT_HOME, GIT_CONFIG_GLOBAL: '/dev/null' };
+    }
+
+    test('a linked worktree resolves to the main repo root; a plain dir resolves to itself', () => {
+        const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-plain-'));
+        execFileSync('git', ['init', '-q'], { cwd: TMP, env: gitEnv() });
+        execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-q', '-m', 'init'], { cwd: TMP, env: gitEnv() });
+        const wt = path.join(TMP, '.worktrees', 'wt');
+        execFileSync('git', ['worktree', 'add', '-q', '-b', 'wt', wt], { cwd: TMP, env: gitEnv() });
+        try {
+            expect(lookupRoot(wt)).toBe(fs.realpathSync(TMP));
+            expect(lookupRoot(TMP)).toBe(fs.realpathSync(TMP));
+            // A dir in no repo resolves to itself (verbatim: under the tmpdir
+            // the unsafe-root guard returns the cwd before any realpath).
+            expect(lookupRoot(plain)).toBe(plain);
+        } finally {
+            execFileSync('git', ['worktree', 'remove', '--force', wt], { cwd: TMP, env: gitEnv() });
+            fs.rmSync(plain, { recursive: true, force: true });
+        }
+    });
+
+    // The CLI refuses to save at an unsafe root, so the tick must not look
+    // there either — it would surface another project's checkpoints.
+    test('an unsafe repo root (directly under the tmpdir) falls back to the cwd', () => {
+        const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-unsafe-'));
+        const sub = path.join(repo, 'sub');
+        fs.mkdirSync(sub);
+        try {
+            execFileSync('git', ['init', '-q'], { cwd: repo, env: gitEnv() });
+            expect(lookupRoot(sub)).toBe(sub);
+        } finally {
+            fs.rmSync(repo, { recursive: true, force: true });
+        }
+    });
+
+    // The safe-root path returns through realpath, so a symlinked input comes
+    // back canonical — the tmpdir case above short-circuits at the unsafe
+    // guard and never reaches that line.
+    test('a safe root is returned realpath-resolved, even reached through a symlink', () => {
+        execFileSync('git', ['init', '-q'], { cwd: TMP, env: gitEnv() });
+        const link = path.join(FIXTURE_BASE, `link-${path.basename(TMP)}`);
+        fs.symlinkSync(TMP, link);
+        try {
+            expect(lookupRoot(link)).toBe(fs.realpathSync(TMP));
+        } finally {
+            fs.unlinkSync(link);
+        }
+    });
+
+    test('never throws on a nonexistent dir', () => {
+        expect(lookupRoot('/nonexistent/dir')).toBe('/nonexistent/dir');
+    });
+});
+
+describe('transcriptPathForSession', () => {
+    test('finds <configDir>/projects/*/<sid>.jsonl, newest mtime first; undefined when absent', () => {
+        const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-cfg-'));
+        expect(transcriptPathForSession('sid-1', cfgDir)).toBeUndefined();
+        const a = path.join(cfgDir, 'projects', '-Users-x-a');
+        const b = path.join(cfgDir, 'projects', '-Users-x-b');
+        fs.mkdirSync(a, { recursive: true });
+        fs.mkdirSync(b, { recursive: true });
+        fs.writeFileSync(path.join(a, 'sid-1.jsonl'), '{}\n');
+        fs.writeFileSync(path.join(b, 'sid-1.jsonl'), '{}\n');
+        const old = new Date(Date.now() - 60_000);
+        fs.utimesSync(path.join(a, 'sid-1.jsonl'), old, old);
+        expect(transcriptPathForSession('sid-1', cfgDir)).toBe(path.join(b, 'sid-1.jsonl'));
+        expect(transcriptPathForSession('other', cfgDir)).toBeUndefined();
+        fs.rmSync(cfgDir, { recursive: true, force: true });
     });
 });

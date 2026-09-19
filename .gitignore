@@ -5,3 +5,5 @@ dist/
 bun.lockb
 .claude-checkpoints/
 notes/
+.claude.local.md
+plugins/cc-pacekeeper/src/__tests__/.*-fixtures/

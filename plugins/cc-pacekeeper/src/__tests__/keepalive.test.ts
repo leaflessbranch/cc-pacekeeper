@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { KEEPALIVE_MARKER, keepaliveDirective, onUsageCredits, scanKeepaliveState } from '../keepalive';
+import { KEEPALIVE_MARKER, keepaliveDirective, keepaliveStateFromCrons, onUsageCredits, scanKeepaliveState } from '../keepalive';
 import { DEFAULT_CONFIG } from '../config';
 import type { Snapshot } from '../thresholds';
 
@@ -169,5 +169,25 @@ describe('keepaliveDirective', () => {
         const credits = snapWith([{ meter: 'five_hour', percent: 100, level: 'critical' }], { enabled: true });
         const d = keepaliveDirective({ cfg: DEFAULT_CONFIG, snap: credits, state: { hasPending: false }, nowMs: 0 });
         expect(d.directive).toBeNull();
+    });
+});
+
+describe('keepaliveStateFromCrons', () => {
+    test('null when the harness did not send session_crons (older Claude Code)', () => {
+        expect(keepaliveStateFromCrons(undefined, KEEPALIVE_MARKER)).toBeNull();
+    });
+
+    test('pending with the job id when a cron prompt starts with the marker', () => {
+        const crons = [
+            { id: 'cron-9', schedule: '0 9 * * 1-5', recurring: true, prompt: 'check the build' },
+            { id: 'cron-2', schedule: '13,43 * * * *', recurring: true, prompt: `${KEEPALIVE_MARKER} Keep the prompt cache warm.` }
+        ];
+        expect(keepaliveStateFromCrons(crons, KEEPALIVE_MARKER)).toEqual({ hasPending: true, pendingTaskId: 'cron-2' });
+    });
+
+    test('not pending when no cron carries the marker at the start; malformed entries are skipped', () => {
+        const crons = [{ bogus: 1 }, { id: 'x', prompt: `quoting ${KEEPALIVE_MARKER} mid-text does not count` }];
+        expect(keepaliveStateFromCrons(crons, KEEPALIVE_MARKER)).toEqual({ hasPending: false });
+        expect(keepaliveStateFromCrons([], KEEPALIVE_MARKER)).toEqual({ hasPending: false });
     });
 });

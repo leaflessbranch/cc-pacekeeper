@@ -3,7 +3,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { contextPercent, readContextTokens, readMostRecentModel, resolveUsableContextWindow } from '../ctx-tokens';
+import {
+    autoCompactWindow, contextPercent, ONE_M_AUTOCOMPACT_TOKENS, parseWindowSetting,
+    readAutoCompactEnabled, readAutoCompactSetting, readContextTokens, readMostRecentModel,
+    resolveUsableContextWindow
+} from '../ctx-tokens';
 
 let TRANSCRIPT: string;
 
@@ -60,6 +64,47 @@ describe('readContextTokens', () => {
         fs.writeFileSync(TRANSCRIPT, content);
         const tokens = readContextTokens(TRANSCRIPT)!;
         expect(tokens.inputTotal).toBe(99);
+        expect(tokens.fromCompactBoundary).toBeUndefined();
+    });
+
+    test('after a compact_boundary with no assistant turn since, reports the boundary postTokens', () => {
+        const lines = [
+            { type: 'assistant', message: { usage: { input_tokens: 32, cache_read_input_tokens: 830_000 } } },
+            { type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'auto', preTokens: 830_263, postTokens: 21_531 } },
+            { type: 'user', isCompactSummary: true, message: { content: 'This session is being continued…' } }
+        ];
+        fs.writeFileSync(TRANSCRIPT, lines.map(l => JSON.stringify(l)).join('\n') + '\n');
+        const t = readContextTokens(TRANSCRIPT)!;
+        expect(t.contextLength).toBe(21_531);
+        expect(t.model).toBeUndefined();
+        expect(t.fromCompactBoundary).toBe(true);
+    });
+
+    test('an assistant turn after the boundary takes over from postTokens', () => {
+        const lines = [
+            { type: 'system', subtype: 'compact_boundary', compactMetadata: { postTokens: 21_531 } },
+            { type: 'assistant', message: { usage: { input_tokens: 2, cache_creation_input_tokens: 41_461, cache_read_input_tokens: 36_458 } } }
+        ];
+        fs.writeFileSync(TRANSCRIPT, lines.map(l => JSON.stringify(l)).join('\n') + '\n');
+        expect(readContextTokens(TRANSCRIPT)!.contextLength).toBe(2 + 41_461 + 36_458);
+    });
+
+    test('a boundary without postTokens yields null rather than the stale pre-compaction size', () => {
+        const lines = [
+            { type: 'assistant', message: { usage: { input_tokens: 830_000 } } },
+            { type: 'system', subtype: 'compact_boundary' }
+        ];
+        fs.writeFileSync(TRANSCRIPT, lines.map(l => JSON.stringify(l)).join('\n') + '\n');
+        expect(readContextTokens(TRANSCRIPT)).toBeNull();
+    });
+
+    test('a sidechain boundary is ignored', () => {
+        const lines = [
+            { type: 'assistant', message: { usage: { input_tokens: 500 } } },
+            { type: 'system', subtype: 'compact_boundary', isSidechain: true, compactMetadata: { postTokens: 1 } }
+        ];
+        fs.writeFileSync(TRANSCRIPT, lines.map(l => JSON.stringify(l)).join('\n') + '\n');
+        expect(readContextTokens(TRANSCRIPT)!.contextLength).toBe(500);
     });
 });
 
@@ -122,27 +167,207 @@ describe('readMostRecentModel', () => {
     });
 });
 
+/** Keep the window tests off the developer's own env and settings.json. */
+function isolateAutoCompactEnv(): void {
+    let dir: string;
+    let prevWindow: string | undefined;
+    let prevConfigDir: string | undefined;
+    let prevDisable1M: string | undefined;
+    beforeEach(() => {
+        prevWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+        prevConfigDir = process.env.CLAUDE_CONFIG_DIR;
+        prevDisable1M = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+        delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+        delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-ctx-env-'));
+        process.env.CLAUDE_CONFIG_DIR = dir;
+    });
+    afterEach(() => {
+        if (prevWindow === undefined) delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+        else process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = prevWindow;
+        if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+        else process.env.CLAUDE_CONFIG_DIR = prevConfigDir;
+        if (prevDisable1M === undefined) delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+        else process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = prevDisable1M;
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+}
+
 describe('resolveUsableContextWindow', () => {
-    test('falls back to 80% of 200k (160k) when nothing is known', () => {
-        expect(resolveUsableContextWindow(undefined, 200_000)).toBe(160_000);
+    isolateAutoCompactEnv();
+
+    // The denominator is Claude Code's auto-compact point, not 80% of the window.
+    test('falls back to the full 200k window when nothing is known', () => {
+        expect(resolveUsableContextWindow(undefined, 200_000)).toBe(200_000);
     });
 
-    test('parses a 1M window from a Claude 4-series id and returns 80% of 1M', () => {
-        // ccstatusline parses sizes from the model string; "claude-opus-4-7" has
-        // no size hint, so without an override it falls back to 200k. We hand
-        // the override path the right value via configWindowSize when needed,
-        // and otherwise rely on display-name hints like "[1M]".
-        expect(resolveUsableContextWindow('claude-opus-4-7 [1M]', 200_000)).toBe(800_000);
+    test('a 1M window from a display-name hint compacts at ~967k', () => {
+        expect(resolveUsableContextWindow('claude-opus-4-7 [1M]', 200_000)).toBe(ONE_M_AUTOCOMPACT_TOKENS);
     });
 
-    test('honors a non-default config override', () => {
-        // 300k override → usable = 240k
-        expect(resolveUsableContextWindow(undefined, 300_000)).toBe(240_000);
+    test('honors a non-default config override as the window itself', () => {
+        expect(resolveUsableContextWindow(undefined, 300_000)).toBe(300_000);
     });
 
-    test('ignores config override when it equals the historical default (200k)', () => {
-        // Override 200k is treated as sentinel; model-parse takes over.
-        expect(resolveUsableContextWindow('claude-opus [1M]', 200_000)).toBe(800_000);
+    test('ignores a config override equal to the historical default (200k)', () => {
+        expect(resolveUsableContextWindow('claude-opus [1M]', 200_000)).toBe(ONE_M_AUTOCOMPACT_TOKENS);
+    });
+
+    // Docs, model-config: with this set, models with a native 1M window are
+    // held at — and compact at — the 200K boundary.
+    test('CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds a 1M model at the 200k boundary', () => {
+        const prev = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+        process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1';
+        try {
+            expect(resolveUsableContextWindow('claude-opus [1M]', 200_000)).toBe(200_000);
+        } finally {
+            if (prev === undefined) delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+            else process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = prev;
+        }
+    });
+
+    test('CLAUDE_CODE_AUTO_COMPACT_WINDOW in the environment wins', () => {
+        const prev = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+        process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = '500000';
+        try {
+            expect(resolveUsableContextWindow('claude-opus [1M]', 200_000)).toBe(500_000);
+        } finally {
+            if (prev === undefined) delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+            else process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = prev;
+        }
+    });
+});
+
+describe('autoCompactWindow', () => {
+    isolateAutoCompactEnv();
+
+    test('model default: 1M windows compact at 967k, smaller windows at the window', () => {
+        expect(autoCompactWindow(1_000_000, {}, null)).toEqual({ tokens: 967_000, source: 'model-default' });
+        expect(autoCompactWindow(200_000, {}, null)).toEqual({ tokens: 200_000, source: 'model-default' });
+    });
+
+    test('env overrides settings, settings override the model default, both capped at the window', () => {
+        expect(autoCompactWindow(1_000_000, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000' }, 300_000))
+            .toEqual({ tokens: 400_000, source: 'env' });
+        expect(autoCompactWindow(1_000_000, {}, 300_000)).toEqual({ tokens: 300_000, source: 'settings' });
+        expect(autoCompactWindow(200_000, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '900000' }, null))
+            .toEqual({ tokens: 200_000, source: 'env' });
+    });
+
+    test('an unparseable env value is ignored', () => {
+        expect(autoCompactWindow(1_000_000, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'lots' }, null).source).toBe('model-default');
+    });
+
+    // The env var takes a plain token count only (docs, env-vars reference):
+    // `500k` reads as `500`, which then clamps to the documented 100K floor.
+    test('the env var is a plain integer: 500k reads as 500 and clamps to the floor', () => {
+        expect(autoCompactWindow(1_000_000, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500k' }, null))
+            .toEqual({ tokens: 100_000, source: 'env' });
+    });
+
+    test('env and settings values clamp to [100K, 1M] before the window cap', () => {
+        expect(autoCompactWindow(1_000_000, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '50000' }, null))
+            .toEqual({ tokens: 100_000, source: 'env' });
+        expect(autoCompactWindow(1_000_000, {}, 50_000)).toEqual({ tokens: 100_000, source: 'settings' });
+        expect(autoCompactWindow(1_000_000, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '2000000' }, null))
+            .toEqual({ tokens: 1_000_000, source: 'env' });
+        expect(autoCompactWindow(200_000, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '2000000' }, null))
+            .toEqual({ tokens: 200_000, source: 'env' });
+    });
+});
+
+describe('parseWindowSetting / readAutoCompactSetting', () => {
+    test('accepts the forms /autocompact accepts', () => {
+        expect(parseWindowSetting(200000)).toBe(200_000);
+        expect(parseWindowSetting('200000')).toBe(200_000);
+        expect(parseWindowSetting('500k')).toBe(500_000);
+        expect(parseWindowSetting('1M')).toBe(1_000_000);
+        expect(parseWindowSetting('200')).toBe(200_000);   // bare 100..1000 = thousands
+        expect(parseWindowSetting('')).toBeNull();
+        expect(parseWindowSetting('abc')).toBeNull();
+        expect(parseWindowSetting(-5)).toBeNull();
+        expect(parseWindowSetting(undefined)).toBeNull();
+    });
+
+    // End to end: the settings file, not just the reader, moves the denominator.
+    test('resolveUsableContextWindow honors a settings.json autoCompactWindow', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-ctx-settings-e2e-'));
+        fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ autoCompactWindow: '300k' }));
+        const prevDir = process.env.CLAUDE_CONFIG_DIR;
+        const prevWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+        const prevDisable1M = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+        process.env.CLAUDE_CONFIG_DIR = dir;
+        delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+        delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+        try {
+            expect(resolveUsableContextWindow('claude-opus [1M]', 200_000)).toBe(300_000);
+        } finally {
+            if (prevDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+            else process.env.CLAUDE_CONFIG_DIR = prevDir;
+            if (prevWindow !== undefined) process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = prevWindow;
+            if (prevDisable1M !== undefined) process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = prevDisable1M;
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test('reads autoCompactWindow from settings.json under CLAUDE_CONFIG_DIR', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-ctx-settings-'));
+        fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ autoCompactWindow: '300k' }));
+        const prev = process.env.CLAUDE_CONFIG_DIR;
+        process.env.CLAUDE_CONFIG_DIR = dir;
+        try {
+            expect(readAutoCompactSetting()).toBe(300_000);
+            fs.writeFileSync(path.join(dir, 'settings.json'), '{not json');
+            expect(readAutoCompactSetting()).toBeNull();
+        } finally {
+            if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+            else process.env.CLAUDE_CONFIG_DIR = prev;
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('readAutoCompactEnabled', () => {
+    /** Run `fn` with an empty config dir and no DISABLE_AUTO_COMPACT. */
+    function isolated(fn: (dir: string) => void): void {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pace-ctx-autocompact-'));
+        const prevDir = process.env.CLAUDE_CONFIG_DIR;
+        const prevDisable = process.env.DISABLE_AUTO_COMPACT;
+        process.env.CLAUDE_CONFIG_DIR = dir;
+        delete process.env.DISABLE_AUTO_COMPACT;
+        try {
+            fn(dir);
+        } finally {
+            if (prevDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+            else process.env.CLAUDE_CONFIG_DIR = prevDir;
+            if (prevDisable === undefined) delete process.env.DISABLE_AUTO_COMPACT;
+            else process.env.DISABLE_AUTO_COMPACT = prevDisable;
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    }
+
+    test('defaults to true; DISABLE_AUTO_COMPACT=1 or true turns it off', () => {
+        isolated(() => {
+            expect(readAutoCompactEnabled()).toBe(true);
+            process.env.DISABLE_AUTO_COMPACT = '1';
+            expect(readAutoCompactEnabled()).toBe(false);
+            process.env.DISABLE_AUTO_COMPACT = 'true';
+            expect(readAutoCompactEnabled()).toBe(false);
+            process.env.DISABLE_AUTO_COMPACT = '0';
+            expect(readAutoCompactEnabled()).toBe(true);
+        });
+    });
+
+    test('honors autoCompactEnabled in settings.json, true on anything unreadable', () => {
+        isolated(dir => {
+            const settings = path.join(dir, 'settings.json');
+            fs.writeFileSync(settings, JSON.stringify({ autoCompactEnabled: false }));
+            expect(readAutoCompactEnabled()).toBe(false);
+            fs.writeFileSync(settings, JSON.stringify({ autoCompactEnabled: true }));
+            expect(readAutoCompactEnabled()).toBe(true);
+            fs.writeFileSync(settings, '{not json');
+            expect(readAutoCompactEnabled()).toBe(true);
+        });
     });
 });
 

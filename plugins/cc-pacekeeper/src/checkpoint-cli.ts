@@ -13,11 +13,15 @@ import {
     readCheckpoint,
     saveCheckpoint,
     ageDays,
+    goalSection,
+    laneGoalAnchor,
+    normalizeGoal,
+    resolveLaneName,
     type Checkpoint
 } from './checkpoint';
 import { contextPercent, readContextTokens, resolveUsableContextWindow } from './ctx-tokens';
 import { readUsageCacheFile } from './vendor/usage-fetch';
-import { projectRootFromTranscript, resolveProjectRoot, worktreeInfo } from './resolve-root';
+import { projectRootFromTranscript, resolveProjectRoot, transcriptPathForSession, worktreeInfo } from './resolve-root';
 import { archiveHandoff, listHandoffs, writeHandoff } from './agent-budget';
 import { formatDoctorReport, runDoctor } from './doctor';
 
@@ -66,12 +70,16 @@ function shortGoal(body: string): string {
     return first || '(empty goal)';
 }
 
+function indent(text: string): string {
+    return text.split('\n').map(l => `    ${l}`).join('\n');
+}
+
 function buildSavePrompt(cwd: string): void {
     // Used when invoked without stdin body content: emit a template to stdout
     // for Claude to fill in and re-invoke with --body.
     const tpl = [
         '## Goal',
-        '<one-line statement of what this session is trying to accomplish>',
+        '<the user\'s request in their own words, quoted verbatim; on later saves in this lane copy the lane goal verbatim — progress goes under Status>',
         '',
         '## Status',
         '<where we are in the plan; bullet list of completed steps>',
@@ -117,12 +125,25 @@ function gatherMeters(transcriptPath: string | undefined, configWindowSize: numb
     return meters;
 }
 
-function verbSave(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): Promise<void> | void {
+/** The --session-id flag, or undefined when absent or expanded to nothing. */
+function sessionIdFlagOf(args: Args): string | undefined {
+    const raw = args.flags['session-id'];
+    return typeof raw === 'string' && raw.trim() !== '' ? raw : undefined;
+}
+
+export function verbSave(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): Promise<void> | void {
     const bodyFromFlag = typeof args.flags.body === 'string' ? args.flags.body : null;
     const bodyFromFile = typeof args.flags['body-file'] === 'string' ? fs.readFileSync(args.flags['body-file'] as string, 'utf8') : null;
     const trigger = (typeof args.flags.trigger === 'string' ? args.flags.trigger : 'user_invoked');
-    const sessionId = typeof args.flags['session-id'] === 'string' ? args.flags['session-id'] : undefined;
-    const transcriptPath = typeof args.flags['transcript-path'] === 'string' ? args.flags['transcript-path'] : undefined;
+    const sidFlag = sessionIdFlagOf(args);
+    // The Bash tool exports the session id but no transcript path; derive it.
+    const sessionTranscript = sidFlag ? transcriptPathForSession(sidFlag) : undefined;
+    // Stamp the id only when it has a transcript: `claude --continue` can hand
+    // the Bash tool the startup id rather than the resumed one, and a stamp no
+    // hook will ever match is worse than none.
+    const sessionId = sessionTranscript ? sidFlag : undefined;
+    const transcriptFlag = typeof args.flags['transcript-path'] === 'string' ? args.flags['transcript-path'] : undefined;
+    const transcriptPath = transcriptFlag ?? sessionTranscript;
     const name = typeof args.flags.name === 'string' ? args.flags.name : undefined;
     const wakeAt = typeof args.flags['wake-at'] === 'string' ? args.flags['wake-at'] : undefined;
     const wakePrompt = typeof args.flags['wake-prompt'] === 'string' ? args.flags['wake-prompt'] : undefined;
@@ -142,21 +163,49 @@ function verbSave(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): 
             return;
         }
 
-        const meters = gatherMeters(transcriptPath, cfg.context_window_size);
-
-        // Provenance: if the session was running in a *linked* worktree, record
-        // the worktree path + its branch so resume can re-enter it. Resolve from
-        // the session's real dir (transcript cwd → process cwd), before `cwd`
-        // was snapped to the main repo root.
+        // Provenance and lane: if the session was running in a *linked*
+        // worktree, record the worktree path + its branch so resume can
+        // re-enter it. Resolve from the session's real dir (transcript cwd →
+        // process cwd), before `cwd` was snapped to the main repo root.
         const sessionDir = (transcriptPath ? projectRootFromTranscript(transcriptPath) : undefined) ?? process.cwd();
         const wt = worktreeInfo(sessionDir);
         const worktreeProvenance = wt?.isWorktree ? wt.worktreeRoot : undefined;
+        // The lane follows the branch the session is ON. Without this the lane
+        // came from `cwd` — the MAIN checkout — so every worktree session saved
+        // into the main branch's lane (observed live: lane `main`).
+        const laneSource = name ?? (wt?.isWorktree ? wt.branch : undefined);
+
+        // Goal lock: a same-lane save carries the lane's Goal forward verbatim.
+        // A changed Goal is refused unless --goal-changed says the user really
+        // redirected the work — the moment where "is this a new goal?" must be
+        // explicit, not a paraphrase drifting one save at a time. Legacy bodies
+        // without a Goal section and lanes with no recent anchor pass through.
+        const lane = resolveLaneName(laneSource, cwd);
+        const anchor = laneGoalAnchor(cwd, cfg.checkpoint_dir_name, lane, cfg.checkpoint.stale_after_days);
+        const newGoal = goalSection(body);
+        const anchorGoal = anchor ? goalSection(anchor.body) : null;
+        const goalChanged = anchorGoal !== null && newGoal !== null && normalizeGoal(anchorGoal) !== normalizeGoal(newGoal);
+        if (goalChanged && args.flags['goal-changed'] === undefined) {
+            process.stdout.write([
+                `Goal differs from lane "${lane}"'s current goal — nothing saved.`,
+                `Lane goal (${path.basename(anchor!.path)}, ${anchor!.frontmatter.status}):`,
+                indent(anchorGoal!),
+                'This save\'s goal:',
+                indent(newGoal!),
+                'If the user changed the goal this session, re-run with --goal-changed. Otherwise copy the lane goal verbatim into ## Goal and put what changed under ## Status.',
+                ''
+            ].join('\n'));
+            process.exitCode = 2;
+            return;
+        }
+
+        const meters = gatherMeters(transcriptPath, cfg.context_window_size);
 
         const { path: written, supersededPaths } = saveCheckpoint({
             cwd,
             checkpointDirName: cfg.checkpoint_dir_name,
             frontmatter: {
-                name,
+                name: laneSource,
                 session_id: sessionId,
                 trigger,
                 meters: Object.keys(meters).length > 0 ? meters : undefined,
@@ -164,7 +213,8 @@ function verbSave(args: Args, cwd: string, cfg: ReturnType<typeof loadConfig>): 
                 ...(worktreeProvenance ? { worktree: worktreeProvenance } : {}),
                 ...(wt?.isWorktree && wt.branch ? { git_branch: wt.branch } : {}),
                 ...(wakeAt ? { wake_at: wakeAt } : {}),
-                ...(wakePrompt ? { wake_prompt: wakePrompt } : {})
+                ...(wakePrompt ? { wake_prompt: wakePrompt } : {}),
+                ...(goalChanged ? { goal_changed: true } : {})
             },
             body
         });
@@ -187,7 +237,7 @@ export function verbList(args: Args, cwd: string, cfg: ReturnType<typeof loadCon
     }
     const rows = items.map((c, i) => {
         const age = ageDays(c).toFixed(1);
-        const status = c.frontmatter.status;
+        const status = c.frontmatter.status + (c.frontmatter.goal_changed ? ' goal-changed' : '');
         const goal = shortGoal(c.body);
         const name = laneOf(c.frontmatter);
         const branch = c.frontmatter.git_branch ?? '-';
@@ -322,7 +372,10 @@ export function verbResume(args: Args, cwd: string, cfg: ReturnType<typeof loadC
 
     printOrientation(ckpt);
 
-    const sessionId = typeof args.flags['session-id'] === 'string' ? args.flags['session-id'] : undefined;
+    // Same rule as `save`: record the resuming session only when its id is the
+    // one with a transcript (see verbSave).
+    const sidFlag = sessionIdFlagOf(args);
+    const sessionId = sidFlag && transcriptPathForSession(sidFlag) ? sidFlag : undefined;
     const moved = archiveCheckpoint(ckpt, 'resumed', cwd, cfg.checkpoint_dir_name, {
         resumed_at: new Date().toISOString(),
         ...(sessionId ? { resumed_by_session: sessionId } : {})
@@ -470,7 +523,7 @@ function verbHelp(): void {
         'Usage: pacekeeper-checkpoint <verb> [args]',
         '',
         'All verbs accept --cwd <path> to pin the project root explicitly. When',
-        'omitted, the root is resolved from --transcript-path, then the git repo',
+        'omitted, the root is resolved from --transcript-path (or the transcript found via --session-id), then the git repo',
         'root, then the process cwd; transient dirs (/tmp, $HOME, /) are refused.',
         '',
         'Checkpoints are organized into named "lanes" — parallel active checkpoints',
@@ -479,7 +532,7 @@ function verbHelp(): void {
         '',
         'Verbs:',
         '  save [--body <text> | --body-file <path>] [--trigger <kind>] [--name <slug>]',
-        '       [--session-id <id>] [--transcript-path <path>] [--cwd <path>]',
+        '       [--session-id <id>] [--transcript-path <path>] [--cwd <path>] [--goal-changed]',
         '       [--wake-at <iso>] [--wake-prompt <text>]',
         '       Write a new active checkpoint in the given lane (default: current',
         '       branch, sanitized). Only prior actives in the SAME lane are',
@@ -539,9 +592,13 @@ async function main(): Promise<void> {
     // Anchor the checkpoint dir to the real project root — independent of the
     // shell/tmux/cd the CLI was launched from. Throws (caught below) if only a
     // transient dir like /tmp is available.
+    // The session id alone anchors the root, as SKILL.md promises: its
+    // transcript records the cwd the session really runs in.
+    const sidFlag = sessionIdFlagOf(args);
+    const transcriptFlag = typeof args.flags['transcript-path'] === 'string' ? args.flags['transcript-path'] : undefined;
     const cwd = resolveProjectRoot({
         cwdFlag: typeof args.flags.cwd === 'string' ? args.flags.cwd : undefined,
-        transcriptPath: typeof args.flags['transcript-path'] === 'string' ? args.flags['transcript-path'] : undefined,
+        transcriptPath: transcriptFlag ?? (sidFlag ? transcriptPathForSession(sidFlag) : undefined),
         processCwd: process.cwd()
     });
 

@@ -140,6 +140,28 @@ export function scanKeepaliveState(transcriptPath: string): KeepaliveState {
     return scanMarkerCreates(transcriptPath, KEEPALIVE_MARKER);
 }
 
+const SessionCronSchema = z.object({ id: z.string(), prompt: z.string().optional() });
+
+/**
+ * KeepaliveState from the Stop hook's `session_crons` — the harness's own
+ * registry, so it survives /clear and resume where a transcript scan can't.
+ * Null when the field is absent (older Claude Code): callers fall back to
+ * scanKeepaliveState. Entries are validated one by one; a malformed one is
+ * skipped, never fatal. Marker must anchor the prompt start, same rule as
+ * everywhere else (a prompt merely quoting the marker is not a keepalive).
+ */
+export function keepaliveStateFromCrons(crons: unknown[] | undefined, marker: string): KeepaliveState | null {
+    if (crons === undefined) return null;
+    for (const raw of crons) {
+        const c = SessionCronSchema.safeParse(raw);
+        if (!c.success) continue;
+        if ((c.data.prompt ?? '').trimStart().startsWith(marker)) {
+            return { hasPending: true, pendingTaskId: c.data.id };
+        }
+    }
+    return { hasPending: false };
+}
+
 /** True when the account is drawing on usage credits and the cache TTL is short
  * (5m) rather than the subscription 1h — keepalive is pointless/off then.
  * Heuristic (user-approved): extra usage enabled AND a plan meter is exhausted. */

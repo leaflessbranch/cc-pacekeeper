@@ -12,11 +12,15 @@ ccstatusline shows usage to *you*. cc-pacekeeper injects those same numbers into
 
 Three meters tracked:
 
-- **Context window %** — current conversation token usage
+- **Context window %** — current conversation tokens as a fraction of Claude Code's auto-compact window (100% = compaction due)
 - **5-hour session block %** — Anthropic rolling window
 - **Weekly limits** — all-models, Sonnet-only, Opus-only
 
 Plus **extra-usage credits** state, so when limits approach Claude can ask whether to keep going on pay-as-you-go or checkpoint and resume after reset.
+
+### Unreleased
+
+- **Goal lock** — a checkpoint lane's `## Goal` is carried forward verbatim across saves; `save` refuses a changed goal unless `--goal-changed` is passed, and the change is recorded in the file and shown by `list`. This is what stops a long task from drifting one paraphrase at a time across compactions. It makes a goal change deliberate and visible, not impossible: for a harness-enforced completion condition on an unattended run, use Claude Code's `/goal` alongside — pacekeeper's checkpoint carries the *state*, `/goal` carries the *condition*.
 
 ### New in v0.7 / v0.8
 
@@ -45,8 +49,8 @@ Presence probes are Linux-only for now (macOS support is deferred for lack of a 
 ### New in v0.4
 
 - **Budget-aware subagent trees** — hook state is keyed per agent, so subagents at any depth see their own compact meter ticks (`5h X% · pause at P%`). Each spawned agent gets a budget contract with a spawn-relative pause point: instead of burning the block invisibly, it finishes the current small step, writes a handoff to `.claude-checkpoints/handoffs/<agent_id>.md`, and returns `PAUSED-BUDGET`. Parents record (never re-attempt) paused children's work and pause too. Manage handoffs via `pacekeeper-checkpoint handoffs list|write|archive`.
-- **Autonomous block renewal** — full auto, no asking: at `auto.five_hour_pct` (default 85) of the 5h block, Claude saves a checkpoint immediately and schedules a one-shot wake cron for just after the block resets. The wake prompt re-orients from the checkpoint (consuming it) and re-dispatches paused handoffs. Works even when the trigger tick arrives on an AFK keepalive turn.
-- **Context auto-save** — at ctx critical, an immediate no-asking checkpoint save, re-armed per compaction cycle. Combined with the 5h directive when both fire at once.
+- **Autonomous block renewal** — full auto, no asking: at `auto.five_hour_pct` (default 85) of the 5h block, Claude saves a checkpoint immediately and schedules a one-shot wake cron for just after the block resets. The wake prompt re-orients from the checkpoint (consuming it) and re-dispatches paused handoffs. Works even when the trigger tick arrives on an AFK keepalive turn. Claude Code itself (2.1.234+) continues a session when a usage limit resets; if that happens first, the wake prompt finds nothing pending and ends in one word.
+- **Context auto-save** — at ctx critical, an immediate no-asking checkpoint save, re-armed per compaction cycle. Combined with the 5h directive when both fire at once. After an in-session compaction, the checkpoint saved this session is re-injected in full (SessionStart with source "compact"), so Claude re-orients from the checkpoint rather than the compaction summary alone.
 - **Dispatch advisory** — a one-line caution (never a denial) before spawning agent trees when the 5h block is already tight.
 
 ### New in v0.3

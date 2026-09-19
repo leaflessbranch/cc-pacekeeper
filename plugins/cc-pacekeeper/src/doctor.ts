@@ -2,9 +2,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { configDir, configFile, configValidationIssues, loadConfig } from './config';
 import { crashLogFile, readCrashLog } from './crash-log';
-import { readContextTokens, readMostRecentModel } from './ctx-tokens';
+import { autoCompactWindow, readContextTokens, readMostRecentModel } from './ctx-tokens';
 import { MODEL_INFO_CACHE_FILE, resolveModelInfoAuth } from './model-info';
 import { fuse, probeAll } from './presence';
+import { transcriptPathForSession } from './resolve-root';
 import { stateDir } from './state';
 import { USAGE_ERROR_HINTS } from './thresholds';
 import { getClaudeConfigDir } from './vendor/claude-config-dir';
@@ -89,6 +90,16 @@ export async function runDoctor(opts: { network?: boolean; transcript?: string }
         ? { name: 'context window override', severity: 'warn', detail: `context_window_size=${cfg.context_window_size} overrides EVERY model's fetched window — ctx% is wrong for models with a different window. Remove it from ${configFile()} unless intentional. (The default ${DEFAULT_CONTEXT_WINDOW_SIZE} means "no override".)` }
         : { name: 'context window override', severity: 'ok', detail: 'none — per-model windows from the API apply' });
 
+    // 5b. Auto-compact window: the ctx% denominator follows Claude Code's own
+    // compaction point, so an override here moves where "100%" sits.
+    {
+        const probe = autoCompactWindow(1_000_000);
+        const cannotDetect = ' If this model actually runs at 200K (Bedrock/Vertex, or no 1M entitlement) set context_window_size in the plugin config or CLAUDE_CODE_DISABLE_1M_CONTEXT=1 — pacekeeper cannot detect that itself.';
+        checks.push(probe.source === 'model-default'
+            ? { name: 'auto-compact window', severity: 'ok', detail: `no override — 1M-window models compact at ~967K tokens, others at their full window; ctx% is relative to that.${cannotDetect}` }
+            : { name: 'auto-compact window', severity: 'ok', detail: `${probe.tokens} tokens from ${probe.source === 'env' ? 'CLAUDE_CODE_AUTO_COMPACT_WINDOW' : 'settings.json autoCompactWindow'}, capped at the model's own window — ctx% is relative to the smaller of the two. Only the user-scope settings.json is read; a project or managed autoCompactWindow is not.${cannotDetect}` });
+    }
+
     // 6. Model-info cache.
     try {
         const entries = Object.entries(JSON.parse(fs.readFileSync(MODEL_INFO_CACHE_FILE, 'utf8')) as Record<string, { max_input_tokens: number }>);
@@ -161,6 +172,21 @@ export async function runDoctor(opts: { network?: boolean; transcript?: string }
         }
     } catch {
         checks.push({ name: 'plugin version', severity: 'ok', detail: 'no installed-plugins record readable (dev checkout or non-standard install)' });
+    }
+
+    // 12. Session id visibility. The checkpoint CLI stamps session_id and finds
+    // the transcript from CLAUDE_CODE_SESSION_ID, which Claude Code exports to
+    // the Bash tool. Outside a session it is absent, which is expected.
+    {
+        const sid = process.env.CLAUDE_CODE_SESSION_ID?.trim();
+        if (!sid) {
+            checks.push({ name: 'session env', severity: 'warn', detail: 'CLAUDE_CODE_SESSION_ID not set — expected outside a Claude Code session; inside one, checkpoints would be saved without a session id or live context meter' });
+        } else {
+            const t = transcriptPathForSession(sid);
+            checks.push(t
+                ? { name: 'session env', severity: 'ok', detail: `CLAUDE_CODE_SESSION_ID=${sid}; transcript ${t}` }
+                : { name: 'session env', severity: 'warn', detail: `CLAUDE_CODE_SESSION_ID=${sid} but no transcript found under ${getClaudeConfigDir()}/projects — context meter will be absent from checkpoints, and the id is not stamped (on \`--continue\`/\`--resume\` without an explicit id this variable can be the startup id rather than the resumed one)` });
+        }
     }
 
     return checks;
