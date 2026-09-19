@@ -18,8 +18,10 @@ Three meters tracked:
 
 Plus **extra-usage credits** state, so when limits approach Claude can ask whether to keep going on pay-as-you-go or checkpoint and resume after reset.
 
-### Unreleased
+### New in v0.9
 
+- **Context meter matches Claude Code's compaction point** — ctx% is measured against the window Claude Code actually compacts at (~967K on 1M-window models, the full window otherwise; `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and the `autoCompactWindow` setting override it). It previously divided by 0.8 × window, reading ~95% at a real ~760K and driving checkpoint-and-restart cycles that discarded ~200K of usable context per cycle. 100% now means compaction is due.
+- **Compaction re-orients from the checkpoint** — after an in-session compaction, the checkpoint saved this session is re-injected in full, so Claude picks up from it rather than the compaction summary alone. The PreCompact hook is removed: it cannot inject context, so that nudge never reached Claude.
 - **Goal lock** — a checkpoint lane's `## Goal` is carried forward verbatim across saves; `save` refuses a changed goal unless `--goal-changed` is passed, and the change is recorded in the file and shown by `list`. This is what stops a long task from drifting one paraphrase at a time across compactions. It makes a goal change deliberate and visible, not impossible: for a harness-enforced completion condition on an unattended run, use Claude Code's `/goal` alongside — pacekeeper's checkpoint carries the *state*, `/goal` carries the *condition*.
 
 ### New in v0.7 / v0.8

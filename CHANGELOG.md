@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0]
 
 The context meter now follows Claude Code's own compaction point — including the 200K
 hold under `CLAUDE_CODE_DISABLE_1M_CONTEXT` — and an in-session compaction re-orients
