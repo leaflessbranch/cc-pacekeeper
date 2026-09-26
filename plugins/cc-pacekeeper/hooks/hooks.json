@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/pacekeeper-tick",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/pacekeeper-tick",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/pacekeeper-tick",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/pacekeeper-tick",
             "timeout": 5
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/pacekeeper-tick",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/pacekeeper-tick",
             "timeout": 5
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/pacekeeper-approve",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/pacekeeper-approve",
             "timeout": 5
           }
         ]
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/pacekeeper-refresh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/pacekeeper-refresh",
             "timeout": 2
           }
         ]
@@ -61,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/pacekeeper-tick",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/pacekeeper-tick",
             "timeout": 5
           }
         ]
@@ -72,7 +72,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/pacekeeper-tick",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/pacekeeper-tick",
             "timeout": 5
           }
         ]
@@ -83,7 +83,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/pacekeeper-tick",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/pacekeeper-tick",
             "timeout": 5
           }
         ]

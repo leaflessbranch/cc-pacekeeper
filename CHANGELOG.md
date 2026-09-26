@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2]
+
+### Added
+
+- Plugin-root `README.md` for the directory listing (what it does, requirements, what
+  runs locally, credentials), plus `displayName` and `keywords` in `plugin.json`.
+
+### Fixed
+
+- Hook commands now quote `${CLAUDE_PLUGIN_ROOT}`, so an install path containing a
+  space no longer splits the command (flagged by `claude plugin validate`).
+
 ## [0.9.1]
 
 Directory-submission readiness.
