@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1]
+
+Directory-submission readiness.
+
+### Added
+
+- Plugin icon (`.claude-plugin/icon.svg`) and a marketplace `description`.
+- README **Credentials** section: which credential the plugin reads, the only host it
+  is sent to, and what is cached.
+
 ## [0.9.0]
 
 The context meter now follows Claude Code's own compaction point — including the 200K

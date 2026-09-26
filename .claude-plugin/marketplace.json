@@ -1,5 +1,6 @@
 {
   "name": "cc-pacekeeper",
+  "description": "Usage-limit awareness for Claude Code: context, 5-hour block and weekly limits fed to Claude so it paces itself and checkpoints before hitting a wall.",
   "owner": {
     "name": "leaflessbranch",
     "url": "https://github.com/leaflessbranch"

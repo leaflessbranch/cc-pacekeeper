@@ -125,6 +125,16 @@ To turn presence detection off entirely, set `"presence": { "enabled": false }`.
 
 Checkpoints are written to your project's `.claude-checkpoints/` directory — anchored to the git repo root (or the session's working directory for non-git projects), never a transient dir like `/tmp`. Because they live in the working tree, you can commit, ignore, or delete them as you see fit.
 
+## Credentials
+
+The 5h and weekly meters, and the per-model context window, come from Anthropic's own API, so the plugin reuses the credential Claude Code already holds rather than asking you for one:
+
+- **Where it's read:** Claude Code's OAuth token from `<config dir>/.credentials.json` (Linux) or the macOS Keychain item `Claude Code-credentials` (`src/vendor/usage-fetch.ts`). If there is no OAuth token, `ANTHROPIC_API_KEY` is used for the model-window lookup only (`src/model-info.ts`).
+- **Where it goes:** only to `api.anthropic.com` — `GET /api/oauth/usage` for the limit meters and `GET /v1/models/<id>` for the context window. If `HTTPS_PROXY` is set, the request tunnels through your proxy with TLS end to end.
+- **What's kept:** the token itself is never written anywhere. The usage cache in `~/.cache/cc-pacekeeper/` stores only the response and a hash of the token (to notice account switches).
+
+It isn't a `user_config` option because the token belongs to Claude Code, which rotates it; a pasted copy would go stale within hours.
+
 ## License
 
 MIT. Vendors MIT-licensed modules from [ccstatusline](https://github.com/sirmalloc/ccstatusline) — see [`LICENSE`](LICENSE).
