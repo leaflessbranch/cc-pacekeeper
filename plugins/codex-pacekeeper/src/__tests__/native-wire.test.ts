@@ -1,0 +1,772 @@
+/**
+ * Wire-conformance tests for the native Codex boundary.
+ *
+ * Every expectation here is derived from the pinned 0.160.0 protocol schema
+ * and the pinned release source, not from a hook name or a plausible-looking
+ * field. The legacy fixture in `fixtures/native-0.153.4/` records older
+ * queue shapes that remain useful for drift checks; current 0.160 fields are
+ * asserted directly below.
+ * Protocol drift shows up as a test failure rather than as a silent runtime
+ * null.
+ */
+import { describe, expect, test } from 'bun:test';
+import {
+  NATIVE_PROTOCOL_VERSION,
+  ACCOUNT_READ_METHOD,
+  QUEUE_ADD_METHOD,
+  RATE_LIMITS_READ_METHOD,
+  THREAD_READ_METHOD,
+  NativeClient,
+  buildQueueAddRequest,
+  classifySubscriptionCapacity,
+  findExistingOwner,
+  normalizeNativeCapabilities,
+  parseAccountResponse,
+  parseCompletedTurn,
+  parseInFlightSubmission,
+  parseRateLimitsResponse,
+  parseThreadParentId,
+  parseThreadTokenUsage,
+  type NativeTransport
+} from '../native';
+
+const owner = {
+  ownerId: 'owner-1',
+  pid: 4242,
+  accountId: 'acct-1',
+  threadIds: ['thread-a'],
+  activeThreadIds: [],
+  protocolVersion: NATIVE_PROTOCOL_VERSION
+};
+
+function transportReturning(value: unknown): NativeTransport {
+  return { request: async () => value };
+}
+
+const supported = normalizeNativeCapabilities({
+  version: NATIVE_PROTOCOL_VERSION,
+  methods: [QUEUE_ADD_METHOD, RATE_LIMITS_READ_METHOD]
+});
+
+describe('thread/queue/add response parsing', () => {
+  // ThreadQueueAddResponse requires `queuedSubmission`, an object carrying
+  // `id`, `clientUserMessageId` and `input`. A flat `id` never appears.
+  test('reads the submission id from the nested queuedSubmission object', async () => {
+    const client = new NativeClient(
+      transportReturning({
+        queuedSubmission: {
+          id: 'sub-7',
+          clientUserMessageId: 'msg-a',
+          input: [{ type: 'text', text: '[pacekeeper-keepalive] ping' }]
+        }
+      }),
+      supported,
+      owner
+    );
+    const result = await client.queueExistingThread({
+      threadId: 'thread-a',
+      message: '[pacekeeper-keepalive] ping',
+      clientUserMessageId: 'msg-a'
+    });
+    expect(result.status).toBe('accepted');
+    if (result.status !== 'accepted') throw new Error('unreachable');
+    expect(result.queuedSubmissionId).toBe('sub-7');
+  });
+
+  test('treats a response without queuedSubmission as ambiguous, never accepted', async () => {
+    const client = new NativeClient(transportReturning({ ok: true }), supported, owner);
+    const result = await client.queueExistingThread({
+      threadId: 'thread-a',
+      message: 'ping',
+      clientUserMessageId: 'msg-b'
+    });
+    expect(result.status).toBe('ambiguous');
+  });
+
+  test('rejects an echoed clientUserMessageId that does not match the request', async () => {
+    const client = new NativeClient(
+      transportReturning({
+        queuedSubmission: { id: 'sub-9', clientUserMessageId: 'someone-else', input: [] }
+      }),
+      supported,
+      owner
+    );
+    const result = await client.queueExistingThread({
+      threadId: 'thread-a',
+      message: 'ping',
+      clientUserMessageId: 'msg-c'
+    });
+    expect(result.status).toBe('ambiguous');
+  });
+
+  test('builds params matching ThreadQueueAddParams exactly', () => {
+    const request = buildQueueAddRequest({
+      threadId: 'thread-a',
+      message: 'ping',
+      clientUserMessageId: 'msg-a'
+    });
+    expect(Object.keys(request.params).sort()).toEqual([
+      'clientUserMessageId',
+      'input',
+      'threadId'
+    ]);
+    expect(request.params.input).toEqual([{ type: 'text', text: 'ping' }]);
+  });
+});
+
+describe('native completion correlation', () => {
+  test('requires a full turn and matches the queued client id before counting tools', () => {
+    const response = {
+      thread: {
+        turns: [{
+          id: 'turn-1',
+          status: 'completed',
+          itemsView: 'full',
+          items: [
+            { id: 'user-1', type: 'userMessage', clientId: 'submission-1', content: [] },
+            { id: 'assistant-1', type: 'agentMessage', text: 'pong' }
+          ]
+        }]
+      }
+    };
+    expect(parseCompletedTurn(response, 'submission-1')).toEqual({ turnId: 'turn-1', result: 'pong', toolCalls: 0 });
+    expect(parseCompletedTurn({ ...response, thread: { turns: [{ ...response.thread.turns[0], itemsView: 'summary' }] } }, 'submission-1')).toBeNull();
+    expect(parseCompletedTurn(response, 'other-submission')).toBeNull();
+  });
+
+  test('counts every known effect item and refuses unknown or malformed evidence', () => {
+    const base = {
+      thread: {
+        turns: [{
+          id: 'turn-1',
+          status: 'completed',
+          itemsView: 'full',
+          items: [
+            { id: 'user-1', type: 'userMessage', clientId: 'submission-1', content: [] },
+            { id: 'assistant-1', type: 'agentMessage', text: 'pong' }
+          ]
+        }]
+      }
+    };
+    const turn = base.thread.turns[0];
+    if (turn === undefined) throw new Error('fixture turn missing');
+    const withItem = (item: Record<string, unknown>) => ({
+      thread: { turns: [{ ...turn, items: [...turn.items, item] }] }
+    });
+    expect(parseCompletedTurn(withItem({ id: 'change-1', type: 'fileChange', changes: [], status: 'completed' }), 'submission-1')?.toolCalls).toBe(1);
+    expect(parseCompletedTurn(withItem({ id: 'search-1', type: 'webSearch', query: 'query' }), 'submission-1')?.toolCalls).toBe(1);
+    expect(parseCompletedTurn(withItem({ id: 'future-1', type: 'futureNativeItem' }), 'submission-1')).toBeNull();
+    expect(parseCompletedTurn({ thread: { turns: [{ ...turn, items: [null] }] } }, 'submission-1')).toBeNull();
+  });
+});
+
+describe('native loaded-thread and parent metadata', () => {
+  test('paginates loaded threads and passes the exact cursor from the prior page', async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const endpoint = {
+      ownerId: 'native-control',
+      accountId: 'acct-1',
+      threadIds: [],
+      methods: ['thread/loaded/list'],
+      protocolVersion: NATIVE_PROTOCOL_VERSION
+    };
+    const client = new NativeClient({
+      request: async (method, params) => {
+        calls.push({ method, params });
+        if ((params as { cursor?: string }).cursor === undefined) return { data: ['thread-a'], nextCursor: 'next-page' };
+        return { data: ['thread-b', 'thread-a'], nextCursor: null };
+      }
+    }, supported, endpoint);
+
+    expect(await client.listLoadedThreads()).toEqual(['thread-a', 'thread-b']);
+    expect(calls).toEqual([
+      { method: 'thread/loaded/list', params: { limit: 100 } },
+      { method: 'thread/loaded/list', params: { limit: 100, cursor: 'next-page' } }
+    ]);
+  });
+
+  test('rejects repeated cursors instead of looping or treating a partial list as complete', async () => {
+    const endpoint = {
+      ownerId: 'native-control', accountId: 'acct-1', threadIds: [],
+      methods: ['thread/loaded/list'], protocolVersion: NATIVE_PROTOCOL_VERSION
+    };
+    const client = new NativeClient({ request: async () => ({ data: ['thread-a'], nextCursor: 'same' }) }, supported, endpoint);
+    await expect(client.listLoadedThreads()).rejects.toThrow(/repeated cursor/);
+  });
+
+  test('reads metadata without turns and accepts only the exact child parent edge', async () => {
+    const endpoint = {
+      ownerId: 'native-control', accountId: 'acct-1', threadIds: ['thread-child'],
+      protocolVersion: NATIVE_PROTOCOL_VERSION
+    };
+    const capabilities = normalizeNativeCapabilities({ version: NATIVE_PROTOCOL_VERSION, methods: [THREAD_READ_METHOD] });
+    let request: { method: string; params: unknown } | undefined;
+    const client = new NativeClient({ request: async (method, params) => { request = { method, params }; return { thread: { id: 'thread-child', parentThreadId: 'thread-parent' } }; } }, capabilities, endpoint);
+
+    const response = await client.readThread('thread-child', false);
+    expect(request).toEqual({ method: THREAD_READ_METHOD, params: { threadId: 'thread-child', includeTurns: false } });
+    expect(parseThreadParentId(response, 'thread-child')).toBe('thread-parent');
+    expect(parseThreadParentId({ thread: { id: 'other-child', parentThreadId: 'thread-parent' } }, 'thread-child')).toBeNull();
+    expect(parseThreadParentId({ thread: { id: 'thread-child', parentThreadId: 'thread-child' } }, 'thread-child')).toBeNull();
+  });
+});
+
+describe('pre-completion synthetic turn correlation', () => {
+  const inFlight = {
+    thread: {
+      id: 'thread-a',
+      turns: [{
+        id: 'turn-active',
+        status: 'inProgress',
+        itemsView: 'full',
+        items: [{ id: 'message-1', type: 'userMessage', clientId: 'client-submission-1', content: [] }]
+      }]
+    }
+  };
+
+  test('binds only the exact full active turn and stable user client id', () => {
+    expect(parseInFlightSubmission(inFlight, 'thread-a', 'turn-active')).toEqual({
+      threadId: 'thread-a', turnId: 'turn-active', clientUserMessageId: 'client-submission-1'
+    });
+  });
+
+  test('refuses late, partial, ambiguous and foreign-turn observations', () => {
+    expect(parseInFlightSubmission(inFlight, 'thread-b', 'turn-active')).toBeNull();
+    expect(parseInFlightSubmission(inFlight, 'thread-a', 'turn-late')).toBeNull();
+    expect(parseInFlightSubmission({ thread: { ...inFlight.thread, turns: [{ ...inFlight.thread.turns[0], status: 'completed' }] } }, 'thread-a', 'turn-active')).toBeNull();
+    expect(parseInFlightSubmission({ thread: { ...inFlight.thread, turns: [{ ...inFlight.thread.turns[0], itemsView: 'summary' }] } }, 'thread-a', 'turn-active')).toBeNull();
+    expect(parseInFlightSubmission({ thread: { ...inFlight.thread, turns: [...inFlight.thread.turns, { ...inFlight.thread.turns[0], id: 'another-active' }] } }, 'thread-a', 'turn-active')).toBeNull();
+  });
+});
+
+describe('native capability probing', () => {
+  // These three names appear in no version of the protocol. Reporting them as
+  // probeable invents a native control surface that does not exist.
+  test('never advertises a control the protocol has no method for', () => {
+    const capabilities = normalizeNativeCapabilities({
+      version: NATIVE_PROTOCOL_VERSION,
+      methods: [
+        QUEUE_ADD_METHOD,
+        RATE_LIMITS_READ_METHOD,
+        'turn/start',
+        'turn/start/tools-disabled',
+        'turn/input/suppress',
+        'turn/compact/save-barrier'
+      ]
+    });
+    expect(capabilities.toolDisable).toBe('unsupported');
+    expect(capabilities.preModelSuppression).toBe('unsupported');
+    expect(capabilities.saveBarrier).toBe('unsupported');
+  });
+
+  test('reports a queue on a newer protocol rather than failing closed on drift', () => {
+    const capabilities = normalizeNativeCapabilities({
+      version: '0.154.0',
+      methods: [QUEUE_ADD_METHOD]
+    });
+    expect(capabilities.queue).toBe('supported');
+    expect(capabilities.protocolVersion).toBe('0.154.0');
+    expect(capabilities.versionMatchesPin).toBe(false);
+  });
+
+  test('an unknown method list is unavailable, not unsupported', () => {
+    const capabilities = normalizeNativeCapabilities({ version: '0.153.4' });
+    expect(capabilities.queue).toBe('unavailable');
+    expect(capabilities.accountRateLimits).toBe('unavailable');
+  });
+
+  test('account/read is available only when the owner method list proves it', () => {
+    const capabilities = normalizeNativeCapabilities({ version: NATIVE_PROTOCOL_VERSION, methods: [ACCOUNT_READ_METHOD] });
+    expect(capabilities.accountRead).toBe('supported');
+    expect(normalizeNativeCapabilities({ version: NATIVE_PROTOCOL_VERSION }).accountRead).toBe('unavailable');
+  });
+});
+
+describe('account/read response parsing', () => {
+  test('recognizes a ChatGPT subscription without retaining email', () => {
+    const parsed = parseAccountResponse({
+      account: { type: 'chatgpt', email: 'masked-account', planType: 'plus' },
+      requiresOpenaiAuth: true
+    });
+    expect(parsed).toEqual({
+      kind: 'chatgpt',
+      authenticated: true,
+      planType: 'plus',
+      requiresOpenaiAuth: true,
+      diagnostics: []
+    });
+    expect(JSON.stringify(parsed)).not.toContain('masked-account');
+  });
+
+  test('keeps API-key and Bedrock accounts outside subscription automation', () => {
+    expect(parseAccountResponse({ account: { type: 'apiKey' }, requiresOpenaiAuth: false }).authenticated).toBe(false);
+    expect(parseAccountResponse({ account: { type: 'amazonBedrock' }, requiresOpenaiAuth: false }).authenticated).toBe(false);
+  });
+
+  test('treats missing or malformed account observations as unknown', () => {
+    expect(parseAccountResponse({ requiresOpenaiAuth: true }).authenticated).toBeNull();
+    expect(parseAccountResponse({ account: { type: 'future' }, requiresOpenaiAuth: true }).authenticated).toBeNull();
+    expect(parseAccountResponse(null).authenticated).toBeNull();
+  });
+
+  test('NativeClient reads account mode through the existing owner', async () => {
+    const capabilities = normalizeNativeCapabilities({ version: NATIVE_PROTOCOL_VERSION, methods: [ACCOUNT_READ_METHOD] });
+    let requestedMethod = '';
+    const client = new NativeClient({
+      request: async (method) => { requestedMethod = method; return { account: { type: 'chatgpt', email: null, planType: 'pro' }, requiresOpenaiAuth: true }; }
+    }, capabilities, owner);
+    const parsed = await client.readAccount();
+    expect(requestedMethod).toBe(ACCOUNT_READ_METHOD);
+    expect(parsed.authenticated).toBe(true);
+    expect(parsed.planType).toBe('pro');
+  });
+});
+
+describe('rate limit normalization', () => {
+  const response = {
+    accountId: 'acct-1',
+    rateLimits: {
+      planType: 'plus',
+      primary: { usedPercent: 32, windowDurationMins: 10080, resetsAt: 1_800_000_000 },
+      secondary: { usedPercent: 17, windowDurationMins: 300, resetsAt: 1_700_000_000 },
+      spendControlReached: false
+    }
+  };
+
+  test('orders buckets by duration, not by primary/secondary position', () => {
+    const parsed = parseRateLimitsResponse(response, 1_700_000_100_000);
+    expect(parsed.buckets.map((b) => b.kind)).toEqual(['five_hour', 'weekly']);
+    expect(parsed.buckets.map((b) => b.usedPercent)).toEqual([17, 32]);
+  });
+
+  test('converts second-precision resetsAt to milliseconds', () => {
+    const parsed = parseRateLimitsResponse(response, 1_700_000_100_000);
+    expect(parsed.buckets[0]?.resetsAtMs).toBe(1_700_000_000_000);
+  });
+
+  // A malformed percentage previously became 0, which reads as "no usage at
+  // all" and would authorize spending against a limit we cannot see.
+  test('never fabricates a zero percentage for a malformed window', () => {
+    const parsed = parseRateLimitsResponse(
+      { rateLimits: { primary: { usedPercent: 'not-a-number' } } },
+      1_700_000_100_000
+    );
+    expect(parsed.buckets).toHaveLength(1);
+    expect(parsed.buckets[0]?.usedPercent).toBeNull();
+    expect(parsed.buckets[0]?.valid).toBe(false);
+    expect(parsed.diagnostics.join(' ')).toContain('usedPercent');
+  });
+
+  test('retains an unknown-duration bucket instead of dropping it', () => {
+    const parsed = parseRateLimitsResponse(
+      { rateLimits: { primary: { usedPercent: 5, windowDurationMins: 15 } } },
+      1_700_000_100_000
+    );
+    expect(parsed.buckets[0]?.kind).toBe('unknown');
+    expect(parsed.buckets[0]?.durationMinutes).toBe(15);
+    expect(parsed.buckets[0]?.valid).toBe(true);
+  });
+
+  test('handles primary=weekly with no secondary', () => {
+    const parsed = parseRateLimitsResponse(
+      { rateLimits: { primary: { usedPercent: 60, windowDurationMins: 10080 } } },
+      1_700_000_100_000
+    );
+    expect(parsed.buckets.map((b) => b.kind)).toEqual(['weekly']);
+  });
+
+  // GetAccountRateLimitsResponse carries a multi-bucket map keyed by limit id
+  // alongside the single-bucket compatibility view.
+  test('parses the multi-bucket rateLimitsByLimitId map', () => {
+    const parsed = parseRateLimitsResponse(
+      {
+        rateLimits: { primary: { usedPercent: 17, windowDurationMins: 300 } },
+        rateLimitsByLimitId: {
+          codex: {
+            planType: 'plus',
+            primary: { usedPercent: 17, windowDurationMins: 300 }
+          },
+          other: {
+            primary: { usedPercent: 3, windowDurationMins: 300 }
+          }
+        }
+      },
+      1_700_000_100_000
+    );
+    expect(Object.keys(parsed.byLimitId).sort()).toEqual(['codex', 'other']);
+    expect(parsed.byLimitId['codex']?.buckets[0]?.usedPercent).toBe(17);
+  });
+
+  test('retains the 0.160 ordinary usage permission beside quota buckets', () => {
+    const parsed = parseRateLimitsResponse({
+      accountId: 'acct-1',
+      ordinaryUsageAllowed: true,
+      rateLimitResetCredits: { availableCount: 1, credits: null },
+      rateLimits: { planType: 'plus', primary: { usedPercent: 17, windowDurationMins: 300 } }
+    }, 1_700_000_100_000);
+    expect(parsed.ordinaryUsageAllowed).toBe(true);
+  });
+
+  test('an absent rateLimits field is a diagnostic, not an empty success', () => {
+    const parsed = parseRateLimitsResponse({}, 1_700_000_100_000);
+    expect(parsed.buckets).toEqual([]);
+    expect(parsed.diagnostics.length).toBeGreaterThan(0);
+  });
+
+  test('a malformed top-level response remains an explicit diagnostic', () => {
+    const parsed = parseRateLimitsResponse(null, 1_700_000_100_000);
+    expect(parsed.accountId).toBeNull();
+    expect(parsed.buckets).toEqual([]);
+    expect(parsed.diagnostics.join(' ')).toContain('not an object');
+  });
+});
+
+describe('subscription capacity classification', () => {
+  test('available credits alone never classify as paid spending', () => {
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: null,
+        fresh: true,
+        creditsAvailable: true
+      })
+    ).toBe('unknown');
+  });
+
+  test('an authoritative spend-control transition classifies as paid', () => {
+    expect(
+      classifySubscriptionCapacity({ planType: 'plus', spendControlReached: true, fresh: true, authenticated: true })
+    ).toBe('paid');
+  });
+
+  test('a stale reading is never treated as included capacity', () => {
+    expect(
+      classifySubscriptionCapacity({ planType: 'plus', spendControlReached: false, fresh: false })
+    ).toBe('unknown');
+  });
+
+  test('an explicit included-capacity observation is required before automation', () => {
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        fresh: true,
+        authenticated: true,
+        includedCapacity: true
+      })
+    ).toBe('included');
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        fresh: true,
+        authenticated: true
+      })
+    ).toBe('unknown');
+  });
+
+  test('0.160.0 ordinaryUsageAllowed is the authoritative included-capacity observation', () => {
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        fresh: true,
+        authenticated: true,
+        ordinaryUsageAllowed: true
+      })
+    ).toBe('included');
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        fresh: true,
+        authenticated: true,
+        ordinaryUsageAllowed: null
+      })
+    ).toBe('unknown');
+  });
+
+  test('an unauthenticated account is unsupported, never included', () => {
+    expect(
+      classifySubscriptionCapacity({
+        planType: null,
+        spendControlReached: false,
+        fresh: true,
+        authenticated: false
+      })
+    ).toBe('unsupported');
+  });
+
+  test('an unobserved authentication state never authorizes included capacity', () => {
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        fresh: true
+      })
+    ).toBe('unknown');
+  });
+
+  test('a reached native rate-limit state never reads as included', () => {
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        rateLimitReachedType: 'rate_limit_reached',
+        fresh: true,
+        authenticated: true
+      })
+    ).toBe('unknown');
+  });
+});
+
+describe('current context from native token usage', () => {
+  // ThreadTokenUsage separates `last` (current turn) from `total` (lifetime).
+  // Using `total` as the context meter overstates usage without bound.
+  test('uses the last turn, not the lifetime total, as current context', () => {
+    const context = parseThreadTokenUsage({
+      modelContextWindow: 200_000,
+      last: {
+        inputTokens: 40_000,
+        cachedInputTokens: 30_000,
+        outputTokens: 2_000,
+        reasoningOutputTokens: 500,
+        totalTokens: 42_000
+      },
+      total: {
+        inputTokens: 900_000,
+        cachedInputTokens: 800_000,
+        outputTokens: 50_000,
+        reasoningOutputTokens: 9_000,
+        totalTokens: 950_000
+      }
+    });
+    expect(context.currentTokens).toBe(42_000);
+    expect(context.contextWindow).toBe(200_000);
+    expect(context.usedPercent).toBe(21);
+  });
+
+  test('a missing model window leaves the percentage unknown rather than assuming 200k', () => {
+    const context = parseThreadTokenUsage({
+      modelContextWindow: null,
+      last: {
+        inputTokens: 10,
+        cachedInputTokens: 0,
+        outputTokens: 1,
+        reasoningOutputTokens: 0,
+        totalTokens: 11
+      },
+      total: {
+        inputTokens: 10,
+        cachedInputTokens: 0,
+        outputTokens: 1,
+        reasoningOutputTokens: 0,
+        totalTokens: 11
+      }
+    });
+    expect(context.contextWindow).toBeNull();
+    expect(context.usedPercent).toBeNull();
+  });
+
+  test('reports observed cache fields and distinguishes missing from zero', () => {
+    const context = parseThreadTokenUsage({
+      modelContextWindow: 200_000,
+      last: {
+        inputTokens: 100,
+        cachedInputTokens: 0,
+        outputTokens: 5,
+        reasoningOutputTokens: 0,
+        totalTokens: 105
+      },
+      total: {
+        inputTokens: 100,
+        cachedInputTokens: 0,
+        outputTokens: 5,
+        reasoningOutputTokens: 0,
+        totalTokens: 105
+      }
+    });
+    // cacheWriteInputTokens is optional in the schema: absent must not read 0.
+    expect(context.cache.cachedInputTokens).toBe(0);
+    expect(context.cache.cacheWriteInputTokens).toBeNull();
+  });
+
+  test('a malformed usage payload yields no fabricated context', () => {
+    expect(parseThreadTokenUsage(null).currentTokens).toBeNull();
+    expect(parseThreadTokenUsage({ last: 'nope' }).currentTokens).toBeNull();
+  });
+});
+
+describe('existing-owner selection', () => {
+  const records = [
+    { ...owner, ownerId: 'owner-1', pid: 100 },
+    { ownerId: 'owner-2', pid: 200, accountId: 'acct-2', threadIds: ['thread-a'], protocolVersion: NATIVE_PROTOCOL_VERSION }
+  ];
+
+  // Defaulting liveness to true means a stale record from a dead process is
+  // treated as a live delivery target.
+  test('refuses to assume liveness when no predicate is supplied', () => {
+    expect(findExistingOwner({ records, threadId: 'thread-a', accountId: 'acct-1' }).status)
+      .toBe('unknown');
+  });
+
+  test('selects the single live owner for the known account', () => {
+    const found = findExistingOwner({
+      records,
+      threadId: 'thread-a',
+      accountId: 'acct-1',
+      isAlive: (pid) => pid === 100
+    });
+    expect(found.status).toBe('found');
+    if (found.status !== 'found') throw new Error('unreachable');
+    expect(found.owner.ownerId).toBe('owner-1');
+  });
+
+  test('a dead process is not a delivery target', () => {
+    expect(
+      findExistingOwner({
+        records,
+        threadId: 'thread-a',
+        accountId: 'acct-1',
+        isAlive: () => false
+      }).status
+    ).toBe('absent');
+  });
+
+  test('two live owners for the same account and thread are ambiguous', () => {
+    expect(
+      findExistingOwner({
+        records: [
+          { ...owner, ownerId: 'owner-1', pid: 100 },
+          { ...owner, ownerId: 'owner-3', pid: 300 }
+        ],
+        threadId: 'thread-a',
+        accountId: 'acct-1',
+        isAlive: () => true
+      }).status
+    ).toBe('ambiguous');
+  });
+
+  test('an unknown local account never selects an owner', () => {
+    expect(
+      findExistingOwner({ records, threadId: 'thread-a', accountId: null, isAlive: () => true })
+        .status
+    ).toBe('unknown');
+  });
+
+  test('an explicitly empty active-thread list does not invent a match', () => {
+    expect(
+      findExistingOwner({
+        records: [{ ...owner, activeThreadIds: ['other-thread'] }],
+        threadId: 'thread-a',
+        accountId: 'acct-1',
+        isAlive: () => true
+      }).status
+    ).toBe('absent');
+  });
+});
+
+describe('delivery failure classification', () => {
+  test('a transport timeout is ambiguous and must not authorize a retry', async () => {
+    const client = new NativeClient(
+      { request: async () => { throw new Error('request timed out'); } },
+      supported,
+      owner
+    );
+    const result = await client.queueExistingThread({
+      threadId: 'thread-a',
+      message: 'ping',
+      clientUserMessageId: 'msg-d'
+    });
+    expect(result.status).toBe('ambiguous');
+  });
+
+  // The pinned source treats -32601 and the experimental-required -32600 as
+  // "this server does not support the queue" rather than a delivery failure.
+  test('a method-not-found error is reported as unsupported', async () => {
+    const client = new NativeClient(
+      { request: async () => { throw Object.assign(new Error('Method not found'), { code: -32601 }); } },
+      supported,
+      owner
+    );
+    const result = await client.queueExistingThread({
+      threadId: 'thread-a',
+      message: 'ping',
+      clientUserMessageId: 'msg-e'
+    });
+    expect(result.status).toBe('unsupported');
+  });
+
+  // Upstream only matches message text when a structured code already says
+  // invalid-request. An error with no code is ambiguous, and calling it
+  // "unsupported" would mask a real delivery failure as a stable fact.
+  test('an error naming the method but carrying no code is not unsupported', async () => {
+    const client = new NativeClient(
+      { request: async () => { throw new Error('thread/queue/add went wrong somehow'); } },
+      supported,
+      owner
+    );
+    const result = await client.queueExistingThread({
+      threadId: 'thread-a',
+      message: 'ping',
+      clientUserMessageId: 'msg-g'
+    });
+    expect(result.status).toBe('unavailable');
+  });
+
+  test('invalid-request naming the queue method is unsupported', async () => {
+    const client = new NativeClient(
+      {
+        request: async () => {
+          throw Object.assign(
+            new Error('Invalid request: unknown variant `thread/queue/add`'),
+            { code: -32600 }
+          );
+        }
+      },
+      supported,
+      owner
+    );
+    const result = await client.queueExistingThread({
+      threadId: 'thread-a',
+      message: 'ping',
+      clientUserMessageId: 'msg-h'
+    });
+    expect(result.status).toBe('unsupported');
+  });
+
+  test('an unsupported queue capability never reaches the transport', async () => {
+    let called = false;
+    const client = new NativeClient(
+      { request: async () => { called = true; return {}; } },
+      { ...supported, queue: 'unsupported' },
+      owner
+    );
+    const result = await client.queueExistingThread({
+      threadId: 'thread-a',
+      message: 'ping',
+      clientUserMessageId: 'msg-f'
+    });
+    expect(result.status).toBe('unsupported');
+    expect(called).toBe(false);
+  });
+});
+
+describe('automation safety invariants', () => {
+  // Scope forbids automatic reset-credit consumption. The method exists in the
+  // protocol, so its absence from this module is an asserted boundary.
+  test('the native module exposes no reset-credit consumption path', async () => {
+    const source = await Bun.file(new URL('../native.ts', import.meta.url)).text();
+    expect(source).not.toContain('rateLimitResetCredit/consume');
+    expect(source).not.toContain('sendAddCreditsNudgeEmail');
+  });
+
+  test('control characters in an id are rejected before framing', () => {
+    expect(() =>
+      buildQueueAddRequest({ threadId: 'a\u0000b', message: 'ping', clientUserMessageId: 'm' })
+    ).toThrow();
+    expect(() =>
+      buildQueueAddRequest({ threadId: 't', message: 'ping', clientUserMessageId: '' })
+    ).toThrow();
+  });
+});

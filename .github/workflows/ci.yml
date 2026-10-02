@@ -19,3 +19,77 @@ jobs:
       - run: bun install
       - run: bun test
       - run: bun run typecheck
+
+  # The Codex package installs and runs on its own, with no dependency on a
+  # sibling checkout, so a packaged install is exercised the way a user gets it.
+  codex:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: plugins/codex-pacekeeper
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun test
+      - run: bun run typecheck
+      - name: verify opt-in package wiring in a disposable profile
+        run: |
+          test -x bin/pacekeeper-tick
+          test -x bin/pacekeeper-refresh
+          test -x bin/pacekeeper-checkpoint
+          test -x bin/pacekeeper-worktrees
+          test -x bin/pacekeeper-service
+          test -x bin/pacekeeper-doctor
+          test -x bin/pacekeeper-presence
+          bun -e 'const p=JSON.parse(await Bun.file(".codex-plugin/plugin.json").text()); if (p.name !== "codex-pacekeeper" || p.version !== JSON.parse(await Bun.file("package.json").text()).version || p.optIn !== true) process.exit(1); JSON.parse(await Bun.file("hooks/hooks.json").text())'
+          XDG_CACHE_HOME="$RUNNER_TEMP/codex-cache" XDG_CONFIG_HOME="$RUNNER_TEMP/codex-config" CODEX_HOME="$RUNNER_TEMP/codex-home" bin/pacekeeper-tick <<'EOF'
+          {"hook_event_name":"SessionStart","thread_id":"ci-thread","now_ms":1700000000000}
+          EOF
+
+  # The parity corpus executes the shipped Claude runtime alongside the Codex
+  # package, so it needs the Claude package's dependencies installed too.
+  parity:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+        working-directory: plugins/cc-pacekeeper
+      - run: bun install
+        working-directory: plugins/codex-pacekeeper
+      - run: bun install
+        working-directory: tests/parity
+      - run: bun test
+        working-directory: tests/parity
+      - run: bun run typecheck
+        working-directory: tests/parity
+
+  # The Claude runtime must stay byte-identical on this branch.
+  claude-unchanged:
+    # This safeguard belongs to the Codex parity change. Keeping it scoped to
+    # this pull request avoids freezing unrelated future Claude maintenance.
+    if: github.event_name == 'pull_request' && github.head_ref == 'feat/issue-19-codex-parity'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: verify the Claude package is unchanged from the merge base
+        run: |
+          base=$(git merge-base origin/main HEAD)
+          changed=$(git diff --name-only "$base"...HEAD -- plugins/cc-pacekeeper/)
+          if [ -n "$changed" ]; then
+            echo "the Claude package changed on this branch:"
+            echo "$changed"
+            exit 1
+          fi
+          echo "plugins/cc-pacekeeper is unchanged"

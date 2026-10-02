@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Opt-in Codex refresh entrypoint. The refresh path is bounded and best effort.
+set -euo pipefail
+if ! command -v bun >/dev/null 2>&1; then
+  echo '{}'
+  exit 0
+fi
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+exec bun run --silent "$DIR/../src/refresh.ts"

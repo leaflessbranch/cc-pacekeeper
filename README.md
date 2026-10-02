@@ -77,6 +77,58 @@ Presence probes are Linux-only for now (macOS support is deferred for lack of a 
 
 Requires [Claude Code](https://claude.com/claude-code) and [Bun](https://bun.sh) on PATH. On macOS, the first usage fetch may show a Keychain prompt for `bun` — choose "Always Allow" so the 5h/weekly meters can read Claude Code's OAuth credential. Linux and macOS are supported; native Windows is not (the hook entrypoints are bash).
 
+## Codex package
+
+The repository also contains an independent, explicit opt-in package at
+`plugins/codex-pacekeeper/`. It keeps its configuration input, state, and
+checkpoint lanes separate from the shipped Claude package. Enable it only in a
+Codex profile that has an existing native owner and a locally observed
+subscription account; API-key, paid-credit, unknown-owner, and stale-fact
+states fail closed. Run `bin/pacekeeper-doctor` before enabling hooks and read
+[`docs/codex-acceptance.md`](docs/codex-acceptance.md) for the supported native
+boundary and the capabilities that remain blocked or deferred. The pinned
+quota schema does not make `spendControlReached: false` an included-spending
+guarantee, so automated spending stays disabled until that fact is observed
+authoritatively.
+
+The Codex package never starts a second server for an open thread, never asks
+for a channel destination, and does not write the Claude configuration file.
+Its service can run one pass with `bin/pacekeeper-service run` or keep the
+30-minute cadence with `bin/pacekeeper-service watch`; unknown owner, account,
+capacity, freshness and pending-work facts remain fail-closed. Checkpoint
+`resume`/`claim` prints an exact id plus a durable token and leaves the file
+active until `ack --token ...` confirms receipt. Native no-tools,
+execution-race suppression and model-generated PreCompact save barriers remain
+blocked by the examined interface.
+
+After a verified checkpoint save with `--reset-generation <n>`, a caller with the authoritative account,
+thread, reset timestamp, and reset generation may register its one-shot wake
+with `bin/pacekeeper-service schedule-reset --cwd <project-root>
+--account-id <id> --thread-id <id> --checkpoint-id <id> --reset-at-ms <ms>
+--reset-generation <n>`. The service rechecks that exact checkpoint and native
+reset identity before delivery. Registration does not enable production wake
+execution: native pre-model cancellation remains unsupported. Automatic
+save-to-wake integration and a live reset trace are still acceptance gates.
+
+To install the Codex package from this repository, install its locked runtime
+dependencies first, then register the Codex-only marketplace and add the
+opt-in plugin:
+
+```sh
+(cd plugins/codex-pacekeeper && bun install --frozen-lockfile)
+codex plugin marketplace add <repository-root>
+codex plugin add codex-pacekeeper@pacekeeper-codex
+```
+
+The Codex catalog is `.agents/plugins/marketplace.json`; the Claude catalog is
+unchanged. Disable the installed entry by setting
+`plugins."codex-pacekeeper@pacekeeper-codex".enabled = false` in the Codex
+configuration, or remove it entirely with:
+
+```sh
+codex plugin remove codex-pacekeeper@pacekeeper-codex
+```
+
 ## Usage
 
 Once installed, every prompt gets a one-line status prefix injected into Claude's context:
