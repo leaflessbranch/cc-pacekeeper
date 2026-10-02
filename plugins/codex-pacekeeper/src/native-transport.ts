@@ -1,7 +1,7 @@
 /** Minimal JSON-RPC transport for an already-running Codex app server. */
 import { createHash, randomBytes } from 'crypto';
 import { createConnection, type Socket } from 'net';
-import { NativeClient, type ExistingOwnerRecord, type NativeCapabilities } from './native';
+import { NativeClient, type NativeOwnerEndpoint, type NativeCapabilities } from './native';
 
 export interface JsonRpcTransportOptions {
   endpoint: string;
@@ -358,7 +358,7 @@ export class JsonRpcTransport {
 }
 
 /** Construct a client only for an owner record that already supplied an endpoint. */
-export function clientForExistingOwner(owner: ExistingOwnerRecord, capabilities: NativeCapabilities, timeoutMs = 2000): NativeClient | null {
+export function clientForExistingOwner(owner: NativeOwnerEndpoint, capabilities: NativeCapabilities, timeoutMs = 2000): NativeClient | null {
   const endpoint = owner.socketPath ?? owner.endpoint;
   if (!endpoint) return null;
   return new NativeClient(new JsonRpcTransport({ endpoint, timeoutMs }), capabilities, owner);

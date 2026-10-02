@@ -22,6 +22,7 @@ describe('budget contracts', () => {
       agentId: 'agent-1',
       agentType: 'general-purpose',
       cliPath: '/opt/pacekeeper/bin/pacekeeper-checkpoint',
+      handoffOwner: { accountId: 'acct-1', childThreadId: 'child-1', parentThreadId: 'parent-1' },
       ...spawn
     }, CODEX_DEFAULTS);
     expect(contract.text).toContain('/opt/pacekeeper/bin/pacekeeper-checkpoint');
@@ -50,6 +51,28 @@ describe('budget contracts', () => {
       ...spawn
     }, CODEX_DEFAULTS);
     expect(contract.text.toLowerCase()).toContain('estimate');
+  });
+
+  test('an unverified contract never suggests writing an unowned handoff', () => {
+    const contract = buildContract({
+      agentId: 'agent-1',
+      agentType: 'general-purpose',
+      cliPath: '/opt/pacekeeper/bin/pacekeeper-checkpoint',
+      ...spawn
+    }, CODEX_DEFAULTS);
+    expect(contract.text).toContain('do not create an unowned handoff');
+    expect(contract.text).not.toContain('handoffs write');
+  });
+
+  test('a verified contract binds its handoff command to native account and parent', () => {
+    const contract = buildContract({
+      agentId: 'agent-1',
+      agentType: 'general-purpose',
+      cliPath: '/opt/pacekeeper/bin/pacekeeper-checkpoint',
+      fiveHourPercentAtSpawn: 20,
+      handoffOwner: { accountId: 'acct-1', childThreadId: 'child-1', parentThreadId: 'parent-1' }
+    }, CODEX_DEFAULTS);
+    expect(contract.text).toContain('--account-id acct-1 --thread-id child-1 --parent-thread-id parent-1');
   });
 });
 

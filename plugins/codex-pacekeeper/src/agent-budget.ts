@@ -40,6 +40,18 @@ export interface ContractInput {
    */
   cliPath: string;
   fiveHourPercentAtSpawn: number;
+  handoffOwner?: HandoffOwnership;
+}
+
+export interface HandoffOwnership {
+  accountId: string;
+  childThreadId: string;
+  parentThreadId: string;
+}
+
+export interface HandoffScope {
+  accountId: string;
+  parentThreadId: string;
 }
 
 export interface BudgetContract {
@@ -67,6 +79,15 @@ export function buildContract(input: ContractInput, config: CodexConfig): Budget
     throw new Error('the budget contract requires a valid spawn percentage');
   }
   const pausePercent = effectivePause(config, input.fiveHourPercentAtSpawn);
+  const ownership = input.handoffOwner;
+  if (ownership !== undefined) {
+    safeContractToken(ownership.accountId, 'handoff account id');
+    safeContractToken(ownership.childThreadId, 'handoff child thread id');
+    safeContractToken(ownership.parentThreadId, 'handoff parent thread id');
+  }
+  const handoffCommand = ownership === undefined
+    ? null
+    : `${input.cliPath} handoffs write ${input.agentId} --agent-type ${input.agentType} --account-id ${ownership.accountId} --thread-id ${ownership.childThreadId} --parent-thread-id ${ownership.parentThreadId}`;
   const text = [
     `Budget contract for this subagent (agent_id ${input.agentId}, type ${input.agentType}).`,
     `Pause at ${pausePercent}% of the five-hour block (spawned at about ${input.fiveHourPercentAtSpawn}%),`,
@@ -74,9 +95,10 @@ export function buildContract(input: ContractInput, config: CodexConfig): Budget
     'The five-hour window belongs to the whole account, so any figure describing',
     'what this agent consumed is an estimate of account usage during its life,',
     'not a per-agent measurement.',
-    'On pausing: finish the current small step, do not start a new one, then write',
-    `a handoff with \`${input.cliPath} handoffs write ${input.agentId} --agent-type ${input.agentType}\``,
-    `and return immediately with the literal text ${PAUSE_MARKER} ${input.agentId}.`
+    'On pausing: finish the current small step and do not start a new one,',
+    ...(handoffCommand === null
+      ? [`then return immediately with the literal text ${PAUSE_MARKER} ${input.agentId}. Native account and parent ownership is unavailable; do not create an unowned handoff.`]
+      : [`write a handoff with \`${handoffCommand}\`,`, `then return immediately with the literal text ${PAUSE_MARKER} ${input.agentId}.`])
   ].join('\n');
   return { pausePercent, text };
 }
@@ -166,6 +188,10 @@ export interface HandoffFrontmatter {
   agent_type?: string;
   created_at: string;
   trigger: string;
+  account_id?: string;
+  child_thread_id?: string;
+  parent_thread_id?: string;
+  acknowledged_at?: string;
 }
 
 export interface Handoff {
@@ -184,6 +210,7 @@ export interface WriteHandoffInput {
   agentType?: string;
   trigger: string;
   body: string;
+  ownership?: HandoffOwnership;
 }
 
 function safeSegment(value: string, name: string): string {
@@ -263,7 +290,11 @@ function parseHandoff(file: string): Handoff | null {
         agent_id: values.agent_id,
         created_at: values.created_at,
         trigger: values.trigger ?? 'unknown',
-        ...(values.agent_type ? { agent_type: values.agent_type } : {})
+        ...(values.agent_type ? { agent_type: values.agent_type } : {}),
+        ...(values.account_id ? { account_id: values.account_id } : {}),
+        ...(values.child_thread_id ? { child_thread_id: values.child_thread_id } : {}),
+        ...(values.parent_thread_id ? { parent_thread_id: values.parent_thread_id } : {}),
+        ...(values.acknowledged_at ? { acknowledged_at: values.acknowledged_at } : {})
       },
       body: (match[2] ?? '').trim(),
       mtimeMs: stat.mtimeMs
@@ -273,6 +304,19 @@ function parseHandoff(file: string): Handoff | null {
   }
 }
 
+function handoffOwnership(frontmatter: HandoffFrontmatter): HandoffOwnership | null {
+  const { account_id: accountId, child_thread_id: childThreadId, parent_thread_id: parentThreadId } = frontmatter;
+  if (!accountId || !childThreadId || !parentThreadId) return null;
+  return { accountId, childThreadId, parentThreadId };
+}
+
+function sameHandoffOwnership(left: HandoffOwnership | null, right: HandoffOwnership): boolean {
+  return left !== null
+    && left.accountId === right.accountId
+    && left.childThreadId === right.childThreadId
+    && left.parentThreadId === right.parentThreadId;
+}
+
 /** Persist a handoff before returning the pause marker. */
 export function writeHandoff(input: WriteHandoffInput): string {
   const target = handoffFile(input.cwd, input.checkpointDirName, input.agentId, input.checkpointSubdir);
@@ -280,13 +324,38 @@ export function writeHandoff(input: WriteHandoffInput): string {
   if (input.agentType !== undefined) safeContractToken(input.agentType, 'agent type');
   const trigger = input.trigger || 'budget_pause';
   safeContractToken(trigger, 'handoff trigger');
+  if (input.ownership !== undefined) {
+    safeContractToken(input.ownership.accountId, 'handoff account id');
+    safeContractToken(input.ownership.childThreadId, 'handoff child thread id');
+    safeContractToken(input.ownership.parentThreadId, 'handoff parent thread id');
+  }
+  const existing = parseHandoff(target);
+  if (existing !== null) {
+    const existingOwner = handoffOwnership(existing.frontmatter);
+    if (input.ownership !== undefined) {
+      if (!sameHandoffOwnership(existingOwner, input.ownership)) {
+        throw new Error('handoff exists without matching native account and parent ownership');
+      }
+      if (existing.body !== input.body.trim()) throw new Error('owned handoff already exists with different content');
+      return target;
+    }
+    if (existingOwner !== null) throw new Error('owned handoff cannot be downgraded to an unowned file');
+  }
+  if (input.ownership !== undefined && fs.existsSync(target) && existing === null) {
+    throw new Error('existing handoff is unowned or unreadable and cannot be adopted');
+  }
   fs.mkdirSync(path.dirname(target), { recursive: true });
   assertHandoffConfined(path.resolve(input.cwd), target);
   const frontmatter: HandoffFrontmatter = {
     agent_id: input.agentId,
     ...(input.agentType ? { agent_type: input.agentType } : {}),
     created_at: new Date().toISOString(),
-    trigger
+    trigger,
+    ...(input.ownership ? {
+      account_id: input.ownership.accountId,
+      child_thread_id: input.ownership.childThreadId,
+      parent_thread_id: input.ownership.parentThreadId
+    } : {})
   };
   const content = `---\n${emitHandoffFrontmatter(frontmatter)}\n---\n\n${input.body.trimEnd()}\n`;
   const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
@@ -297,6 +366,9 @@ export function writeHandoff(input: WriteHandoffInput): string {
     if (verified === null || verified.frontmatter.agent_id !== input.agentId || verified.body !== input.body.trim()) {
       throw new Error('handoff verification failed');
     }
+    if (input.ownership !== undefined && !sameHandoffOwnership(handoffOwnership(verified.frontmatter), input.ownership)) {
+      throw new Error('handoff owner verification failed');
+    }
   } catch (error) {
     try { fs.unlinkSync(temp); } catch { /* best effort */ }
     throw error;
@@ -304,7 +376,7 @@ export function writeHandoff(input: WriteHandoffInput): string {
   return target;
 }
 
-export function listHandoffs(cwd: string, checkpointDirName: string, checkpointSubdir = 'codex'): Handoff[] {
+export function listHandoffs(cwd: string, checkpointDirName: string, checkpointSubdir = 'codex', scope?: HandoffScope): Handoff[] {
   const dir = handoffRoot(cwd, checkpointDirName, checkpointSubdir);
   let names: string[];
   try { names = fs.readdirSync(dir); } catch { return []; }
@@ -312,17 +384,57 @@ export function listHandoffs(cwd: string, checkpointDirName: string, checkpointS
     .filter((name) => name.endsWith('.md'))
     .map((name) => parseHandoff(path.join(dir, name)))
     .filter((item): item is Handoff => item !== null)
+    .filter((item) => scope === undefined || (handoffOwnership(item.frontmatter)?.accountId === scope.accountId && handoffOwnership(item.frontmatter)?.parentThreadId === scope.parentThreadId))
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
-export function hasHandoff(cwd: string, checkpointDirName: string, agentId: string, checkpointSubdir = 'codex'): boolean {
-  try { return parseHandoff(handoffFile(cwd, checkpointDirName, agentId, checkpointSubdir)) !== null; } catch { return false; }
+export function hasHandoff(cwd: string, checkpointDirName: string, agentId: string, checkpointSubdir = 'codex', ownership?: HandoffOwnership): boolean {
+  try {
+    const handoff = parseHandoff(handoffFile(cwd, checkpointDirName, agentId, checkpointSubdir));
+    if (handoff === null) return false;
+    return ownership === undefined || sameHandoffOwnership(handoffOwnership(handoff.frontmatter), ownership);
+  } catch { return false; }
 }
 
-export function archiveHandoff(cwd: string, checkpointDirName: string, agentId: string, checkpointSubdir = 'codex'): string | null {
+export type HandoffAcknowledgement = { status: 'acknowledged' | 'already-acknowledged'; path: string };
+
+/** Record a parent receipt after it has absorbed the exact handoff. */
+export function acknowledgeHandoff(
+  cwd: string,
+  checkpointDirName: string,
+  agentId: string,
+  ownership: HandoffOwnership,
+  checkpointSubdir = 'codex'
+): HandoffAcknowledgement | null {
+  let target: string;
+  try { target = handoffFile(cwd, checkpointDirName, agentId, checkpointSubdir); } catch { return null; }
+  const current = parseHandoff(target);
+  if (current === null || !sameHandoffOwnership(handoffOwnership(current.frontmatter), ownership)) return null;
+  if (current.frontmatter.acknowledged_at !== undefined) return { status: 'already-acknowledged', path: target };
+  const frontmatter = { ...current.frontmatter, acknowledged_at: new Date().toISOString() };
+  const content = `---\n${emitHandoffFrontmatter(frontmatter)}\n---\n\n${current.body}\n`;
+  const temp = `${target}.${process.pid}.${Date.now()}.ack.tmp`;
+  try {
+    fs.writeFileSync(temp, content, { encoding: 'utf8', flag: 'wx' });
+    fs.renameSync(temp, target);
+    const verified = parseHandoff(target);
+    if (verified === null || !sameHandoffOwnership(handoffOwnership(verified.frontmatter), ownership) || verified.frontmatter.acknowledged_at === undefined) {
+      throw new Error('handoff acknowledgement verification failed');
+    }
+    return { status: 'acknowledged', path: target };
+  } catch (error) {
+    try { fs.unlinkSync(temp); } catch { /* best effort */ }
+    if (error instanceof Error && error.message.includes('verification failed')) throw error;
+    return null;
+  }
+}
+
+export function archiveHandoff(cwd: string, checkpointDirName: string, agentId: string, checkpointSubdir = 'codex', ownership?: HandoffOwnership): string | null {
   let source: string;
   try { source = handoffFile(cwd, checkpointDirName, agentId, checkpointSubdir); } catch { return null; }
-  if (!fs.existsSync(source)) return null;
+  const handoff = parseHandoff(source);
+  if (handoff === null) return null;
+  if (ownership !== undefined && (!sameHandoffOwnership(handoffOwnership(handoff.frontmatter), ownership) || handoff.frontmatter.acknowledged_at === undefined)) return null;
   if (fs.lstatSync(source).isSymbolicLink()) return null;
   const archive = path.join(handoffRoot(cwd, checkpointDirName, checkpointSubdir), 'archive');
   fs.mkdirSync(archive, { recursive: true });
@@ -338,15 +450,31 @@ export function formatSubagentContract(input: ContractInput, config: CodexConfig
   safeContractToken(input.agentType, 'agent type');
   if (!path.isAbsolute(input.cliPath)) throw new Error('the budget contract requires an absolute CLI path');
   const pause = effectivePause(config, input.fiveHourPercentAtSpawn);
+  const ownership = input.handoffOwner;
+  if (ownership !== undefined) {
+    safeContractToken(ownership.accountId, 'handoff account id');
+    safeContractToken(ownership.childThreadId, 'handoff child thread id');
+    safeContractToken(ownership.parentThreadId, 'handoff parent thread id');
+  }
+  const handoffInstruction = ownership === undefined
+    ? `When pausing, finish only the current small step and return ${PAUSE_MARKER} ${input.agentId}. Native account and parent ownership is unavailable; do not create an unowned handoff.`
+    : `When pausing, finish only the current small step, write a handoff with ${input.cliPath} handoffs write ${input.agentId} --agent-type ${input.agentType} --account-id ${ownership.accountId} --thread-id ${ownership.childThreadId} --parent-thread-id ${ownership.parentThreadId}, then return ${PAUSE_MARKER} ${input.agentId}.`;
   return [
     `[pacekeeper] Budget contract for subagent ${input.agentId} (${input.agentType}).`,
     `Pause at ${pause}% of the shared five-hour meter (spawned at ${input.fiveHourPercentAtSpawn}%).`,
     'The figure is an account-window estimate, not per-agent billing.',
-    `When pausing, finish only the current small step, write a handoff with ${input.cliPath} handoffs write ${input.agentId}, then return ${PAUSE_MARKER} ${input.agentId}.`,
+    handoffInstruction,
     'A paused child must be recorded in the parent handoff and must not be blindly re-dispatched.'
   ].join('\n');
 }
 
-export function formatPauseDirective(input: { agentId: string; pausePercent: number }): string {
-  return `[pacekeeper] Subagent pause point ${input.pausePercent}% reached. Finish only the current small step, write ${checkpointCliPath()} handoffs write ${input.agentId}, then return ${PAUSE_MARKER} ${input.agentId}.`;
+export function formatPauseDirective(input: { agentId: string; pausePercent: number; handoffOwner?: HandoffOwnership }): string {
+  const ownership = input.handoffOwner;
+  if (ownership === undefined) {
+    return `[pacekeeper] Subagent pause point ${input.pausePercent}% reached. Finish only the current small step, then return ${PAUSE_MARKER} ${input.agentId}. Native account and parent ownership is unavailable, so do not create an unowned handoff.`;
+  }
+  safeContractToken(ownership.accountId, 'handoff account id');
+  safeContractToken(ownership.childThreadId, 'handoff child thread id');
+  safeContractToken(ownership.parentThreadId, 'handoff parent thread id');
+  return `[pacekeeper] Subagent pause point ${input.pausePercent}% reached. Finish only the current small step, write ${checkpointCliPath()} handoffs write ${input.agentId} --account-id ${ownership.accountId} --thread-id ${ownership.childThreadId} --parent-thread-id ${ownership.parentThreadId}, then return ${PAUSE_MARKER} ${input.agentId}.`;
 }

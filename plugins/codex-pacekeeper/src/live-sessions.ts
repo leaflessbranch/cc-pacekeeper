@@ -20,8 +20,11 @@ import {
   THREAD_READ_METHOD,
   findExistingOwner,
   normalizeNativeCapabilities,
+  parseThreadParentId,
   parseOwnerRecord,
   type ExistingOwnerRecord,
+  type NativeClient,
+  type NativeOwnerEndpoint,
   type OwnerLookup,
   type OwnerProbeRecord
 } from './native';
@@ -69,25 +72,15 @@ export function nativeControlSocketPath(): string | null {
   return real;
 }
 
-function nativeControlOwner(threadId: string, accountId: string | null, socketPath: string): ExistingOwnerRecord {
+export function nativeControlOwner(threadId: string, accountId: string | null, socketPath: string): NativeOwnerEndpoint {
   return {
     ownerId: 'codex-app-server-control',
-    // The control socket is the authoritative endpoint; this pid is only a
-    // shape-compatible placeholder and is never used as an owner liveness
-    // proof for this path.
-    pid: process.pid,
     accountId,
     threadIds: [threadId],
     socketPath: `unix://${socketPath}`,
     methods: [...NATIVE_CONTROL_METHODS],
     protocolVersion: NATIVE_PROTOCOL_VERSION
   };
-}
-
-function loadedThreadIds(response: unknown): string[] {
-  if (typeof response !== 'object' || response === null) return [];
-  const data = (response as Record<string, unknown>)['data'];
-  return Array.isArray(data) ? data.filter((value): value is string => typeof value === 'string') : [];
 }
 
 /**
@@ -104,15 +97,56 @@ export async function discoverNativeControlClient(threadId: string, accountId: s
   const client = clientForExistingOwner(owner, capabilities, 750);
   if (client === null) return null;
   try {
-    const loaded = await client.request('thread/loaded/list', {});
-    if (!loadedThreadIds(loaded).includes(threadId)) return null;
+    const loaded = await client.listLoadedThreads();
+    if (!loaded.includes(threadId)) return null;
+    client.owner.threadIds = loaded;
+    client.owner.loadedThreadsObservedAtMs = Date.now();
     if (accountId !== null) {
       const limits = await client.readRateLimits();
       // A null account id is an unavailable observation, not proof that this
       // endpoint belongs to the requested account.
       if (limits.accountId !== accountId) return null;
+      client.owner.accountObservedAtMs = Date.now();
     }
     return client;
+  } catch { return null; }
+}
+
+export interface VerifiedThreadParent {
+  accountId: string;
+  childThreadId: string;
+  parentThreadId: string;
+  observedAtMs: number;
+}
+
+/** Verify a child-to-parent edge against current loaded-thread and account
+ * observations before callers persist or act on the relationship. */
+export async function readVerifiedThreadParent(
+  client: NativeClient,
+  childThreadId: string,
+  expectedAccountId: string | null
+): Promise<VerifiedThreadParent | null> {
+  try {
+    const nowMs = Date.now();
+    const loadedObservedAtMs = client.owner.loadedThreadsObservedAtMs;
+    let loaded = client.owner.threadIds;
+    if (loadedObservedAtMs === undefined || loadedObservedAtMs > nowMs || nowMs - loadedObservedAtMs > 5_000) {
+      loaded = await client.listLoadedThreads();
+      client.owner.threadIds = loaded;
+      client.owner.loadedThreadsObservedAtMs = Date.now();
+    }
+    if (!loaded.includes(childThreadId)) return null;
+    const accountObservedAtMs = client.owner.accountObservedAtMs;
+    let accountId = client.owner.accountId;
+    if (accountId === null || accountObservedAtMs === undefined || accountObservedAtMs > nowMs || nowMs - accountObservedAtMs > 5_000) {
+      accountId = (await client.readRateLimits()).accountId;
+      client.owner.accountId = accountId;
+      client.owner.accountObservedAtMs = Date.now();
+    }
+    if (accountId === null || (expectedAccountId !== null && accountId !== expectedAccountId)) return null;
+    const parentThreadId = parseThreadParentId(await client.readThread(childThreadId, false), childThreadId);
+    if (parentThreadId === null || !loaded.includes(parentThreadId)) return null;
+    return { accountId, childThreadId, parentThreadId, observedAtMs: Date.now() };
   } catch { return null; }
 }
 

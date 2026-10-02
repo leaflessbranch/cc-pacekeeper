@@ -412,6 +412,12 @@ export interface CompletedTurnObservation {
   toolCalls: number;
 }
 
+export interface InFlightSubmissionObservation {
+  threadId: string;
+  turnId: string;
+  clientUserMessageId: string;
+}
+
 // These are the only ThreadItem variants that can establish a zero-tool
 // completion. Keep this list aligned with the generated 0.160 ThreadRead
 // schema: an unrecognized item must remain unknown rather than being silently
@@ -441,6 +447,36 @@ const KNOWN_COMPLETION_ITEMS = new Set([
   'exitedReviewMode',
   'contextCompaction'
 ]);
+
+/** Read the persisted native parent edge only when the response names the
+ * exact child thread requested. A missing, malformed, or self edge is unknown. */
+export function parseThreadParentId(response: unknown, childThreadId: string): string | null {
+  if (!isRecord(response) || !isRecord(response['thread'])) return null;
+  const thread = response['thread'] as Record<string, unknown>;
+  const parentThreadId = thread['parentThreadId'];
+  if (thread['id'] !== childThreadId || typeof parentThreadId !== 'string' || parentThreadId.trim() === '' || parentThreadId === childThreadId) return null;
+  return parentThreadId;
+}
+
+/** Correlate only one exact full active turn and its stable user client id. */
+export function parseInFlightSubmission(
+  response: unknown,
+  expectedThreadId: string,
+  expectedTurnId: string
+): InFlightSubmissionObservation | null {
+  if (!isRecord(response) || !isRecord(response['thread'])) return null;
+  const thread = response['thread'] as Record<string, unknown>;
+  if (thread['id'] !== expectedThreadId || !Array.isArray(thread['turns']) || !thread['turns'].every(isRecord)) return null;
+  const inProgress = (thread['turns'] as Record<string, unknown>[]).filter((turn) => turn['status'] === 'inProgress');
+  if (inProgress.length !== 1) return null;
+  const turn = inProgress[0];
+  if (turn === undefined || turn['id'] !== expectedTurnId || turn['itemsView'] !== 'full' || !Array.isArray(turn['items']) || !turn['items'].every(isRecord)) return null;
+  const userMessages = (turn['items'] as Record<string, unknown>[]).filter((item) => item['type'] === 'userMessage');
+  if (userMessages.length !== 1) return null;
+  const clientUserMessageId = userMessages[0]?.['clientId'];
+  if (typeof clientUserMessageId !== 'string' || clientUserMessageId.trim() === '') return null;
+  return { threadId: expectedThreadId, turnId: expectedTurnId, clientUserMessageId };
+}
 
 /** Match a completed turn to the stable queued client id only with full items. */
 export function parseCompletedTurn(response: unknown, clientUserMessageId: string): CompletedTurnObservation | null {
@@ -691,9 +727,10 @@ export function classifySubscriptionCapacity(
   return 'unknown';
 }
 
-export interface ExistingOwnerRecord {
+export interface NativeOwnerEndpoint {
   ownerId: string;
-  pid: number;
+  /** Registry-backed fixtures/owners may carry a process identity. */
+  pid?: number;
   accountId: string | null;
   threadIds: string[];
   activeThreadIds?: string[];
@@ -705,6 +742,15 @@ export interface ExistingOwnerRecord {
   cwd?: string;
   methods?: string[];
   protocolVersion: string;
+  /** Set only after a successful native control-socket observation. */
+  loadedThreadsObservedAtMs?: number;
+  accountObservedAtMs?: number;
+}
+
+/** Registry owners can publish a checked PID. Native control sockets are
+ * endpoint identities and do not establish a long-lived process PID. */
+export interface ExistingOwnerRecord extends NativeOwnerEndpoint {
+  pid: number;
 }
 
 export interface OwnerProbeRecord {
@@ -855,7 +901,7 @@ export class NativeClient {
   public constructor(
     private readonly transport: NativeTransport,
     public readonly capabilities: NativeCapabilities,
-    public readonly owner: ExistingOwnerRecord
+    public readonly owner: NativeOwnerEndpoint
   ) {}
 
   public async queueExistingThread(input: QueueAddInput): Promise<QueueDeliveryResult> {
@@ -938,11 +984,43 @@ export class NativeClient {
   }
 
   /** Read full persisted turns for exact completion correlation. */
-  public async readThread(threadId: string): Promise<unknown> {
+  public async readThread(threadId: string, includeTurns = true): Promise<unknown> {
     if (!this.owner.threadIds.includes(threadId)) throw new Error('the selected owner does not hold this thread');
     const capability = this.capabilities.threadRead ?? 'unavailable';
     if (capability !== 'supported') throw new Error(`thread/read is ${capability}`);
-    return this.transport.request(THREAD_READ_METHOD, { threadId, includeTurns: true });
+    return this.transport.request(THREAD_READ_METHOD, { threadId, includeTurns });
+  }
+
+  /** Read every currently loaded thread, refusing malformed or cyclic pages. */
+  public async listLoadedThreads(): Promise<string[]> {
+    if (!this.owner.methods?.includes('thread/loaded/list')) {
+      throw new Error('thread/loaded/list is unavailable on the selected owner');
+    }
+    const loaded = new Set<string>();
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+      const response = await this.transport.request('thread/loaded/list', {
+        limit: 100,
+        ...(cursor === undefined ? {} : { cursor })
+      });
+      if (typeof response !== 'object' || response === null || Array.isArray(response)) {
+        throw new Error('thread/loaded/list returned an invalid page');
+      }
+      const row = response as Record<string, unknown>;
+      if (!Array.isArray(row['data']) || !row['data'].every((threadId) => typeof threadId === 'string' && threadId.trim() !== '')) {
+        throw new Error('thread/loaded/list returned invalid thread ids');
+      }
+      for (const threadId of row['data']) loaded.add(threadId as string);
+      const nextCursor = row['nextCursor'];
+      if (nextCursor === null) return [...loaded];
+      if (typeof nextCursor !== 'string' || nextCursor.trim() === '' || cursors.has(nextCursor)) {
+        throw new Error('thread/loaded/list returned an invalid or repeated cursor');
+      }
+      cursors.add(nextCursor);
+      cursor = nextCursor;
+    }
+    throw new Error('thread/loaded/list exceeded the page limit');
   }
 
   /**

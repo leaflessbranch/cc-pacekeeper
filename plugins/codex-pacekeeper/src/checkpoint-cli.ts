@@ -4,9 +4,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { CodexCheckpoints, type CheckpointOwner } from './checkpoint';
-import { archiveHandoff, checkpointCliPath, handoffsDir, listHandoffs, writeHandoff } from './agent-budget';
+import type { SavedCheckpoint } from './checkpoint';
+import { acknowledgeHandoff, archiveHandoff, checkpointCliPath, listHandoffs, writeHandoff, type HandoffOwnership, type HandoffScope } from './agent-budget';
 import { loadCodexConfig } from './config';
+import { discoverNativeControlClient } from './live-sessions';
+import type { NativeClient } from './native';
 import { resolveProjectRoot, worktreeInfo } from './resolve-root';
+import { CodexService, type ScheduledWake } from './service';
+import { CodexStore } from './storage';
 
 interface ParsedArgs {
   verb: string;
@@ -54,6 +59,32 @@ function ownerFrom(args: ParsedArgs): CheckpointOwner {
   return { accountId: account && account.trim() !== '' ? account : null, threadId: thread, ...(agentId ? { agentId } : {}) };
 }
 
+function handoffScopeFrom(args: ParsedArgs): HandoffScope {
+  const accountId = stringFlag(args, 'account-id') ?? process.env['CODEX_ACCOUNT_ID'];
+  const parentThreadId = stringFlag(args, 'parent-thread-id') ?? process.env['CODEX_PARENT_THREAD_ID'];
+  if (!accountId || accountId.trim() === '') throw new Error('handoffs requires --account-id');
+  if (!parentThreadId || parentThreadId.trim() === '') throw new Error('handoffs requires --parent-thread-id');
+  return { accountId, parentThreadId };
+}
+
+function handoffOwnershipFrom(args: ParsedArgs): HandoffOwnership {
+  const scope = handoffScopeFrom(args);
+  const owner = ownerFrom(args);
+  if (owner.accountId !== scope.accountId) throw new Error('handoff account identity is inconsistent');
+  return { ...scope, childThreadId: owner.threadId };
+}
+
+function hasNativeHandoffOwner(store: CodexStore, agentId: string, ownership: HandoffOwnership): boolean {
+  const value = store.read({ accountId: ownership.accountId, threadId: ownership.childThreadId, agentId }, 'owner');
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  return row['source'] === 'native-thread-parent'
+    && row['accountId'] === ownership.accountId
+    && row['childThreadId'] === ownership.childThreadId
+    && row['parentThreadId'] === ownership.parentThreadId
+    && row['agentId'] === agentId;
+}
+
 function bodyFrom(args: ParsedArgs, stdin: string): string {
   const direct = stringFlag(args, 'body');
   if (direct !== undefined) return direct;
@@ -89,7 +120,7 @@ function printUsage(): void {
     'ack <checkpoint-id> --token <token> --thread-id <id>',
     'discard <checkpoint-id> --thread-id <id>',
     'cleanup [--apply]',
-    'handoffs list|write <agent-id>|archive <agent-id>',
+    'handoffs list|write <agent-id>|ack <agent-id>|archive <agent-id>',
     '',
     `The model-facing handoff command is ${checkpointCliPath()}.`,
     'Project roots must be explicit safe project directories; state is kept in the Codex lane.'
@@ -118,6 +149,90 @@ export function invokingProvenance(cwd: string): CheckpointProvenance {
   return { worktree: path.resolve(cwd) };
 }
 
+export interface SaveCheckpointWithResetWakeInput {
+  checkpoints: CodexCheckpoints;
+  service: CodexService;
+  owner: CheckpointOwner;
+  body: string;
+  lane: string;
+  worktree: string;
+  branch?: string;
+  requestedResetGeneration?: number;
+  nowMs?: number;
+  resolveClient?: (threadId: string, accountId: string | null) => Promise<NativeClient | null>;
+}
+
+export interface SaveCheckpointWithResetWakeResult {
+  checkpoint: SavedCheckpoint;
+  wake: ScheduledWake | null;
+  withheldReason?: string;
+}
+
+/** Save normally even when native reset evidence is unavailable; register a
+ * wake only after an exact fresh owner and five-hour reset identity are read. */
+export async function saveCheckpointWithResetWake(input: SaveCheckpointWithResetWakeInput): Promise<SaveCheckpointWithResetWakeResult> {
+  const nowMs = input.nowMs ?? Date.now();
+  let owner = input.owner;
+  let observedResetAtMs: number | undefined;
+  let withheldReason: string | undefined;
+  let client: NativeClient | null = null;
+  try {
+    client = await (input.resolveClient ?? discoverNativeControlClient)(owner.threadId, owner.accountId);
+    const loadedAtMs = client?.owner.loadedThreadsObservedAtMs;
+    if (client === null || !client.owner.threadIds.includes(owner.threadId)
+      || loadedAtMs === undefined || !Number.isFinite(loadedAtMs) || loadedAtMs > nowMs || nowMs - loadedAtMs > 5_000) {
+      withheldReason = 'native owner for this thread is unavailable';
+    } else {
+      const rateLimits = await client.readRateLimits();
+      if (rateLimits.accountId === null) {
+        withheldReason = 'native account identity is unavailable';
+      } else if (owner.accountId !== null && rateLimits.accountId !== owner.accountId) {
+        withheldReason = 'native account does not match the requested checkpoint account';
+      } else {
+        owner = { ...owner, accountId: rateLimits.accountId };
+        const fiveHour = rateLimits.buckets.filter((bucket) => bucket.kind === 'five_hour');
+        const bucket = fiveHour[0];
+        if (fiveHour.length !== 1 || bucket === undefined || !bucket.valid || bucket.usedPercent === null || bucket.resetsAtMs === null) {
+          withheldReason = 'native five-hour reset identity is missing, invalid or ambiguous';
+        } else if (bucket.resetsAtMs <= nowMs) {
+          withheldReason = 'native five-hour reset has already passed';
+        } else {
+          observedResetAtMs = bucket.resetsAtMs;
+        }
+      }
+    }
+  } catch {
+    withheldReason = 'native owner or rate-limit observation is unavailable';
+  }
+
+  const requestedResetMatches = input.requestedResetGeneration === undefined || input.requestedResetGeneration === observedResetAtMs;
+  const resetGeneration = observedResetAtMs !== undefined && requestedResetMatches ? observedResetAtMs : undefined;
+  const checkpoint = input.checkpoints.save({
+    lane: input.lane,
+    owner,
+    body: input.body,
+    ...(input.branch ? { branch: input.branch } : {}),
+    worktree: input.worktree,
+    ...(resetGeneration === undefined ? {} : { resetGeneration })
+  });
+
+  if (withheldReason === undefined && observedResetAtMs !== undefined) {
+    if (!requestedResetMatches) {
+      withheldReason = 'requested reset generation does not match the native reset identity';
+    } else {
+      try {
+        return {
+          checkpoint,
+          wake: input.service.scheduleResetWake(owner, checkpoint.id, observedResetAtMs, observedResetAtMs)
+        };
+      } catch (error) {
+        withheldReason = error instanceof Error ? error.message : 'reset wake registration failed';
+      }
+    }
+  }
+  return { checkpoint, wake: null, ...(withheldReason === undefined ? {} : { withheldReason }) };
+}
+
 function makeCheckpoints(args: ParsedArgs): CodexCheckpoints {
   const loaded = loadCodexConfig(process.env['XDG_CONFIG_HOME']);
   const root = projectRootFor(args);
@@ -135,24 +250,42 @@ async function main(): Promise<void> {
   const loaded = loadCodexConfig(process.env['XDG_CONFIG_HOME']);
   if (args.verb === 'handoffs') {
     const root = resolveProjectRoot({ cwdFlag: stringFlag(args, 'cwd'), processCwd: process.cwd() });
+    const store = new CodexStore();
     const sub = args.positionals[0];
     if (sub === 'list') {
-      const items = listHandoffs(root, loaded.config.checkpoint_dir_name, loaded.config.checkpoint_subdir);
+      const scope = handoffScopeFrom(args);
+      const childThreadId = stringFlag(args, 'thread-id') ?? process.env['CODEX_THREAD_ID'];
+      const items = listHandoffs(root, loaded.config.checkpoint_dir_name, loaded.config.checkpoint_subdir, scope)
+        .filter((item) => childThreadId === undefined || item.frontmatter.child_thread_id === childThreadId)
+        .filter((item) => {
+          const child = item.frontmatter.child_thread_id;
+          if (child === undefined) return false;
+          const ownership: HandoffOwnership = { ...scope, childThreadId: child };
+          return hasNativeHandoffOwner(store, item.frontmatter.agent_id, ownership);
+        });
       if (items.length === 0) process.stdout.write('No pending handoffs.\n');
-      else for (const item of items) process.stdout.write(`${item.frontmatter.agent_id} ${item.frontmatter.agent_type ?? '?'} ${item.frontmatter.trigger} ${item.path}\n`);
+      else for (const item of items) process.stdout.write(`${item.frontmatter.agent_id} child=${item.frontmatter.child_thread_id ?? '?'} received=${item.frontmatter.acknowledged_at ? 'yes' : 'no'} ${item.path}\n${item.body}\n`);
       return;
     }
     const agentId = args.positionals[1];
     if (!agentId) throw new Error('handoffs requires an agent id');
+    const ownership = handoffOwnershipFrom(args);
+    if (!hasNativeHandoffOwner(store, agentId, ownership)) throw new Error('handoff has no matching native account and parent mapping');
+    if (sub === 'ack') {
+      const acknowledgement = acknowledgeHandoff(root, loaded.config.checkpoint_dir_name, agentId, ownership, loaded.config.checkpoint_subdir);
+      if (acknowledgement === null) throw new Error('handoff was not found for this account, parent and child');
+      process.stdout.write(`${acknowledgement.status === 'already-acknowledged' ? 'Already acknowledged' : 'Acknowledged'} handoff: ${acknowledgement.path}\n`);
+      return;
+    }
     if (sub === 'archive') {
-      const archived = archiveHandoff(root, loaded.config.checkpoint_dir_name, agentId, loaded.config.checkpoint_subdir);
-      if (!archived) throw new Error('handoff was not found or could not be archived');
+      const archived = archiveHandoff(root, loaded.config.checkpoint_dir_name, agentId, loaded.config.checkpoint_subdir, ownership);
+      if (!archived) throw new Error('handoff must be acknowledged for this account, parent and child before archive');
       process.stdout.write(`Archived handoff: ${archived}\n`);
       return;
     }
     if (sub === 'write') {
       const body = bodyFrom(args, await readStdin());
-      const target = writeHandoff({ cwd: root, checkpointDirName: loaded.config.checkpoint_dir_name, checkpointSubdir: loaded.config.checkpoint_subdir, agentId, agentType: stringFlag(args, 'agent-type'), trigger: stringFlag(args, 'trigger') ?? 'budget_pause', body });
+      const target = writeHandoff({ cwd: root, checkpointDirName: loaded.config.checkpoint_dir_name, checkpointSubdir: loaded.config.checkpoint_subdir, agentId, agentType: stringFlag(args, 'agent-type'), trigger: stringFlag(args, 'trigger') ?? 'budget_pause', body, ownership });
       process.stdout.write(`Wrote handoff: ${target}\n`);
       return;
     }
@@ -167,15 +300,22 @@ async function main(): Promise<void> {
     const root = projectRootFor(args);
     const provenance = invokingProvenance(stringFlag(args, 'cwd') ?? process.cwd());
     const branch = stringFlag(args, 'branch') ?? provenance.branch ?? gitValue(provenance.worktree, ['branch', '--show-current']);
-    const saved = checkpoints.save({
-      lane: stringFlag(args, 'lane') ?? branch ?? 'default',
+    const requestedResetGeneration = stringFlag(args, 'reset-generation');
+    const loaded = loadCodexConfig(process.env['XDG_CONFIG_HOME']);
+    const service = new CodexService({ config: loaded.config, projectRoot: root });
+    const result = await saveCheckpointWithResetWake({
+      checkpoints,
+      service,
       owner,
       body,
+      lane: stringFlag(args, 'lane') ?? branch ?? 'default',
       ...(branch ? { branch } : {}),
       worktree: provenance.worktree,
-      ...(stringFlag(args, 'reset-generation') ? { resetGeneration: Number(stringFlag(args, 'reset-generation')) } : {})
+      ...(requestedResetGeneration === undefined ? {} : { requestedResetGeneration: Number(requestedResetGeneration) })
     });
-    process.stdout.write(`Saved checkpoint ${saved.id} (${saved.file})\n`);
+    process.stdout.write(`Saved checkpoint ${result.checkpoint.id} (${result.checkpoint.file})\n`);
+    if (result.wake !== null) process.stdout.write(`Registered reset wake for ${result.wake.job.dueAtMs}\n`);
+    else process.stdout.write(`Reset wake withheld: ${result.withheldReason ?? 'native reset identity is unavailable'}\n`);
     return;
   }
   if (args.verb === 'list') {

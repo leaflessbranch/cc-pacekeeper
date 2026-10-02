@@ -54,6 +54,17 @@ describe('distinct failure modes', () => {
     expect(check(diagnose(input({ ownerStatus: 'ambiguous' })), 'native owner').status).toBe('warn');
   });
 
+  test('control socket and in-flight diagnostics distinguish endpoint presence from atomic suppression', () => {
+    const report = diagnose(input({
+      nativeControlSocketObserved: true,
+      inFlightCorrelation: { status: 'bound', ageSeconds: 2 }
+    }));
+    expect(check(report, 'native control socket path').detail).toContain('still verifies loaded thread and account');
+    expect(check(report, 'in-flight turn correlation').status).toBe('warn');
+    expect(check(report, 'in-flight turn correlation').detail).toContain('was bound 2s ago');
+    expect(check(report, 'in-flight turn correlation').detail).toContain('does not establish atomic pre-model suppression');
+  });
+
   test('a version mismatch warns without disabling a working queue', () => {
     const report = diagnose(
       input({

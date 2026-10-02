@@ -15,6 +15,7 @@ import {
   ACCOUNT_READ_METHOD,
   QUEUE_ADD_METHOD,
   RATE_LIMITS_READ_METHOD,
+  THREAD_READ_METHOD,
   NativeClient,
   buildQueueAddRequest,
   classifySubscriptionCapacity,
@@ -22,7 +23,9 @@ import {
   normalizeNativeCapabilities,
   parseAccountResponse,
   parseCompletedTurn,
+  parseInFlightSubmission,
   parseRateLimitsResponse,
+  parseThreadParentId,
   parseThreadTokenUsage,
   type NativeTransport
 } from '../native';
@@ -154,6 +157,85 @@ describe('native completion correlation', () => {
     expect(parseCompletedTurn(withItem({ id: 'search-1', type: 'webSearch', query: 'query' }), 'submission-1')?.toolCalls).toBe(1);
     expect(parseCompletedTurn(withItem({ id: 'future-1', type: 'futureNativeItem' }), 'submission-1')).toBeNull();
     expect(parseCompletedTurn({ thread: { turns: [{ ...turn, items: [null] }] } }, 'submission-1')).toBeNull();
+  });
+});
+
+describe('native loaded-thread and parent metadata', () => {
+  test('paginates loaded threads and passes the exact cursor from the prior page', async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const endpoint = {
+      ownerId: 'native-control',
+      accountId: 'acct-1',
+      threadIds: [],
+      methods: ['thread/loaded/list'],
+      protocolVersion: NATIVE_PROTOCOL_VERSION
+    };
+    const client = new NativeClient({
+      request: async (method, params) => {
+        calls.push({ method, params });
+        if ((params as { cursor?: string }).cursor === undefined) return { data: ['thread-a'], nextCursor: 'next-page' };
+        return { data: ['thread-b', 'thread-a'], nextCursor: null };
+      }
+    }, supported, endpoint);
+
+    expect(await client.listLoadedThreads()).toEqual(['thread-a', 'thread-b']);
+    expect(calls).toEqual([
+      { method: 'thread/loaded/list', params: { limit: 100 } },
+      { method: 'thread/loaded/list', params: { limit: 100, cursor: 'next-page' } }
+    ]);
+  });
+
+  test('rejects repeated cursors instead of looping or treating a partial list as complete', async () => {
+    const endpoint = {
+      ownerId: 'native-control', accountId: 'acct-1', threadIds: [],
+      methods: ['thread/loaded/list'], protocolVersion: NATIVE_PROTOCOL_VERSION
+    };
+    const client = new NativeClient({ request: async () => ({ data: ['thread-a'], nextCursor: 'same' }) }, supported, endpoint);
+    await expect(client.listLoadedThreads()).rejects.toThrow(/repeated cursor/);
+  });
+
+  test('reads metadata without turns and accepts only the exact child parent edge', async () => {
+    const endpoint = {
+      ownerId: 'native-control', accountId: 'acct-1', threadIds: ['thread-child'],
+      protocolVersion: NATIVE_PROTOCOL_VERSION
+    };
+    const capabilities = normalizeNativeCapabilities({ version: NATIVE_PROTOCOL_VERSION, methods: [THREAD_READ_METHOD] });
+    let request: { method: string; params: unknown } | undefined;
+    const client = new NativeClient({ request: async (method, params) => { request = { method, params }; return { thread: { id: 'thread-child', parentThreadId: 'thread-parent' } }; } }, capabilities, endpoint);
+
+    const response = await client.readThread('thread-child', false);
+    expect(request).toEqual({ method: THREAD_READ_METHOD, params: { threadId: 'thread-child', includeTurns: false } });
+    expect(parseThreadParentId(response, 'thread-child')).toBe('thread-parent');
+    expect(parseThreadParentId({ thread: { id: 'other-child', parentThreadId: 'thread-parent' } }, 'thread-child')).toBeNull();
+    expect(parseThreadParentId({ thread: { id: 'thread-child', parentThreadId: 'thread-child' } }, 'thread-child')).toBeNull();
+  });
+});
+
+describe('pre-completion synthetic turn correlation', () => {
+  const inFlight = {
+    thread: {
+      id: 'thread-a',
+      turns: [{
+        id: 'turn-active',
+        status: 'inProgress',
+        itemsView: 'full',
+        items: [{ id: 'message-1', type: 'userMessage', clientId: 'client-submission-1', content: [] }]
+      }]
+    }
+  };
+
+  test('binds only the exact full active turn and stable user client id', () => {
+    expect(parseInFlightSubmission(inFlight, 'thread-a', 'turn-active')).toEqual({
+      threadId: 'thread-a', turnId: 'turn-active', clientUserMessageId: 'client-submission-1'
+    });
+  });
+
+  test('refuses late, partial, ambiguous and foreign-turn observations', () => {
+    expect(parseInFlightSubmission(inFlight, 'thread-b', 'turn-active')).toBeNull();
+    expect(parseInFlightSubmission(inFlight, 'thread-a', 'turn-late')).toBeNull();
+    expect(parseInFlightSubmission({ thread: { ...inFlight.thread, turns: [{ ...inFlight.thread.turns[0], status: 'completed' }] } }, 'thread-a', 'turn-active')).toBeNull();
+    expect(parseInFlightSubmission({ thread: { ...inFlight.thread, turns: [{ ...inFlight.thread.turns[0], itemsView: 'summary' }] } }, 'thread-a', 'turn-active')).toBeNull();
+    expect(parseInFlightSubmission({ thread: { ...inFlight.thread, turns: [...inFlight.thread.turns, { ...inFlight.thread.turns[0], id: 'another-active' }] } }, 'thread-a', 'turn-active')).toBeNull();
   });
 });
 

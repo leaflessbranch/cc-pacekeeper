@@ -1,10 +1,15 @@
 #!/usr/bin/env bun
 /** Bounded PostToolUse observer. It records facts, never raw prompts. */
-import { parseRateLimitsResponse, parseThreadTokenUsage, type NativeRateLimitsResponse } from './native';
+import { parseInFlightSubmission, parseRateLimitsResponse, parseThreadTokenUsage, type NativeRateLimitsResponse } from './native';
 import { CodexStore, type StateIdentity } from './storage';
 import { clientForExistingOwner } from './native-transport';
-import { discoverNativeControlClient, findLiveOwner } from './live-sessions';
+import { discoverNativeControlClient, findLiveOwner, readVerifiedThreadParent, type VerifiedThreadParent } from './live-sessions';
 import { normalizeNativeCapabilities, type NativeClient } from './native';
+import { advance, type Job } from './jobs';
+import { checkpointCliPath, listHandoffs, type HandoffOwnership } from './agent-budget';
+import { CODEX_DEFAULTS, loadCodexConfig, type CodexConfig } from './config';
+import type { Handoff } from './agent-budget';
+import { resolveProjectRoot } from './resolve-root';
 import { closeSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -15,6 +20,11 @@ export interface RefreshInput {
   thread_id?: unknown;
   session_id?: unknown;
   account_id?: unknown;
+  agent_id?: unknown;
+  turn_id?: unknown;
+  tool_name?: unknown;
+  tool_response?: unknown;
+  cwd?: unknown;
   now_ms?: unknown;
   rateLimits?: unknown;
   rate_limits?: unknown;
@@ -28,6 +38,255 @@ export interface RefreshInput {
   authenticated?: unknown;
   pending_work?: unknown;
   pendingWork?: unknown;
+}
+
+/** Persist a native child-parent observation without replacing an established
+ * mapping with a conflicting or late hook observation. */
+export function persistSubagentOwnership(store: CodexStore, binding: VerifiedThreadParent, agentId: string): boolean {
+  if (!safeHandoffToken(agentId)
+    || !safeHandoffToken(binding.accountId)
+    || !safeHandoffToken(binding.childThreadId)
+    || !safeHandoffToken(binding.parentThreadId)
+    || binding.childThreadId === binding.parentThreadId) return false;
+  const identity = { accountId: binding.accountId, threadId: binding.childThreadId, agentId };
+  const prior = store.read(identity, 'owner');
+  if (typeof prior === 'object' && prior !== null) {
+    const row = prior as Record<string, unknown>;
+    if (row['source'] !== 'native-thread-parent'
+      || row['accountId'] !== binding.accountId
+      || row['childThreadId'] !== binding.childThreadId
+      || row['parentThreadId'] !== binding.parentThreadId
+      || row['agentId'] !== agentId) return false;
+  }
+  store.write(identity, 'owner', {
+    source: 'native-thread-parent',
+    accountId: binding.accountId,
+    childThreadId: binding.childThreadId,
+    parentThreadId: binding.parentThreadId,
+    agentId,
+    observedAtMs: binding.observedAtMs
+  });
+  return true;
+}
+
+function safeHandoffToken(value: string): boolean {
+  return /^[A-Za-z0-9._-]{1,128}$/.test(value) && value !== '.' && value !== '..';
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/** The pinned V1 wait_agent result carries terminal statuses keyed by agent id.
+ * V2's wait_agent summary has no child identity and is intentionally ignored. */
+export function parseCompletedWaitAgentIds(toolName: unknown, response: unknown): string[] {
+  if (toolName !== 'multi_agent_v1wait_agent') return [];
+  const result = objectRecord(response);
+  const statuses = objectRecord(result?.['status']);
+  if (result === null || statuses === null || result['timed_out'] !== false) return [];
+  const completed: string[] = [];
+  for (const [agentId, rawStatus] of Object.entries(statuses)) {
+    const status = objectRecord(rawStatus);
+    if (!safeHandoffToken(agentId) || status === null) continue;
+    const keys = Object.keys(status);
+    if (keys.length === 1 && keys[0] === 'completed' && (status['completed'] === null || typeof status['completed'] === 'string')) completed.push(agentId);
+  }
+  return completed.sort();
+}
+
+function sameHandoffOwner(left: HandoffOwnership | null, right: HandoffOwnership): boolean {
+  return left !== null
+    && left.accountId === right.accountId
+    && left.childThreadId === right.childThreadId
+    && left.parentThreadId === right.parentThreadId;
+}
+
+function handoffOwnership(item: Handoff): HandoffOwnership | null {
+  const frontmatter = item.frontmatter;
+  const accountId = frontmatter.account_id;
+  const childThreadId = frontmatter.child_thread_id;
+  const parentThreadId = frontmatter.parent_thread_id;
+  if (!accountId || !childThreadId || !parentThreadId) return null;
+  return { accountId, childThreadId, parentThreadId };
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/** Return only a completed child handoff tied to this parent's native wait
+ * result, account, child mapping and project. The parent must explicitly ack
+ * after absorbing it; duplicate waits repeat context until that receipt. */
+export function recordParentHandoffReturn(
+  input: RefreshInput,
+  store: CodexStore,
+  accountId: string | null,
+  projectRoot: string,
+  config: CodexConfig = CODEX_DEFAULTS
+): string | null {
+  const event = text(input.hook_event_name) ?? text(input.event);
+  const suppliedThreadId = text(input.thread_id);
+  const sessionId = text(input.session_id);
+  const parentThreadId = suppliedThreadId ?? sessionId;
+  const suppliedAccountId = text(input.account_id);
+  const nowMs = number(input.now_ms);
+  if (event !== 'PostToolUse' || parentThreadId === null || accountId === null
+    || !safeHandoffToken(accountId) || !safeHandoffToken(parentThreadId)
+    || (suppliedThreadId !== null && sessionId !== null && suppliedThreadId !== sessionId)
+    || (suppliedAccountId !== null && suppliedAccountId !== accountId)) return null;
+  const agentIds = parseCompletedWaitAgentIds(input.tool_name, input.tool_response);
+  if (agentIds.length === 0) return null;
+
+  const scope = { accountId, parentThreadId };
+  const handoffs = listHandoffs(projectRoot, config.checkpoint_dir_name, config.checkpoint_subdir, scope);
+  const context: string[] = [];
+  for (const agentId of agentIds) {
+    const mappings = store.list('owner').filter((value): value is Record<string, unknown> => {
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+      const row = value as Record<string, unknown>;
+      return row['source'] === 'native-thread-parent'
+        && row['accountId'] === accountId
+        && row['parentThreadId'] === parentThreadId
+        && row['agentId'] === agentId
+        && typeof row['childThreadId'] === 'string'
+        && safeHandoffToken(row['childThreadId'])
+        && typeof row['observedAtMs'] === 'number'
+        && Number.isFinite(row['observedAtMs'])
+        && row['observedAtMs'] <= nowMs;
+    });
+    if (mappings.length !== 1) continue;
+    const mapping = mappings[0];
+    if (mapping === undefined) continue;
+    const childThreadId = mapping['childThreadId'];
+    if (typeof childThreadId !== 'string' || childThreadId === parentThreadId) continue;
+    const ownership: HandoffOwnership = { accountId, childThreadId, parentThreadId };
+    const matching = handoffs.filter((item) => item.frontmatter.agent_id === agentId && sameHandoffOwner(handoffOwnership(item), ownership));
+    if (matching.length !== 1) continue;
+    const handoff = matching[0];
+    if (handoff === undefined || handoff.frontmatter.acknowledged_at !== undefined) continue;
+
+    const receiptIdentity = { accountId, threadId: parentThreadId, agentId: `wait-return-${agentId}` };
+    const prior = store.read(receiptIdentity, 'owner');
+    if (prior !== null) {
+      const row = objectRecord(prior);
+      if (row === null || row['source'] !== 'native-wait-agent-completion'
+        || row['accountId'] !== accountId
+        || row['parentThreadId'] !== parentThreadId
+        || row['childThreadId'] !== childThreadId
+        || row['agentId'] !== agentId) continue;
+    } else {
+      try {
+        store.write(receiptIdentity, 'owner', {
+          source: 'native-wait-agent-completion',
+          accountId,
+          parentThreadId,
+          childThreadId,
+          agentId,
+          status: 'completed-returned',
+          observedAtMs: nowMs,
+          ...(text(input.turn_id) === null ? {} : { turnId: text(input.turn_id) })
+        });
+      } catch { continue; }
+    }
+
+    const ownerFlags = `--account-id ${accountId} --thread-id ${childThreadId} --parent-thread-id ${parentThreadId} --cwd ${shellQuote(projectRoot)}`;
+    context.push(`[pacekeeper] Native wait_agent completion was observed for child ${childThreadId} (agent ${agentId}). Read and absorb its owned handoff at ${handoff.path}:\n${handoff.body}\nAfter absorbing the result, record the parent receipt with \`${checkpointCliPath()} handoffs ack ${agentId} ${ownerFlags}\`. Archive only after acknowledgement with \`${checkpointCliPath()} handoffs archive ${agentId} ${ownerFlags}\`.`);
+  }
+  return context.length === 0 ? null : context.join('\n\n');
+}
+
+export type InFlightBindingStatus = 'bound' | 'already-bound' | 'unmatched' | 'ambiguous' | 'foreign-owner' | 'late' | 'conflict' | 'unavailable';
+
+/** Bind one queued job only when its owner, stable client id and in-flight
+ * native turn all agree. No marker text or completed turn can create a bind. */
+export function bindOwnedSyntheticTurn(
+  store: CodexStore,
+  owner: { accountId: string; threadId: string },
+  observation: { threadId: string; turnId: string; clientUserMessageId: string }
+): InFlightBindingStatus {
+  if (owner.threadId !== observation.threadId) return 'foreign-owner';
+  const candidates = store.list('job').filter((value) => typeof value === 'object' && value !== null
+    && (value as Record<string, unknown>)['submissionId'] === observation.clientUserMessageId);
+  if (candidates.length === 0) return 'unmatched';
+  if (candidates.length !== 1) return 'ambiguous';
+  const row = candidates[0] as Record<string, unknown>;
+  const jobOwner = typeof row['owner'] === 'object' && row['owner'] !== null ? row['owner'] as Record<string, unknown> : null;
+  if (jobOwner === null || jobOwner['accountId'] !== owner.accountId || jobOwner['threadId'] !== owner.threadId) return 'foreign-owner';
+  if ((row['kind'] !== 'keepalive' && row['kind'] !== 'reset-wake')
+    || typeof row['id'] !== 'string'
+    || typeof row['state'] !== 'string'
+    || typeof row['dueAtMs'] !== 'number'
+    || typeof row['retryable'] !== 'boolean'
+    || typeof row['pongVerified'] !== 'boolean'
+    || row['submissionId'] !== observation.clientUserMessageId) return 'unavailable';
+  if (row['turnId'] !== undefined && row['turnId'] !== observation.turnId) return 'conflict';
+  if (row['state'] === 'completed' || row['state'] === 'cancelled' || row['state'] === 'rejected' || row['state'] === 'ambiguous') return 'late';
+  if (row['state'] !== 'queued' && row['state'] !== 'running') return 'late';
+  if (row['state'] === 'running' && row['turnId'] === observation.turnId) return 'already-bound';
+  const job = row as unknown as Job;
+  const updated = row['state'] === 'queued'
+    ? advance(job, { type: 'turn-started', turnId: observation.turnId })
+    : { ...job, turnId: observation.turnId };
+  if (updated.state !== 'running' || updated.turnId !== observation.turnId) return 'conflict';
+  store.write({ ...owner, agentId: `job-${updated.id}` }, 'job', updated);
+  return 'bound';
+}
+
+function recordInFlightCorrelation(store: CodexStore, owner: { accountId: string; threadId: string }, status: InFlightBindingStatus, nowMs: number): void {
+  const identity = { accountId: owner.accountId, threadId: owner.threadId };
+  const current = store.read(identity, 'timeline');
+  const prior = typeof current === 'object' && current !== null ? current as Record<string, unknown> : {};
+  store.write(identity, 'timeline', {
+    ...prior,
+    inFlightCorrelation: { status, observedAtMs: nowMs }
+  });
+}
+
+/** Poll the supported thread/read surface before UserPromptSubmit policy runs.
+ * A miss is diagnostic only; it never claims atomic pre-model suppression. */
+export async function correlateOwnedInFlightPrompt(
+  client: NativeClient,
+  threadId: string,
+  expectedAccountId: string | null,
+  turnId: string,
+  store: CodexStore,
+  nowMs = Date.now()
+): Promise<InFlightBindingStatus> {
+  let status: InFlightBindingStatus = 'unavailable';
+  try {
+    if (!client.owner.threadIds.includes(threadId)) {
+      status = 'foreign-owner';
+    } else {
+      const accountObservedAtMs = client.owner.accountObservedAtMs;
+      let accountId = client.owner.accountId;
+      if (accountId === null || accountObservedAtMs === undefined || accountObservedAtMs > nowMs || nowMs - accountObservedAtMs > 5_000) {
+        const limits = await client.readRateLimits();
+        if (accountId !== null && limits.accountId !== accountId) {
+          status = 'foreign-owner';
+          accountId = null;
+        } else {
+          accountId = limits.accountId;
+          client.owner.accountId = accountId;
+          client.owner.accountObservedAtMs = nowMs;
+        }
+      }
+      if (status === 'unavailable') {
+        if (accountId === null || (expectedAccountId !== null && accountId !== expectedAccountId)) {
+          status = 'foreign-owner';
+        } else {
+          const observation = parseInFlightSubmission(await client.readThread(threadId, true), threadId, turnId);
+          status = observation === null
+            ? 'unavailable'
+            : bindOwnedSyntheticTurn(store, { accountId, threadId }, observation);
+          recordInFlightCorrelation(store, { accountId, threadId }, status, nowMs);
+        }
+      }
+    }
+  } catch { status = 'unavailable'; }
+  if (client.owner.accountId !== null) recordInFlightCorrelation(store, { accountId: client.owner.accountId, threadId }, status, nowMs);
+  return status;
 }
 
 function text(value: unknown): string | null { return typeof value === 'string' && value.trim() !== '' ? value : null; }
@@ -319,9 +578,9 @@ export async function refreshFromOwner(
   } catch { return null; }
 }
 
-async function refreshThroughExistingOwner(input: RefreshInput, store: CodexStore): Promise<void> {
+async function refreshThroughExistingOwner(input: RefreshInput, store: CodexStore): Promise<string | null> {
   const threadId = text(input.thread_id) ?? text(input.session_id);
-  if (threadId === null) return;
+  if (threadId === null) return null;
   const rollout = text(input.transcript_path) === null
     ? null
     : readRolloutTokenUsage(text(input.transcript_path) as string, number(input.now_ms), threadId);
@@ -347,17 +606,31 @@ async function refreshThroughExistingOwner(input: RefreshInput, store: CodexStor
     // requested thread is loaded before using it.
     client = await discoverNativeControlClient(threadId, accountId);
   }
-  if (client === null) return;
+  if (client === null) return null;
   const ownerAccountId = lookup.status === 'found' ? lookup.owner?.accountId ?? null : null;
-  await refreshFromOwner(client, { accountId: accountId ?? ownerAccountId, threadId }, store, {
+  const event = text(input.hook_event_name) ?? text(input.event);
+  const agentId = text(input.agent_id);
+  if ((event === 'SubagentStart' || event === 'SubagentStop') && agentId !== null) {
+    const binding = await readVerifiedThreadParent(client, threadId, accountId ?? ownerAccountId ?? client.owner.accountId);
+    if (binding !== null) persistSubagentOwnership(store, binding, agentId);
+  }
+  if (event === 'UserPromptSubmit') {
+    const turnId = text(input.turn_id);
+    if (turnId !== null) {
+      await correlateOwnedInFlightPrompt(client, threadId, accountId ?? ownerAccountId, turnId, store, number(input.now_ms));
+    }
+  }
+  const refreshed = await refreshFromOwner(client, { accountId: accountId ?? ownerAccountId, threadId }, store, {
     ...(observedTokenUsage === undefined ? {} : { tokenUsage: observedTokenUsage }),
     ...(observedTokenUsageAtMs === undefined ? {} : { tokenUsageObservedAtMs: observedTokenUsageAtMs }),
     ...(rollout?.invalidated === true && observedTokenUsage === undefined ? { tokenUsageInvalidated: true } : {}),
     ...(typeof input.authenticated === 'boolean' ? { authenticated: input.authenticated } : {})
   });
+  return refreshed?.accountId ?? null;
 }
 
 async function main(): Promise<void> {
+  let output = '{}\n';
   try {
     const input = JSON.parse(readFileSync(0, 'utf8')) as RefreshInput;
     const store = new CodexStore();
@@ -375,9 +648,19 @@ async function main(): Promise<void> {
     // Native reads are bounded by the selected existing owner's transport. A
     // missing or untrusted owner leaves the cached hook observation intact and
     // never starts a second server or invents fresh values.
-    await refreshThroughExistingOwner(input, store);
+    const nativeAccountId = await refreshThroughExistingOwner(input, store);
+    const toolName = text(input.tool_name);
+    if (toolName === 'multi_agent_v1wait_agent') {
+      const cwd = text(input.cwd);
+      if (cwd !== null) {
+        const root = resolveProjectRoot({ cwdFlag: cwd, transcriptPath: text(input.transcript_path) ?? undefined, processCwd: cwd });
+        const config = loadCodexConfig(process.env['XDG_CONFIG_HOME']).config;
+        const context = recordParentHandoffReturn(input, store, nativeAccountId, root, config);
+        if (context !== null) output = `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: context } })}\n`;
+      }
+    }
   } catch { /* hooks remain inert when input or state is unavailable */ }
-  process.stdout.write('{}\n');
+  process.stdout.write(output);
 }
 
 if (import.meta.main) main();

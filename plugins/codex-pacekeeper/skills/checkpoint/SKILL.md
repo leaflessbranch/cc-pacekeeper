@@ -1,6 +1,6 @@
 ---
 name: checkpoint
-description: Save, resume, and list Codex-owned cc-pacekeeper checkpoints. Use when limits are nearing, before context compaction, or to orient a fresh session from a previously saved checkpoint.
+description: Save, resume, and list Codex-owned cc-pacekeeper checkpoints. Use when limits are nearing, before context compaction, to orient a fresh session, or to write or receive a scoped subagent handoff.
 ---
 
 # Codex checkpoints
@@ -48,18 +48,33 @@ checkpoint consumption.
 
 ## Preparing a reset wake
 
-Save with `--thread-id <thread> --account-id <account> --reset-generation <n>`
-and verify the printed checkpoint id. Only use an authoritative reset timestamp
-and generation; do not infer them from usage percentages or a guessed clock.
-Then register the exact checkpoint using the installed sibling
-`bin/pacekeeper-service schedule-reset --cwd <project-root>
---account-id <account> --thread-id <thread> --checkpoint-id <checkpoint-id>
---reset-at-ms <timestamp> --reset-generation <n>`.
+Run `pacekeeper-checkpoint save --thread-id <thread> --account-id <account>`
+and verify the printed checkpoint id. After the checkpoint is persisted, the
+CLI registers a reset wake only when it can verify the loaded native thread,
+matching account and one valid future five-hour reset. A normal checkpoint
+save remains available if that native evidence is unavailable or disagrees;
+the CLI reports why it withheld the wake and does not record an unverified
+reset generation.
 
-The generation must match the saved checkpoint. Registration is a durable
-request, not delivery: production wake execution remains blocked until native
-pre-model cancellation is supported. No automatic save-to-wake lifecycle or
-live reset acceptance is claimed.
+An explicit `bin/pacekeeper-service schedule-reset` request is still available
+when you have an authoritative reset timestamp and matching checkpoint
+generation. Never infer either from a usage percentage or guessed clock.
+Registration is a durable request, not delivery: production wake execution
+remains blocked until native pre-model cancellation is supported, and live
+reset acceptance has not been verified.
+
+## Subagent handoffs
+
+When native account and parent ownership is verified, a child budget contract
+provides a scoped `handoffs write` command. Use its account, child thread,
+parent thread and project values exactly; the CLI checks the persisted native
+mapping. Legacy unowned handoffs are not adopted.
+
+After the parent receives the supported V1 `wait_agent` completion notice, it
+must read and absorb the exact handoff before running the displayed scoped
+`handoffs ack` command. Archive only after that acknowledgement. A child stop
+hook does not count as parent receipt, and a V2 wait summary without a child
+identity does not trigger automatic handoff delivery.
 
 Codex's native PreCompact hook does not prove a save barrier. When the hook
 reports critical context, run `save` and verify the printed file before

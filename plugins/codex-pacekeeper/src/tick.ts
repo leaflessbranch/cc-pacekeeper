@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** Event-specific Codex hook adapter. Native acquisition stays outside policy. */
-import { buildContract, checkpointCliPath, dispatchAdvice, effectivePause, formatPauseDirective, hasHandoff, listHandoffs, type ContractInput } from './agent-budget';
+import { buildContract, checkpointCliPath, dispatchAdvice, effectivePause, formatPauseDirective, type ContractInput, type HandoffOwnership } from './agent-budget';
 import { loadCodexConfig, type CodexConfig } from './config';
 import { buildFacts, type CodexFacts } from './facts';
 import { shouldPause } from './agent-budget';
@@ -9,7 +9,6 @@ import { CodexStore, type StateIdentity } from './storage';
 import type { NativeRateLimitsResponse } from './native';
 import { readFileSync } from 'fs';
 import { CodexService } from './service';
-import { resolveProjectRoot } from './resolve-root';
 
 export interface TickInput {
   hook_event_name?: unknown;
@@ -305,14 +304,32 @@ function saveTimeline(store: CodexStore, identity: StateIdentity, value: Record<
   store.write(identity, 'timeline', { ...prior, accountId: identity.accountId, threadId: identity.threadId, ...(identity.agentId ? { agentId: identity.agentId } : {}), ...value });
 }
 
-function buildSubagentText(input: TickInput, facts: CodexFacts, config: CodexConfig): string {
+function verifiedHandoffOwner(store: CodexStore, identity: StateIdentity): HandoffOwnership | undefined {
+  if (identity.accountId === null || identity.agentId === undefined) return undefined;
+  const value = store.read(identity, 'owner');
+  if (typeof value !== 'object' || value === null) return undefined;
+  const row = value as Record<string, unknown>;
+  if (row['source'] !== 'native-thread-parent'
+    || row['accountId'] !== identity.accountId
+    || row['childThreadId'] !== identity.threadId
+    || row['agentId'] !== identity.agentId
+    || typeof row['parentThreadId'] !== 'string'
+    || row['parentThreadId'].trim() === '') return undefined;
+  return { accountId: identity.accountId, childThreadId: identity.threadId, parentThreadId: row['parentThreadId'] };
+}
+
+function buildSubagentText(input: TickInput, facts: CodexFacts, config: CodexConfig, store: CodexStore, identity: StateIdentity): string {
   const agentId = stringValue(input.agent_id) ?? 'unknown-agent';
   const agentType = stringValue(input.agent_type) ?? 'unknown';
   const five = facts.fiveHour?.usedPercent;
   if (five === undefined || five === null || facts.stale || facts.fiveHour?.rolledOver === true) {
     return `${formatFacts(facts)}\n\n[pacekeeper] Subagent budget contract is unavailable until a fresh shared-account five-hour reading is observed. Do not infer a per-agent budget.`;
   }
-  const contract: ContractInput = { agentId, agentType, cliPath: checkpointCliPath(), fiveHourPercentAtSpawn: five };
+  const handoffOwner = verifiedHandoffOwner(store, identity);
+  if (handoffOwner === undefined) {
+    return `${formatFacts(facts)}\n\n[pacekeeper] Subagent budget reading is available, but native account and child-parent ownership is unverified. Do not create an unowned handoff; a scoped handoff command will be supplied only after native mapping is established.`;
+  }
+  const contract: ContractInput = { agentId, agentType, cliPath: checkpointCliPath(), fiveHourPercentAtSpawn: five, handoffOwner };
   return `${formatFacts(facts)}\n\n${buildContract(contract, config).text}`;
 }
 
@@ -365,6 +382,7 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
   // event even when that event has no prompt marker. State that represents a
   // real user turn is still untouched below.
   recordCompletionEnvelope(input, event, config, store, nowMs);
+  const handoffOwner = verifiedHandoffOwner(store, identity);
   if (!synthetic) {
     store.write(identity, 'debounce', decision.nextState);
     saveTimeline(store, identity, {
@@ -379,25 +397,17 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
       ...(lifecycleReason !== null && event !== 'UserPromptSubmit' ? { pendingWork: false } : {})
     });
     if (event === 'SubagentStart' && stringValue(input.agent_id) && facts.fiveHour?.usedPercent !== null && facts.fiveHour?.usedPercent !== undefined) {
-      saveTimeline(store, identity, { spawnFiveHourPercent: facts.fiveHour.usedPercent, spawnResetAtMs: facts.fiveHour.resetsAtMs, parentThreadId: stringValue(input.thread_id) ?? stringValue(input.session_id) ?? 'unknown-thread' });
+      saveTimeline(store, identity, { spawnFiveHourPercent: facts.fiveHour.usedPercent, spawnResetAtMs: facts.fiveHour.resetsAtMs, ...(handoffOwner ? { parentThreadId: handoffOwner.parentThreadId } : {}) });
     }
   }
 
   if (synthetic) return { output: '{}', facts, decision, identity };
 
   let context = '';
-  if (event === 'SubagentStart') context = buildSubagentText(input, facts, config);
+  if (event === 'SubagentStart') context = buildSubagentText(input, facts, config, store, identity);
   else if (event === 'SubagentStop') {
-    const agentId = stringValue(input.agent_id);
-    let pending = false;
-    try {
-      const root = resolveProjectRoot({ cwdFlag: stringValue(input.cwd), processCwd: process.cwd() });
-      pending = agentId !== undefined && hasHandoff(root, config.checkpoint_dir_name, agentId, config.checkpoint_subdir);
-    } catch { /* An unsafe or unavailable project cannot supply a handoff. */ }
-    const continuationActive = boolValue(input.continuation_active) ?? boolValue(input.stop_hook_active) ?? false;
-    if (pending && !continuationActive) {
-      context = `${formatFacts(facts)}\n\n[pacekeeper] A handoff is pending for ${agentId}; the parent must absorb it once, then run ${checkpointCliPath()} handoffs archive ${agentId}.`;
-    }
+    // This hook runs in the child thread. It cannot stand in for parent return
+    // observation or acknowledgement; the parent's native wait result owns it.
   } else if (event === 'PreCompact' && facts.context?.level === 'critical' && decision.inject) {
     context = `${formatFacts(facts)}\n\n[pacekeeper] Context is critical. Save a resumable checkpoint now with ${checkpointCliPath()} before continuing. The native hook boundary does not prove a save barrier, so do not claim the checkpoint exists until the CLI verifies it.`;
   } else if (decision.inject) {
@@ -422,14 +432,14 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
         saveTimeline(store, identity, { spawnFiveHourPercent: spawn, spawnResetAtMs: currentReset });
       }
       const pause = shouldPause({ fiveHourPercent: facts.fiveHour?.usedPercent ?? null, fiveHourPercentAtSpawn: spawn, contextLevel: facts.context?.level, rolledOver: facts.fiveHour?.rolledOver }, config);
-      if (pause.pause) context += `${context ? '\n\n' : ''}${formatPauseDirective({ agentId, pausePercent: effectivePause(config, spawn) })}`;
+      if (pause.pause) context += `${context ? '\n\n' : ''}${formatPauseDirective({ agentId, pausePercent: effectivePause(config, spawn), ...(handoffOwner ? { handoffOwner } : {}) })}`;
     }
   }
 
   if (event === 'SubagentStart' && facts.fiveHour?.usedPercent !== null && facts.fiveHour?.usedPercent !== undefined) {
     const startAgentId = agentId ?? 'unknown-agent';
     const pause = effectivePause(config, facts.fiveHour.usedPercent);
-    if (facts.fiveHour.usedPercent >= pause) context += `\n\n${formatPauseDirective({ agentId: startAgentId, pausePercent: pause })}`;
+    if (facts.fiveHour.usedPercent >= pause) context += `\n\n${formatPauseDirective({ agentId: startAgentId, pausePercent: pause, ...(handoffOwner ? { handoffOwner } : {}) })}`;
   }
   const plannedAgents = plannedAgentCount(input);
   if (plannedAgents !== undefined && plannedAgents > 1) {

@@ -258,7 +258,9 @@ describe('cross-harness executable scenarios', () => {
     expect(child.identity.agentId).toBe('agent-1');
     expect(store.read(main.identity, 'debounce')).not.toBeNull();
     expect(store.read(child.identity, 'debounce')).not.toBeNull();
-    expect(child.output).toContain('Budget contract');
+    expect(child.output).toContain('native account and child-parent ownership is unverified');
+    expect(child.output).toContain('do not create an unowned handoff');
+    expect(child.output).not.toContain('handoffs write');
   });
 
   test('same-named Claude lane remains untouched by Codex supersession', () => {

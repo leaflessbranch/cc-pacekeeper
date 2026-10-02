@@ -6,7 +6,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { loadCodexConfig } from './config';
 import { diagnose, type DoctorReport } from './doctor';
-import { findCodexExecutable, findLiveOwner, readOwnerRegistry } from './live-sessions';
+import { findCodexExecutable, findLiveOwner, nativeControlSocketPath, readOwnerRegistry } from './live-sessions';
 import { NATIVE_PROTOCOL_VERSION, normalizeNativeCapabilities } from './native';
 import { CodexStore } from './storage';
 
@@ -49,10 +49,21 @@ export function runDoctorCli(): DoctorReport {
   const protocolObserved = owner !== undefined
     && owner.protocolVersion !== 'unknown'
     && owner.methods !== undefined;
-  const timeline = threadId && ownerStatus === 'found'
+  const timeline = threadId
     ? new CodexStore().read({ accountId, threadId }, 'timeline')
     : null;
   const timelineRow = typeof timeline === 'object' && timeline !== null ? timeline as Record<string, unknown> : null;
+  const rawCorrelation = timelineRow?.['inFlightCorrelation'];
+  const correlationRow = typeof rawCorrelation === 'object' && rawCorrelation !== null && !Array.isArray(rawCorrelation)
+    ? rawCorrelation as Record<string, unknown>
+    : null;
+  const correlationStatus = typeof correlationRow?.['status'] === 'string'
+    && ['bound', 'already-bound', 'unmatched', 'ambiguous', 'foreign-owner', 'late', 'conflict', 'unavailable'].includes(correlationRow['status'])
+    ? correlationRow['status']
+    : null;
+  const correlationAtMs = typeof correlationRow?.['observedAtMs'] === 'number' && Number.isFinite(correlationRow['observedAtMs'])
+    ? correlationRow['observedAtMs']
+    : null;
   const lastObservedAtMs = typeof timelineRow?.['quotaObservedAtMs'] === 'number'
     ? timelineRow['quotaObservedAtMs']
     : null;
@@ -78,6 +89,10 @@ export function runDoctorCli(): DoctorReport {
     freshnessSeconds: config.config.usage_freshness_seconds,
     configDiagnostics: config.diagnostics,
     protocolObserved,
+    nativeControlSocketObserved: nativeControlSocketPath() !== null,
+    inFlightCorrelation: correlationStatus === null || correlationAtMs === null
+      ? null
+      : { status: correlationStatus, ageSeconds: Math.max(0, (Date.now() - correlationAtMs) / 1000) },
     executableObserved: executable !== null,
     executableVersion: version,
     // Environment configuration can say a hook is enabled, but it cannot

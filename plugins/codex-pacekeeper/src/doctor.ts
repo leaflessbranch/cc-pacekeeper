@@ -51,6 +51,10 @@ export interface DoctorInput {
   /** Persistent sampler state is local; proactive native notification needs a
    * separate, observed harness delivery boundary. */
   presenceDelivery?: 'observed' | 'unavailable' | 'unknown';
+  /** A socket path is endpoint evidence only; it does not prove a thread is loaded. */
+  nativeControlSocketObserved?: boolean;
+  /** Latest sanitized result persisted by the bounded in-flight correlator. */
+  inFlightCorrelation?: { status: string; ageSeconds: number } | null;
   /** Accepted so a caller need not strip them; never included in the report. */
   accountId?: string;
   threadId?: string;
@@ -91,6 +95,25 @@ export function diagnose(input: DoctorInput): DoctorReport {
         : input.ownerStatus === 'absent'
           ? 'no live owner holds this thread; delivery has no target'
           : `owner selection was ${input.ownerStatus}; delivery is withheld rather than guessed`
+  });
+
+  if (input.nativeControlSocketObserved !== undefined) {
+    checks.push({
+      name: 'native control socket path',
+      status: input.nativeControlSocketObserved ? 'ok' : 'warn',
+      detail: input.nativeControlSocketObserved
+        ? 'the local Codex control socket path is present; each hook still verifies loaded thread and account'
+        : 'the local Codex control socket path was not observed; native control discovery is unavailable'
+    });
+  }
+
+  const correlation = input.inFlightCorrelation;
+  checks.push({
+    name: 'in-flight turn correlation',
+    status: 'warn',
+    detail: correlation === undefined || correlation === null
+      ? 'no persisted native in-flight correlation was observed; this path does not establish atomic pre-model suppression'
+      : `the latest native correlation was ${correlation.status} ${Math.max(0, correlation.ageSeconds)}s ago; observation does not establish atomic pre-model suppression`
   });
 
   checks.push({

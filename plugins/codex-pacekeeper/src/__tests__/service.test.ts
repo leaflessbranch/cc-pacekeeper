@@ -74,7 +74,7 @@ function writeResetFacts(store: CodexStore, wake: { job: { owner: { accountId: s
 }
 
 describe('Codex durable service', () => {
-  test('a subagent stop finds CLI-root handoffs below a checkout without a quota warning', () => {
+  test('a child stop cannot claim parent receipt for an unowned legacy handoff', () => {
     const fixtures = join(import.meta.dir, '.service-fixtures');
     mkdirSync(fixtures, { recursive: true });
     const project = mkdtempSync(join(fixtures, 'handoff-root-'));
@@ -84,7 +84,8 @@ describe('Codex durable service', () => {
       writeHandoff({ cwd: project, checkpointDirName: CODEX_DEFAULTS.checkpoint_dir_name, agentId: 'child-root', trigger: 'budget_pause', body: 'Continue step two.' });
       const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-handoff-stop-')));
       const result = runTick({ hook_event_name: 'SubagentStop', session_id: owner.threadId, account_id: owner.accountId, agent_id: 'child-root', cwd: join(project, 'src'), now_ms: NOW }, { config: CODEX_DEFAULTS, store });
-      expect(result.output).toContain('A handoff is pending for child-root');
+      expect(result.output).toBe('{}');
+      expect(store.read({ accountId: owner.accountId, threadId: owner.threadId, agentId: 'wait-return-child-root' }, 'owner')).toBeNull();
       const continuation = runTick({ hook_event_name: 'SubagentStop', session_id: owner.threadId, account_id: owner.accountId, agent_id: 'child-root', cwd: join(project, 'src'), stop_hook_active: true, now_ms: NOW }, { config: CODEX_DEFAULTS, store });
       expect(continuation.output).toBe('{}');
     } finally { rmSync(project, { recursive: true, force: true }); }
