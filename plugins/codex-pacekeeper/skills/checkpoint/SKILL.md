@@ -32,8 +32,8 @@ only after the consumer has received the body.
 - Resuming an id that was already consumed reports `already-consumed`. That is
   the correct answer, not an error to retry around: the work was already
   picked up, and repeating it would redo finished work.
-- A bare resume with more than one active lane reports the lanes and consumes
-  **nothing**. Choose one explicitly.
+- A bare resume is rejected and consumes **nothing**. Run `list`, then choose
+  an exact checkpoint id.
 - Archived content is retained, so a consumer that fails after acknowledgement
   can still inspect the consumed text; a consumer that fails before ack can
   retry the active claim by token.
@@ -45,6 +45,21 @@ the active file in place while a consumer works; only an acknowledgement
 archives it. The CLI `ack` requires the exact token printed by `claim`/`resume`
 and the owning thread id. Queue acceptance and a reset wake are separate from
 checkpoint consumption.
+
+## Preparing a reset wake
+
+Save with `--thread-id <thread> --account-id <account> --reset-generation <n>`
+and verify the printed checkpoint id. Only use an authoritative reset timestamp
+and generation; do not infer them from usage percentages or a guessed clock.
+Then register the exact checkpoint using the installed sibling
+`bin/pacekeeper-service schedule-reset --cwd <project-root>
+--account-id <account> --thread-id <thread> --checkpoint-id <checkpoint-id>
+--reset-at-ms <timestamp> --reset-generation <n>`.
+
+The generation must match the saved checkpoint. Registration is a durable
+request, not delivery: production wake execution remains blocked until native
+pre-model cancellation is supported. No automatic save-to-wake lifecycle or
+live reset acceptance is claimed.
 
 Codex's native PreCompact hook does not prove a save barrier. When the hook
 reports critical context, run `save` and verify the printed file before

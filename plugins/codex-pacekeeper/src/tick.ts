@@ -9,9 +9,7 @@ import { CodexStore, type StateIdentity } from './storage';
 import type { NativeRateLimitsResponse } from './native';
 import { readFileSync } from 'fs';
 import { CodexService } from './service';
-
-const KEEPALIVE_MARKER = '[pacekeeper-keepalive]';
-const RESET_WAKE_MARKER = '[pacekeeper-resume]';
+import { resolveProjectRoot } from './resolve-root';
 
 export interface TickInput {
   hook_event_name?: unknown;
@@ -196,9 +194,10 @@ function ownedSyntheticJob(input: TickInput, store: CodexStore): Record<string, 
     const owner = typeof row['owner'] === 'object' && row['owner'] !== null ? row['owner'] as Record<string, unknown> : null;
     if ((row['kind'] !== 'keepalive' && row['kind'] !== 'reset-wake') || owner === null || owner['threadId'] !== threadId) return false;
     if (accountId !== undefined && owner['accountId'] !== accountId) return false;
-    return (jobId !== undefined && row['id'] === jobId)
-      || (submissionId !== undefined && row['submissionId'] === submissionId)
-      || (turnId !== undefined && row['turnId'] === turnId);
+    if (jobId !== undefined && row['id'] !== jobId) return false;
+    if (submissionId !== undefined && row['submissionId'] !== submissionId) return false;
+    if (turnId !== undefined && row['turnId'] !== turnId) return false;
+    return jobId !== undefined || submissionId !== undefined || turnId !== undefined;
   });
   // When account_id is omitted, one exact same-thread owned job is enough;
   // multiple account matches are ambiguous and must remain ordinary input.
@@ -213,9 +212,7 @@ function matchesOwnedSynthetic(input: TickInput, store: CodexStore): boolean {
 }
 
 function isSynthetic(input: TickInput, store: CodexStore): boolean {
-  const prompt = stringValue(input.prompt)?.trimStart() ?? '';
-  const packageMarker = prompt.startsWith(KEEPALIVE_MARKER) || prompt.startsWith(RESET_WAKE_MARKER);
-  return matchesOwnedSynthetic(input, store) || (input.synthetic === true && packageMarker) || packageMarker;
+  return matchesOwnedSynthetic(input, store);
 }
 
 function cachedTimeline(store: CodexStore, input: TickInput): Record<string, unknown> | null {
@@ -231,7 +228,7 @@ function cachedTimeline(store: CodexStore, input: TickInput): Record<string, unk
   const candidates = store.list('timeline').filter((candidate): candidate is Record<string, unknown> => {
     if (typeof candidate !== 'object' || candidate === null) return false;
     const row = candidate as Record<string, unknown>;
-    if (row['threadId'] !== threadId) return false;
+    if (row['threadId'] !== threadId || row['agentId'] !== undefined) return false;
     return accountId === null || row['accountId'] === accountId;
   });
   if (accountId === null) {
@@ -276,9 +273,16 @@ function factsFrom(input: TickInput, config: CodexConfig, nowMs: number, store: 
   const cached = cachedTimeline(store, input);
   const suppliedRateLimits = input.rateLimits ?? input.rate_limits;
   const rateLimits = suppliedRateLimits as Parameters<typeof buildFacts>[0]['rateLimits'] | null | undefined ?? cachedRateLimits(cached);
-  const cachedContextAt = numberValue(cached?.['contextObservedAtMs']);
+  // Context belongs to the verified transcript thread; unavailable account
+  // transport must not hide a newer context reading or refresh account facts.
+  const threadContext = store.read({ accountId: null, threadId: stringValue(input.thread_id) ?? stringValue(input.session_id) ?? 'unknown-thread' }, 'timeline') as Record<string, unknown> | null;
+  const accountContextAt = numberValue(cached?.['contextObservedAtMs']) ?? -1;
+  const threadContextAt = numberValue(threadContext?.['contextObservedAtMs']) ?? -1;
+  const invalidatedAt = numberValue(threadContext?.['contextInvalidatedAtMs']) ?? -1;
+  const context = threadContextAt >= accountContextAt || invalidatedAt >= accountContextAt ? threadContext : cached;
+  const cachedContextAt = numberValue(context?.['contextObservedAtMs']);
   const cachedContextFresh = cachedContextAt !== undefined && nowMs >= cachedContextAt && nowMs - cachedContextAt <= config.usage_freshness_seconds * 1000;
-  const tokenUsage = input.tokenUsage ?? input.token_usage ?? (cachedContextFresh ? cachedTokenUsage(cached) : null);
+  const tokenUsage = input.tokenUsage ?? input.token_usage ?? (cachedContextFresh ? cachedTokenUsage(context) : null);
   const observedAtMs = numberValue(input.observed_at_ms)
     ?? (rateLimits !== null && rateLimits !== undefined
       ? numberValue(cached?.['quotaObservedAtMs']) ?? numberValue(cached?.['lastObservedAtMs']) ?? nowMs
@@ -341,7 +345,7 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
   const synthetic = isSynthetic(input, store);
   const facts = factsFrom(input, config, nowMs, store);
   const identity = identityFor(input, facts);
-  const lifecycleReason = synthetic ? null : lifecycleBoundary(input, event);
+  const lifecycleReason = synthetic ? null : (event === 'UserPromptSubmit' ? 'the user became active' : lifecycleBoundary(input, event));
   if (lifecycleReason !== null && identity.threadId !== 'unknown-thread') {
     new CodexService({ config, store }).cancelOwnerJobs({ accountId: identity.accountId, threadId: identity.threadId }, lifecycleReason);
   }
@@ -372,10 +376,10 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
       ...(event === 'SessionEnd' ? { sessionEndedAtMs: nowMs, ...(boolValue(input.pending_work) === undefined && boolValue(input.pendingWork) === undefined ? { pendingWork: false } : {}) } : {}),
       ...(event === 'Interrupt' && boolValue(input.pending_work) === undefined && boolValue(input.pendingWork) === undefined ? { pendingWork: false, interruptedAtMs: nowMs } : {}),
       ...(event === 'UserPromptSubmit' && boolValue(input.pending_work) === undefined && boolValue(input.pendingWork) === undefined ? { pendingWork: true } : {}),
-      ...(lifecycleReason !== null ? { pendingWork: false } : {})
+      ...(lifecycleReason !== null && event !== 'UserPromptSubmit' ? { pendingWork: false } : {})
     });
     if (event === 'SubagentStart' && stringValue(input.agent_id) && facts.fiveHour?.usedPercent !== null && facts.fiveHour?.usedPercent !== undefined) {
-      saveTimeline(store, identity, { spawnFiveHourPercent: facts.fiveHour.usedPercent, parentThreadId: stringValue(input.thread_id) ?? stringValue(input.session_id) ?? 'unknown-thread' });
+      saveTimeline(store, identity, { spawnFiveHourPercent: facts.fiveHour.usedPercent, spawnResetAtMs: facts.fiveHour.resetsAtMs, parentThreadId: stringValue(input.thread_id) ?? stringValue(input.session_id) ?? 'unknown-thread' });
     }
   }
 
@@ -385,9 +389,13 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
   if (event === 'SubagentStart') context = buildSubagentText(input, facts, config);
   else if (event === 'SubagentStop') {
     const agentId = stringValue(input.agent_id);
-    const pending = agentId && hasHandoff(String(input.cwd ?? process.cwd()), config.checkpoint_dir_name, agentId, config.checkpoint_subdir);
+    let pending = false;
+    try {
+      const root = resolveProjectRoot({ cwdFlag: stringValue(input.cwd), processCwd: process.cwd() });
+      pending = agentId !== undefined && hasHandoff(root, config.checkpoint_dir_name, agentId, config.checkpoint_subdir);
+    } catch { /* An unsafe or unavailable project cannot supply a handoff. */ }
     const continuationActive = boolValue(input.continuation_active) ?? boolValue(input.stop_hook_active) ?? false;
-    if (pending && decision.inject && !continuationActive) {
+    if (pending && !continuationActive) {
       context = `${formatFacts(facts)}\n\n[pacekeeper] A handoff is pending for ${agentId}; the parent must absorb it once, then run ${checkpointCliPath()} handoffs archive ${agentId}.`;
     }
   } else if (event === 'PreCompact' && facts.context?.level === 'critical' && decision.inject) {
@@ -401,10 +409,18 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
   const agentId = stringValue(input.agent_id);
   if (agentId && event !== 'SubagentStart' && event !== 'SubagentStop') {
     const timeline = store.read(identity, 'timeline');
-    const spawn = typeof timeline === 'object' && timeline !== null && typeof (timeline as Record<string, unknown>)['spawnFiveHourPercent'] === 'number'
+    let spawn = typeof timeline === 'object' && timeline !== null && typeof (timeline as Record<string, unknown>)['spawnFiveHourPercent'] === 'number'
       ? (timeline as Record<string, unknown>)['spawnFiveHourPercent'] as number
       : null;
     if (spawn !== null && !facts.stale) {
+      const row = timeline as Record<string, unknown>;
+      const currentReset = facts.fiveHour?.resetsAtMs;
+      const currentPercent = facts.fiveHour?.usedPercent;
+      if (currentReset !== null && currentReset !== undefined && currentPercent !== null && currentPercent !== undefined
+        && facts.fiveHour?.rolledOver !== true && typeof row['spawnResetAtMs'] === 'number' && row['spawnResetAtMs'] !== currentReset) {
+        spawn = currentPercent;
+        saveTimeline(store, identity, { spawnFiveHourPercent: spawn, spawnResetAtMs: currentReset });
+      }
       const pause = shouldPause({ fiveHourPercent: facts.fiveHour?.usedPercent ?? null, fiveHourPercentAtSpawn: spawn, contextLevel: facts.context?.level, rolledOver: facts.fiveHour?.rolledOver }, config);
       if (pause.pause) context += `${context ? '\n\n' : ''}${formatPauseDirective({ agentId, pausePercent: effectivePause(config, spawn) })}`;
     }

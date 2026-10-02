@@ -7,11 +7,11 @@ and jobs separate from the Claude package.
 
 ## Current pass
 
-This pass was interrupted on 2026-10-02 at the user's request. The saved
-changes are WIP; final worker validation and independent review are incomplete.
-See [the paused handoff](handoffs/2026-10-02-issue-19-paused.md) for the
-observed evidence and outstanding work. Implementation claims below remain
-subject to that review.
+The user resumed the saved checkpoint on 2026-10-02. The local completion
+pass repaired the confirmed review findings and reran independent validation.
+See [the review record](codex-review-2026-10-02.md) for evidence and the
+remaining production/native/live gates. This branch is experimental; complete
+Codex parity and release readiness are not established.
 
 The implementation targets the installed Codex CLI 0.160.0 contract. The
 branch began at `45fb37edd8ad27fd38c4e11c4c3b7390f0fbf0bf`; the Claude package
@@ -63,17 +63,17 @@ or capacity percentage as a substitute for those semantics.
 | 3 | Context meter | partial | The bounded `transcript_path` observer consumes persisted native `TokenCount` records, uses `last_token_usage` and nullable model-window/cache fields, preserves original timestamps, validates the canonical first `SessionMeta`, and invalidates usage across compaction/turn boundaries. Claude's fallback window is not used; a running-thread comparison remains. |
 | 4 | Compact status injection | partial | Event-specific `systemMessage`, `hookSpecificOutput`, and Stop/SubagentStop `decision:block` output are tested. Native hook trust and firing remain live gates. |
 | 5 | Threshold state machine | partial | Inclusive ladders, escalation, debounce, rollover reset, and context re-arm are covered by Codex and parity tests. A live native event trace remains. |
-| 6 | Debounce and idempotency | partial | Hashed account/thread/agent state, continuation suppression, synthetic suppression, duplicate lifecycle handling, and stable job IDs are implemented. Duplicate live event delivery remains. |
+| 6 | Debounce and idempotency | partial | Hashed account/thread/agent state, continuation suppression, synthetic suppression, duplicate lifecycle handling, and stable job IDs are implemented. Native hooks expose turn ids, but no pre-completion production producer binds them to owned submissions; synthetic dispatch remains closed. Duplicate live event delivery remains. |
 | 7 | Time and AFK awareness | partial | User, tool, synthetic, session, and pending-work clocks are separate; independent presence sampling persists transitions. Live away/back behavior remains. |
 | 8 | Cross-session awareness | partial | Owner registry parsing is strict, malformed rows are unknown, native control-socket discovery verifies loaded threads, and account mismatches withhold jobs. A native owner producer and live multi-session trace remain. |
 | 9 | Model/window arbitrage | deferred | Explicitly deferred; native model switching and bucket recommendations are not duplicated. |
 | 10 | Checkpoint lanes | partial | Codex-owned roots, exact IDs, atomic writes, provenance, claim/ack/archive, ambiguous selection, and Claude-lane isolation are tested. Real project-root CLI acceptance remains. |
 | 11 | Context auto-save | blocked | The examined hook/native boundary cannot produce a model-generated save barrier before compaction. The adapter reports that limitation and never claims a save from hook output. |
-| 12 | Five-hour renewal | partial | The public `schedule-reset` service entrypoint records separate reset identity/generation, bounded wait, fresh post-reset five-hour identity checks, and cancellation gates. A live reset trace remains. |
-| 13 | Near-reset bridge | partial | The public reset scheduler retains the same owner/thread, bounds the wait with `max_wait_min`, and withholds delivery until an active next window is observed. Live bridge acceptance remains. |
+| 12 | Five-hour renewal | blocked | The public `schedule-reset` entrypoint verifies the saved checkpoint generation and records its project root. Execution consumes native owner-timeline quota and a fresh next-window identity. Native pre-model cancellation is unsupported; automatic save-to-wake integration and a live reset trace remain. |
+| 13 | Near-reset bridge | blocked | The public scheduler bounds the wait and preserves owner/thread. Production delivery remains blocked by missing native pre-model cancellation; automatic lifecycle integration and a live bridge trace remain. |
 | 14 | Resume consumption | partial | Exact-ID claim, owner-bound acknowledgement, archive corruption checks, replay idempotency, crash recovery, and native turn correlation are implemented. A live CLI consumption trace remains. |
-| 15 | Subagent budgets | partial | Shared-account spawn-relative estimates, rollover rebasing, and unknown-meter fail-closed behavior are tested. Native lifecycle acceptance remains. |
-| 16 | Subagent handoffs | partial | Absolute CLI contracts, atomic owned handoffs, one-time parent receipt, and archive verbs are implemented. A live parent absorption trace remains. |
+| 15 | Subagent budgets | partial | Shared-account spawn-relative estimates, fresh reset-identity anchor rebasing, and unknown-meter fail-closed behavior are tested. Native lifecycle acceptance remains. |
+| 16 | Subagent handoffs | partial | Absolute CLI contracts, atomic Codex-subtree writes, list/archive verbs, and a root-consistent child stop notice independent of meter debounce are implemented. Account/parent ownership, a durable parent receipt producer, and native parent absorption remain unproved. |
 | 17 | Dispatch advisory | partial | Known hook `tool_name` values are mapped conservatively and advice never denies ordinary spawning; unknown values fail closed. A live specialized spawn trace remains. |
 | 18 | Cache keepalive | blocked | Durable 30-minute identities, existing-owner delivery, fresh quota/auth refresh, pending-work production, queue reconciliation, cancellation intent, and strict completion parsing are implemented. Production dispatch remains blocked because strict no-tools and atomic pre-model suppression are unavailable. |
 | 19 | Cache observability | partial | Context, cache read/write, multi-bucket quota, ordinary permission, auth, activity, and freshness clocks are persisted without fabricating absent values. Live diagnostics remain. |
@@ -97,18 +97,17 @@ Every local command below uses child-process HOME, Claude config, Codex home,
 XDG config, and XDG cache overrides. No real profile, credential, raw
 transcript, live model turn, or normal-session queue was used.
 
-No final worker report or independent final suite run was completed before
-the pause. Existing logs predate some saved edits and do not certify this
-checkpoint. The commands to run after authorized resume are:
+Fresh independent validation ran after the local repairs in isolated process
+environments. The review record identifies the tested code and retained logs:
 
 | Suite | Command | Evidence |
 |---|---|---|
-| Codex | `bun test` in `plugins/codex-pacekeeper` | Disposable suite log under `/tmp/issue19-final-logs/` |
-| Codex typecheck | `bun run typecheck` in `plugins/codex-pacekeeper` | Disposable typecheck log under `/tmp/issue19-final-logs/` |
-| Claude | `bun test` in `plugins/cc-pacekeeper` | Isolated suite log under `/tmp/issue19-final-logs/` |
-| Claude typecheck | `bun run typecheck` in `plugins/cc-pacekeeper` | Isolated typecheck log under `/tmp/issue19-final-logs/` |
-| Parity | `bun test` in `tests/parity` | Isolated parity log under `/tmp/issue19-final-logs/` |
-| Parity typecheck | `bun run typecheck` in `tests/parity` | Isolated parity typecheck log under `/tmp/issue19-final-logs/` |
+| Codex | `bun test` in `plugins/codex-pacekeeper` | 266 passed, 0 failed; current independent evidence in the review record |
+| Codex typecheck | `bun run typecheck` in `plugins/codex-pacekeeper` | Exit 0; current independent evidence in the review record |
+| Claude | `bun test` in `plugins/cc-pacekeeper` | 418 passed, 0 failed; current independent evidence in the review record |
+| Claude typecheck | `bun run typecheck` in `plugins/cc-pacekeeper` | Exit 0; current independent evidence in the review record |
+| Parity | `bun test` in `tests/parity` | 41 passed, 0 failed; current independent evidence in the review record |
+| Parity typecheck | `bun run typecheck` in `tests/parity` | Exit 0; current independent evidence in the review record |
 
 The actual native disposable smoke also covered WebSocket handshake and
 bootstrap methods, and the disposable package smoke covered marketplace add,

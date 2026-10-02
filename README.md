@@ -101,12 +101,14 @@ active until `ack --token ...` confirms receipt. Native no-tools,
 execution-race suppression and model-generated PreCompact save barriers remain
 blocked by the examined interface.
 
-After a verified checkpoint save, a caller with the authoritative account,
+After a verified checkpoint save with `--reset-generation <n>`, a caller with the authoritative account,
 thread, reset timestamp, and reset generation may register its one-shot wake
 with `bin/pacekeeper-service schedule-reset --cwd <project-root>
 --account-id <id> --thread-id <id> --checkpoint-id <id> --reset-at-ms <ms>
 --reset-generation <n>`. The service rechecks that exact checkpoint and native
-reset identity before delivery.
+reset identity before delivery. Registration does not enable production wake
+execution: native pre-model cancellation remains unsupported. Automatic
+save-to-wake integration and a live reset trace are still acceptance gates.
 
 To install the Codex package from this repository, install its locked runtime
 dependencies first, then register the Codex-only marketplace and add the

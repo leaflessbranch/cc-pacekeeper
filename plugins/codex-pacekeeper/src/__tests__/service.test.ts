@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { CODEX_DEFAULTS } from '../config';
@@ -7,6 +7,10 @@ import { ACCOUNT_READ_METHOD, NativeClient, normalizeNativeCapabilities, QUEUE_A
 import { advance, createJob } from '../jobs';
 import { CodexService, parseServiceArgs } from '../service';
 import { CodexStore } from '../storage';
+import { CodexCheckpoints } from '../checkpoint';
+import { writeHandoff } from '../agent-budget';
+import { execFileSync } from 'child_process';
+import { runTick } from '../tick';
 
 const NOW = 1_700_000_000_000;
 const owner = { accountId: 'acct-service', threadId: 'thread-service' };
@@ -50,8 +54,9 @@ function resetTimelineIdentity(wake: { job: { owner: { accountId: string | null;
 function writeResetFacts(store: CodexStore, wake: { job: { owner: { accountId: string | null; threadId: string }; id: string } }, resetAtMs: number, nextResetAtMs: number | null): void {
   const identity = resetTimelineIdentity(wake);
   const timeline = store.read(identity, 'timeline') as Record<string, unknown>;
-  store.write(identity, 'timeline', {
-    ...timeline,
+  store.write(identity, 'timeline', { ...timeline, resetAtMs });
+  store.write(wake.job.owner, 'timeline', {
+    ...wake.job.owner,
     quotaObservedAtMs: NOW,
     ordinaryUsageObservedAtMs: NOW,
     authenticated: true,
@@ -69,6 +74,50 @@ function writeResetFacts(store: CodexStore, wake: { job: { owner: { accountId: s
 }
 
 describe('Codex durable service', () => {
+  test('a subagent stop finds CLI-root handoffs below a checkout without a quota warning', () => {
+    const fixtures = join(import.meta.dir, '.service-fixtures');
+    mkdirSync(fixtures, { recursive: true });
+    const project = mkdtempSync(join(fixtures, 'handoff-root-'));
+    try {
+      execFileSync('git', ['init', '-q', project]);
+      mkdirSync(join(project, 'src'));
+      writeHandoff({ cwd: project, checkpointDirName: CODEX_DEFAULTS.checkpoint_dir_name, agentId: 'child-root', trigger: 'budget_pause', body: 'Continue step two.' });
+      const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-handoff-stop-')));
+      const result = runTick({ hook_event_name: 'SubagentStop', session_id: owner.threadId, account_id: owner.accountId, agent_id: 'child-root', cwd: join(project, 'src'), now_ms: NOW }, { config: CODEX_DEFAULTS, store });
+      expect(result.output).toContain('A handoff is pending for child-root');
+      const continuation = runTick({ hook_event_name: 'SubagentStop', session_id: owner.threadId, account_id: owner.accountId, agent_id: 'child-root', cwd: join(project, 'src'), stop_hook_active: true, now_ms: NOW }, { config: CODEX_DEFAULTS, store });
+      expect(continuation.output).toBe('{}');
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  });
+
+  test('native owner refresh supplies reset readiness without test-written job quota', async () => {
+    const calls: string[] = [];
+    const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-reset-owner-facts-')));
+    store.write(owner, 'timeline', { ...owner, pendingWork: true, lastUserActivityAtMs: NOW - 60_000 });
+    const service = new CodexService({ config: CODEX_DEFAULTS, store, now: () => NOW, resolveClient: async () => freshFactsClient(calls), checkpointExists: () => true });
+    const wake = service.scheduleResetWake(owner, 'checkpoint-native', NOW - CODEX_DEFAULTS.auto.wake_delay_min * 60_000 - 1_000, 91);
+    const result = (await service.runDueJobs()).find((job) => job.id === wake.job.id);
+    expect(result?.state).toBe('queued');
+    expect(calls.some((call) => call.startsWith(`${QUEUE_ADD_METHOD}:`) && call.includes('[pacekeeper-resume] checkpoint-native'))).toBe(true);
+  });
+
+  test('a restarted service verifies the reset checkpoint in its recorded project', async () => {
+    const fixtures = join(import.meta.dir, '.service-fixtures');
+    mkdirSync(fixtures, { recursive: true });
+    const project = mkdtempSync(join(fixtures, 'reset-root-'));
+    try {
+      const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-reset-root-store-')));
+      store.write(owner, 'timeline', { ...owner, pendingWork: true, lastUserActivityAtMs: NOW - 60_000 });
+      const checkpoint = new CodexCheckpoints(project, CODEX_DEFAULTS).save({ lane: 'reset', owner, body: 'Goal: continue fixture work', resetGeneration: 92 });
+      const scheduler = new CodexService({ config: CODEX_DEFAULTS, store, now: () => NOW, projectRoot: project });
+      expect(() => scheduler.scheduleResetWake(owner, checkpoint.id, NOW, 93)).toThrow(/checkpoint/);
+      const wake = scheduler.scheduleResetWake(owner, checkpoint.id, NOW - CODEX_DEFAULTS.auto.wake_delay_min * 60_000 - 1_000, 92);
+      const restarted = new CodexService({ config: CODEX_DEFAULTS, store, now: () => NOW, resolveClient: async () => freshFactsClient([]) });
+      const result = (await restarted.runDueJobs()).find((job) => job.id === wake.job.id);
+      expect(result?.state).toBe('queued');
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  });
+
   test('public schedule-reset command preserves exact owner and reset arguments', () => {
     expect(parseServiceArgs([
       'schedule-reset',
@@ -308,10 +357,8 @@ describe('Codex durable service', () => {
     const service = new CodexService({ config: CODEX_DEFAULTS, store, now: () => NOW, resolveClient: async () => fakeClient(calls), checkpointExists: () => true, eligibility: () => ({ nowMs: NOW, enabled: true, capacity: 'included', pendingWork: true, ownerLive: true, fresh: true, idleForMs: 0, strict: true }) });
     const resetAtMs = NOW - CODEX_DEFAULTS.auto.wake_delay_min * 60_000 - 1_000;
     const wake = service.scheduleResetWake(owner, 'checkpoint-no-window', resetAtMs, 77);
-    const identity = resetTimelineIdentity(wake);
-    const timeline = store.read(identity, 'timeline') as Record<string, unknown>;
-    store.write(identity, 'timeline', {
-      ...timeline,
+    store.write(wake.job.owner, 'timeline', {
+      ...wake.job.owner,
       quotaObservedAtMs: NOW,
       ordinaryUsageObservedAtMs: NOW,
       authenticated: true,
@@ -330,10 +377,8 @@ describe('Codex durable service', () => {
     const service = new CodexService({ config: CODEX_DEFAULTS, store, now: () => NOW, resolveClient: async () => fakeClient(calls), checkpointExists: () => true, eligibility: () => ({ nowMs: NOW, enabled: true, capacity: 'included', pendingWork: true, ownerLive: true, fresh: true, idleForMs: 0, strict: true }) });
     const resetAtMs = NOW - CODEX_DEFAULTS.auto.wake_delay_min * 60_000 - 1_000;
     const wake = service.scheduleResetWake(owner, 'checkpoint-ended-window', resetAtMs, 78);
-    const identity = resetTimelineIdentity(wake);
-    const timeline = store.read(identity, 'timeline') as Record<string, unknown>;
-    store.write(identity, 'timeline', {
-      ...timeline,
+    store.write(wake.job.owner, 'timeline', {
+      ...wake.job.owner,
       quotaObservedAtMs: NOW,
       ordinaryUsageObservedAtMs: NOW,
       authenticated: true,
@@ -352,10 +397,8 @@ describe('Codex durable service', () => {
     const service = new CodexService({ config: CODEX_DEFAULTS, store, now: () => NOW, resolveClient: async () => fakeClient(calls), checkpointExists: () => true, eligibility: () => ({ nowMs: NOW, enabled: true, capacity: 'included', pendingWork: true, ownerLive: true, fresh: true, idleForMs: 0, strict: true }) });
     const resetAtMs = NOW - CODEX_DEFAULTS.auto.wake_delay_min * 60_000 - 1_000;
     const wake = service.scheduleResetWake(owner, 'checkpoint-next-window', resetAtMs, 79);
-    const identity = resetTimelineIdentity(wake);
-    const timeline = store.read(identity, 'timeline') as Record<string, unknown>;
-    store.write(identity, 'timeline', {
-      ...timeline,
+    store.write(wake.job.owner, 'timeline', {
+      ...wake.job.owner,
       quotaObservedAtMs: NOW,
       ordinaryUsageObservedAtMs: NOW,
       authenticated: true,

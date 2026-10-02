@@ -249,6 +249,7 @@ export function refreshObservations(input: RefreshInput, store = new CodexStore(
     ...(quotaObserved ? { quotaObservedAtMs: nowMs } : {}),
     ...(explicitOrdinaryPermission ? { ordinaryUsageObservedAtMs: nowMs } : {}),
     ...(contextObserved ? { contextObservedAtMs: contextObservedAtMs } : {}),
+    ...(invalidateContext ? { contextInvalidatedAtMs: nowMs } : {}),
     ...(authObserved ? { authObservedAtMs: nowMs } : {}),
     ...(event === 'PostToolUse' ? { lastActivityAtMs: nowMs, lastWorkAtMs: nowMs, lastToolActivityAtMs: nowMs } : {}),
     ...(typeof input.pending_work === 'boolean' ? { pendingWork: input.pending_work } : typeof input.pendingWork === 'boolean' ? { pendingWork: input.pendingWork } : {}),
@@ -258,6 +259,7 @@ export function refreshObservations(input: RefreshInput, store = new CodexStore(
     // boolean, but it must not advance auth freshness until a boolean is read.
     ...(input.authenticated === null || typeof input.authenticated === 'boolean' ? { authenticated: input.authenticated } : {})
   } as Record<string, unknown>;
+  if (contextObserved) delete next['contextInvalidatedAtMs'];
   if (invalidateContext) {
     delete next['contextObservedAtMs'];
     delete next['tokenUsage'];

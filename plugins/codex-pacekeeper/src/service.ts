@@ -33,7 +33,7 @@ export interface ServiceOptions {
    * result) only after archive acknowledgement. */
   consumeCheckpoint?: (job: Job, checkpointId: string) => Promise<boolean | 'already-consumed'>;
   /** Production scheduling verifies the exact active checkpoint before wake. */
-  checkpointExists?: (owner: JobOwner, checkpointId: string) => boolean;
+  checkpointExists?: (owner: JobOwner, checkpointId: string, projectRoot?: string, resetGeneration?: number) => boolean;
   /** Project root recorded for checkpoint existence and reset-wake provenance. */
   projectRoot?: string;
 }
@@ -103,14 +103,20 @@ export class CodexService {
   private readonly resolveClient: (owner: JobOwner) => Promise<NativeClient | null>;
   private readonly eligibility?: (job: Job, phase: 'schedule' | 'execute') => ServiceEligibility;
   private readonly consumeCheckpoint?: (job: Job, checkpointId: string) => Promise<boolean | 'already-consumed'>;
-  private readonly checkpointExists: (owner: JobOwner, checkpointId: string) => boolean;
+  private readonly checkpointExists: (owner: JobOwner, checkpointId: string, projectRoot?: string, resetGeneration?: number) => boolean;
   private readonly projectRoot?: string;
   private readonly defaultEligibility: boolean;
   private readonly freshlyObservedOwners = new Set<string>();
   private readonly refreshFailedOwners = new Set<string>();
 
-  private hasCheckpoint(owner: JobOwner, checkpointId: string): boolean {
-    try { return this.checkpointExists(owner, checkpointId); } catch { return false; }
+  private hasCheckpoint(owner: JobOwner, checkpointId: string, job?: Job, resetGeneration = job?.resetGeneration): boolean {
+    try {
+      const timeline = job === undefined ? null : this.store.read(jobIdentity(job), 'timeline');
+      const root = typeof timeline === 'object' && timeline !== null && typeof (timeline as Record<string, unknown>)['projectRoot'] === 'string'
+        ? (timeline as Record<string, unknown>)['projectRoot'] as string
+        : this.projectRoot;
+      return this.checkpointExists(owner, checkpointId, root, resetGeneration);
+    } catch { return false; }
   }
 
   public constructor(options: ServiceOptions = {}) {
@@ -137,11 +143,11 @@ export class CodexService {
         return archived === undefined ? false : 'already-consumed';
       } catch { return false; }
     });
-    this.checkpointExists = options.checkpointExists ?? ((owner, checkpointId) => {
+    this.checkpointExists = options.checkpointExists ?? ((owner, checkpointId, projectRoot, resetGeneration) => {
       try {
-        const root = this.projectRoot ?? resolveProjectRoot({ processCwd: process.cwd() });
+        const root = projectRoot ?? this.projectRoot ?? resolveProjectRoot({ processCwd: process.cwd() });
         const checkpoints = new CodexCheckpoints(root, this.config);
-        return checkpoints.list().some((entry) => entry.id === checkpointId && entry.owner.threadId === owner.threadId && entry.owner.accountId === owner.accountId);
+        return checkpoints.list().some((entry) => entry.id === checkpointId && entry.owner.threadId === owner.threadId && entry.owner.accountId === owner.accountId && entry.resetGeneration === resetGeneration);
       } catch { return false; }
     });
   }
@@ -311,7 +317,7 @@ export class CodexService {
     if (owner.accountId === null || owner.threadId.trim() === '') throw new Error('reset wake requires a known account and thread');
     if (this.config.auto.enabled !== true || this.config.bridge.enabled !== true) throw new Error('reset wake is disabled');
     if (resetAtMs - this.now() > this.config.bridge.max_wait_min * 60_000) throw new Error('reset wake is outside the configured bridge window');
-    if (!this.hasCheckpoint(owner, checkpointId)) throw new Error('reset wake checkpoint was not found for this owner');
+    if (!this.hasCheckpoint(owner, checkpointId, undefined, resetGeneration)) throw new Error('reset wake checkpoint was not found for this owner');
     const existing = this.jobs().find((job) => job.kind === 'reset-wake' && job.owner.threadId === owner.threadId && job.owner.accountId === owner.accountId && job.resetGeneration === resetGeneration);
     if (existing) return { job: existing, checkpointId };
     const job = createJob({ kind: 'reset-wake', owner, dueAtMs: resetAtMs + this.config.auto.wake_delay_min * 60_000, submissionId: stableId(), resetGeneration });
@@ -335,15 +341,17 @@ export class CodexService {
     if (resetAtMs === null || generation === null || job.resetGeneration === undefined || generation !== job.resetGeneration) {
       return { ready: false, reason: 'reset wake identity does not match its saved timeline' };
     }
-    const observedAtMs = typeof row['quotaObservedAtMs'] === 'number' ? row['quotaObservedAtMs'] : null;
+    const observed = this.store.read(job.owner, 'timeline');
+    const factsRow = typeof observed === 'object' && observed !== null ? observed as Record<string, unknown> : {};
+    const observedAtMs = typeof factsRow['quotaObservedAtMs'] === 'number' ? factsRow['quotaObservedAtMs'] : null;
     if (observedAtMs === null || observedAtMs <= resetAtMs || observedAtMs > nowMs) {
       return { ready: false, reason: 'the five-hour reading was not freshly observed after the intended reset' };
     }
-    const rateLimits = typeof row['rateLimits'] === 'object' && row['rateLimits'] !== null
-      ? row['rateLimits'] as Parameters<typeof buildFacts>[0]['rateLimits']
+    const rateLimits = typeof factsRow['rateLimits'] === 'object' && factsRow['rateLimits'] !== null
+      ? factsRow['rateLimits'] as Parameters<typeof buildFacts>[0]['rateLimits']
       : null;
-    const authenticated = typeof row['authenticated'] === 'boolean' ? row['authenticated'] : null;
-    const ordinaryUsageObservedAtMs = typeof row['ordinaryUsageObservedAtMs'] === 'number' ? row['ordinaryUsageObservedAtMs'] : undefined;
+    const authenticated = typeof factsRow['authenticated'] === 'boolean' ? factsRow['authenticated'] : null;
+    const ordinaryUsageObservedAtMs = typeof factsRow['ordinaryUsageObservedAtMs'] === 'number' ? factsRow['ordinaryUsageObservedAtMs'] : undefined;
     const facts = buildFacts({
       rateLimits,
       observedAtMs: observedAtMs ?? Number.NaN,
@@ -492,7 +500,7 @@ export class CodexService {
         results.push(invalid);
         continue;
       }
-      if (job.kind === 'reset-wake' && checkpointId !== null && !this.hasCheckpoint(job.owner, checkpointId)) {
+      if (job.kind === 'reset-wake' && checkpointId !== null && !this.hasCheckpoint(job.owner, checkpointId, job)) {
         const cancelled = { ...job, state: 'cancelled' as const, retryable: false, cancelReason: 'reset checkpoint is no longer active for this owner' };
         this.persistence.write(cancelled);
         results.push(cancelled);

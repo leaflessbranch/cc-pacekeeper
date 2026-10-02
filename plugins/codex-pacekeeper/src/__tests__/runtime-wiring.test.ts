@@ -21,6 +21,37 @@ const limits = {
 };
 
 describe('Codex runtime wiring', () => {
+  test('contradictory owned turn evidence remains genuine user input', () => {
+    const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-conflicting-turn-')));
+    const created = createJob({ kind: 'keepalive', owner: { accountId: 'acct-1', threadId: 'thread-1' }, dueAtMs: NOW, submissionId: 'old-submission' });
+    const running = advance(advance(advance(created, { type: 'submitting' }), { type: 'accepted', queuedSubmissionId: 'old-queue' }), { type: 'turn-started', turnId: 'old-turn' });
+    store.write({ ...created.owner, agentId: `job-${created.id}` }, 'job', running);
+    const result = runTick({ hook_event_name: 'UserPromptSubmit', session_id: 'thread-1', account_id: 'acct-1', job_id: created.id, submission_id: 'old-submission', turn_id: 'new-turn', prompt: 'Continue ordinary work', now_ms: NOW }, { config: CODEX_DEFAULTS, store });
+    expect((store.read(result.identity, 'timeline') as Record<string, unknown>)?.['lastUserActivityAtMs']).toBe(NOW);
+  });
+
+  test('fresh thread context survives an unavailable account owner without refreshing quota', () => {
+    const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-thread-context-')));
+    refreshObservations({ session_id: 'thread-1', account_id: 'acct-1', now_ms: NOW, rateLimits: limits, authenticated: true, tokenUsage: { last: { totalTokens: 20 }, modelContextWindow: 100 } }, store);
+    refreshObservations({ session_id: 'thread-1', now_ms: NOW + 1_000, tokenUsage: { last: { totalTokens: 95 }, modelContextWindow: 100 } }, store);
+    const result = runTick({ hook_event_name: 'PreToolUse', session_id: 'thread-1', now_ms: NOW + 1_000 }, { config: CODEX_DEFAULTS, store });
+    expect(result.facts.context?.usedPercent).toBe(95);
+    expect((store.read({ accountId: 'acct-1', threadId: 'thread-1' }, 'timeline') as Record<string, unknown>)['quotaObservedAtMs']).toBe(NOW);
+    refreshObservations({ session_id: 'thread-1', now_ms: NOW + 2_000, token_usage_invalidated: true }, store);
+    expect(runTick({ hook_event_name: 'PreToolUse', session_id: 'thread-1', now_ms: NOW + 2_000 }, { config: CODEX_DEFAULTS, store }).facts.context).toBeNull();
+  });
+
+  test('subagent budget rebases when the native five-hour reset identity changes', () => {
+    const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-agent-rollover-')));
+    const base = { session_id: 'thread-1', account_id: 'acct-1', agent_id: 'child-1', agent_type: 'worker', authenticated: true };
+    const quota = (usedPercent: number, resetsAtMs: number) => ({ accountId: 'acct-1', rateLimits: { planType: 'plus', primary: { usedPercent, windowDurationMins: 300, resetsAt: resetsAtMs / 1_000 } } });
+    runTick({ ...base, hook_event_name: 'SubagentStart', now_ms: NOW, rateLimits: quota(80, NOW + 1_000) }, { config: CODEX_DEFAULTS, store });
+    runTick({ ...base, hook_event_name: 'PreToolUse', now_ms: NOW + 2_000, rateLimits: quota(5, NOW + 18_000_000) }, { config: CODEX_DEFAULTS, store });
+    const result = runTick({ ...base, hook_event_name: 'PreToolUse', now_ms: NOW + 3_000, rateLimits: quota(80, NOW + 18_000_000) }, { config: CODEX_DEFAULTS, store });
+    expect(result.output).toContain('Subagent pause point 75% reached');
+    expect((store.read(result.identity, 'timeline') as Record<string, unknown>)['spawnFiveHourPercent']).toBe(5);
+  });
+
   test('tick emits event-scoped status and persists deterministic state', () => {
     const home = mkdtempSync(join(tmpdir(), 'codex-runtime-home-'));
     const store = new CodexStore(home);
@@ -30,13 +61,26 @@ describe('Codex runtime wiring', () => {
     expect(store.read(result.identity, 'debounce')).not.toBeNull();
   });
 
-  test('synthetic marker leaves state untouched', () => {
+  test('an unowned marker prompt records genuine activity and cancels an owned queued wake', () => {
+    const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-user-marker-')));
+    const created = createJob({ kind: 'reset-wake', owner: { accountId: 'acct-1', threadId: 'thread-1' }, dueAtMs: NOW, submissionId: 'wake-submission', resetGeneration: 1 });
+    const queued = advance(advance(created, { type: 'submitting' }), { type: 'accepted', queuedSubmissionId: 'queued-wake' });
+    store.write({ ...created.owner, agentId: `job-${created.id}` }, 'job', queued);
+    const result = runTick({ hook_event_name: 'UserPromptSubmit', thread_id: 'thread-1', account_id: 'acct-1', now_ms: NOW, prompt: '[pacekeeper-resume] please explain this marker' }, { config: CODEX_DEFAULTS, store });
+    expect((store.read(result.identity, 'timeline') as Record<string, unknown>)?.['lastUserActivityAtMs']).toBe(NOW);
+    expect((store.list('job')[0] as Record<string, unknown>)['cancelRequested']).toBe(true);
+  });
+
+  test('owned synthetic submission leaves state untouched', () => {
     const home = mkdtempSync(join(tmpdir(), 'codex-runtime-synthetic-'));
     const store = new CodexStore(home);
     const before = runTick({ hook_event_name: 'UserPromptSubmit', thread_id: 'thread-1', account_id: 'acct-1', now_ms: NOW, observed_at_ms: NOW, rateLimits: limits, authenticated: true }, { config: CODEX_DEFAULTS, store });
-    const synthetic = runTick({ hook_event_name: 'UserPromptSubmit', thread_id: 'thread-1', account_id: 'acct-1', now_ms: NOW + 1, observed_at_ms: NOW + 1, rateLimits: limits, authenticated: true, prompt: '[pacekeeper-keepalive] ping' }, { config: CODEX_DEFAULTS, store });
+    const priorDebounce = store.read(before.identity, 'debounce');
+    const job = createJob({ kind: 'keepalive', owner: before.identity, dueAtMs: NOW, submissionId: 'owned-ping' });
+    store.write({ ...before.identity, agentId: `job-${job.id}` }, 'job', advance(advance(job, { type: 'submitting' }), { type: 'accepted', queuedSubmissionId: 'queued-ping' }));
+    const synthetic = runTick({ submission_id: job.submissionId, hook_event_name: 'UserPromptSubmit', thread_id: 'thread-1', account_id: 'acct-1', now_ms: NOW + 1, observed_at_ms: NOW + 1, rateLimits: limits, authenticated: true, prompt: '[pacekeeper-keepalive] ping' }, { config: CODEX_DEFAULTS, store });
     expect(synthetic.output).toBe('{}');
-    expect(store.read(before.identity, 'debounce')).toEqual(store.read(before.identity, 'debounce'));
+    expect(store.read(before.identity, 'debounce')).toEqual(priorDebounce);
     expect((store.read(before.identity, 'timeline') as Record<string, unknown>)['lastEventAtMs']).toBe(NOW);
   });
 
