@@ -103,7 +103,7 @@ environments. The review record identifies the tested code and retained logs:
 
 | Suite | Command | Evidence |
 |---|---|---|
-| Codex | `bun test` in `plugins/codex-pacekeeper` | 266 passed, 0 failed; current independent evidence in the review record |
+| Codex | `bun test` in `plugins/codex-pacekeeper` | 296 passed, 0 failed; current independent evidence in the review record |
 | Codex typecheck | `bun run typecheck` in `plugins/codex-pacekeeper` | Exit 0; current independent evidence in the review record |
 | Claude | `bun test` in `plugins/cc-pacekeeper` | 418 passed, 0 failed; current independent evidence in the review record |
 | Claude typecheck | `bun run typecheck` in `plugins/cc-pacekeeper` | Exit 0; current independent evidence in the review record |

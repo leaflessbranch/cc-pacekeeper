@@ -1,9 +1,11 @@
 # Codex parity review and local completion record
 
 The local completion pass resumed checkpoint
-`e96426bf273db327c7b0be2de527f35c4e75c930` and repaired the confirmed review
-findings below. Independent Linux suites and typechecks pass. Full plan
-acceptance remains blocked by production integration, native capability, live,
+`e96426bf273db327c7b0be2de527f35c4e75c930`, repaired the first review findings,
+and reviewed integration commit `3258fd6a9af420e862e66080b3b77fb48b78aeb8`.
+The fresh parent review found and repaired two additional reset defects.
+Independent Linux suites and typechecks pass after those amendments. Full
+parity acceptance remains blocked by native capabilities, live integration,
 and hosted platform gates. This record is not release or merge approval.
 
 The reviewed code is in the commit containing this document. Obtain its exact
@@ -12,6 +14,26 @@ Claude is preserved against main reference
 `e043d1d12ea17b48a4c1912a534ec5ab431dc5e3`.
 
 ## Fresh findings and amendments
+
+The final review examined the new production callers and tests using
+architecture and operations perspectives. It reproduced both defects below
+before repairing them; the regressions now pass. A separate check verifies
+that a checkpoint cannot be retargeted after native submission begins.
+
+| Finding | Trigger and amendment | Verification |
+|---|---|---|
+| Discovery clock | The save command captured its clock before asynchronous discovery; a valid newly observed owner was consequently rejected as a future observation. Freshness is now evaluated after discovery and rate-limit reads. | Delayed native discovery fails before the amendment and registers the exact reset afterward. Existing stale-owner and account mismatch checks remain green. |
+| Replacement checkpoint | A second save in the same reset window superseded the first file, but the existing wake still referenced that first checkpoint. A still-scheduled wake now follows the exact replacement and project without changing its submission identity. Retargeting is refused once submission starts, and contradictory reset identity is refused. | Two saves retain one wake pointing to the new active checkpoint. A submitting wake retains its original metadata and the new manual save reports why registration was withheld. |
+
+The reviewed integration adds automatic registration after a verified save,
+paginated loaded-thread discovery without a fabricated process PID, native
+child-parent mapping, account/parent-scoped handoff commands and V1 parent
+wait-result context delivery, and exact in-flight client-message/turn binding.
+The parent independently reran all three suites and typechecks against these
+callers and then again after the reset amendments. No additional reproduced
+defect remains open in this bounded review; native and live gates below remain.
+
+## Earlier review amendments
 
 A fresh read-only reviewer used architecture and operations perspectives and
 reproduced four integration defects. The parent reproduced these and additional
@@ -29,15 +51,15 @@ behavioral regression below failed before its repair and passed afterward.
 | Child rollover | The spawn percentage remained anchored to the ended quota window. A fresh changed reset identity rebases and persists the anchor. | Child starts at 80%, new window begins at 5%, later reaches 80% and pauses at the default 75% boundary. |
 | Handoff lookup | A child stop used raw cwd and unrelated meter debounce. It now resolves the same project root as the writer and reports the pending handoff independently of meter warnings. | Subdirectory stop finds the handoff; continuation output stays silent. Parent delivery is still unproved. |
 
-The checkpoint skill now documents exact-id selection and the public reset
-registration command with matching generation. Registration does not claim
-automatic lifecycle integration or authorized native execution.
+The checkpoint skill documents exact-id selection, automatic save registration
+when native owner/reset facts are verified, and scoped handoff acknowledgement.
+Registration does not claim authorized native execution.
 
 ## Previous R1-R8 disposition
 
 | Previous finding | Current disposition |
 |---|---|
-| R1: production fact/owner/scheduling/completion/presence wiring | Improved native control discovery, account/quota refresh, bounded transcript observation, public reset registration, exact native completion parsing, and service-owned activity sampling. Automatic save-to-reset integration, real cross-session owner publication, pre-completion synthetic turn correlation, spawn coverage, and durable parent handoff receipt remain acceptance gates. |
+| R1: production fact/owner/scheduling/completion/presence wiring | Automatic verified save registration, actual control-socket discovery, loaded-thread pagination, exact native parent mapping, in-flight correlation, and a scoped V1 parent wait-return producer now have production callers. Native queue timing, strict controls, V2 child identification, live shared-session behavior, proactive presence delivery, and hosted platform acceptance remain gates. |
 | R2: continuation and compaction output | Local output and continuation regressions pass; no model-generated save barrier is claimed. |
 | R3: repeated ack and archive crash recovery | Exact owner/token replay and prepared archive receipt are implemented; archive integrity regressions and public ack replay pass. |
 | R4: cleanup safety | Actual invoking checkout, main checkout, both-harness occupancy and unknown registries are protected; public cleanup smoke was dry-run only. |
@@ -56,24 +78,22 @@ changes or external messages were used.
 
 | Check | Result |
 |---|---|
-| Codex `bun test` | 266 passed, 0 failed |
+| Codex `bun test` | 296 passed, 0 failed |
 | Parity `bun test` | 41 passed, 0 failed |
 | Claude `bun test` | 418 passed, 0 failed |
 | All three `bun run typecheck` commands | Exit 0 |
 | Claude package and catalog comparison with current main | Empty diff |
-| Standalone locked-dependency package and public CLI smoke | Passed; unauthenticated doctor correctly returns failure and names blockers |
-| Native disposable catalog install/read | 18 hooks and two skills registered |
-| Public transcript refresh/tick, owner unavailable | Fresh critical context and later invalidation both observed |
+| Public scoped handoff CLI | Included in the current independent suite; write, wrong account refusal, acknowledgement and archive checks pass |
+| Earlier standalone package and native registration | Passed at the preceding checkpoint; 18 hooks and two skills registered. These earlier checks do not establish live acceptance of the new callers. |
+| Earlier public transcript refresh/tick, owner unavailable | Fresh critical context and later invalidation observed at the preceding checkpoint |
 | Diff whitespace check | Passed |
 
-Retained local evidence: `/tmp/issue19-parent-validation-bas2xzw6/` holds
-`results.json`, suite/typecheck logs and tested source blob identifiers.
-Standalone CLI evidence is `/tmp/issue19-parent-cli-an6rlf7v/cli-smoke.json`;
-native registration is
-`/tmp/issue19-parent-final-package-1pk_sn39/plugin-details.json`; public context
-checks are `/tmp/issue19-public-context-aj03m7hc/results.json`.
+Retained final evidence: `/tmp/issue19-parent-validation-bd7a1h7r/` holds
+`results.json` and suite/typecheck logs. The independent pre-amendment run is
+`/tmp/issue19-parent-validation-cx6mghsp/`; delayed discovery reproduction is
+`/tmp/issue19-parent-review-clock-8inz2ma0/red.log`. Earlier package and native
+registration evidence remains in the preceding local completion record.
 Temporary artifacts may disappear; the table records their essential results.
-The tracked source blobs were compared with this tested set when committing.
 The fresh review was bounded source/integration review and reproduced failures;
 it does not establish exhaustive coverage or live/native product acceptance.
 
@@ -85,15 +105,15 @@ it does not establish exhaustive coverage or live/native product acceptance.
   is a cancellation request, not proof that model execution was suppressed.
 - Proactive native presence notification remains unproved. Linux sampling and
   persisted transitions do not satisfy proactive delivery or away/back acceptance.
-- Native hooks expose turn ids, but this package has no production producer
-  binding an in-flight owned submission to that id before hook execution.
-  Matching prompt text is deliberately not substituted for this missing proof.
-- Handoff files have local Codex-subtree isolation and explicit CLI archival,
-  but account/parent ownership, durable parent receipt, and actual native
-  child-to-parent absorption remain unproved. A child stop notice is not proof
-  that its parent received or absorbed the handoff.
-- Manual reset registration is available; automatic verified-save-to-reset
-  scheduling and a real reset/bridge/wake trace remain unfinished acceptance.
+- The production in-flight correlator polls exact thread/turn/client identity
+  before tick policy. Missing or conflicting observations stay unbound. Polling
+  does not prove real hook ordering or atomic pre-model suppression.
+- Scoped handoffs have a V1 parent wait-return producer, persisted completion
+  observation and explicit acknowledgement before archive. Live delivery and
+  parent absorption remain unverified. V2 summaries without exact child ids
+  cannot drive this producer. A child stop notice remains insufficient.
+- Automatic verified-save-to-reset registration is implemented; a real
+  reset/bridge/wake trace remains unrun and production dispatch stays closed.
 - Authenticated quota/context/logout and weekly comparisons, trusted hook
   execution, child lifecycle/spawn traces, live away/back, macOS and hosted CI
   remain unrun. Existing tests and offline plugin discovery do not replace them.

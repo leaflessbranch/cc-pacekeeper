@@ -319,10 +319,20 @@ export class CodexService {
     if (resetAtMs - this.now() > this.config.bridge.max_wait_min * 60_000) throw new Error('reset wake is outside the configured bridge window');
     if (!this.hasCheckpoint(owner, checkpointId, undefined, resetGeneration)) throw new Error('reset wake checkpoint was not found for this owner');
     const existing = this.jobs().find((job) => job.kind === 'reset-wake' && job.owner.threadId === owner.threadId && job.owner.accountId === owner.accountId && job.resetGeneration === resetGeneration);
-    if (existing) return { job: existing, checkpointId };
-    const job = createJob({ kind: 'reset-wake', owner, dueAtMs: resetAtMs + this.config.auto.wake_delay_min * 60_000, submissionId: stableId(), resetGeneration });
     let projectRoot: string | undefined = this.projectRoot;
     try { projectRoot ??= resolveProjectRoot({ processCwd: process.cwd() }); } catch { /* checkpointExists may be injected for a caller-owned root */ }
+    if (existing) {
+      const metadata = this.store.read(jobIdentity(existing), 'timeline');
+      const row = typeof metadata === 'object' && metadata !== null ? metadata as Record<string, unknown> : null;
+      if (row?.['resetAtMs'] !== resetAtMs || row['resetGeneration'] !== resetGeneration) {
+        throw new Error('registered reset wake has a conflicting reset identity');
+      }
+      if (row['checkpointId'] === checkpointId && row['projectRoot'] === projectRoot) return { job: existing, checkpointId };
+      if (existing.state !== 'scheduled') throw new Error('registered reset wake has already started; its checkpoint cannot be replaced');
+      this.store.write(jobIdentity(existing), 'timeline', { ...row, checkpointId, ...(projectRoot ? { projectRoot } : {}) });
+      return { job: existing, checkpointId };
+    }
+    const job = createJob({ kind: 'reset-wake', owner, dueAtMs: resetAtMs + this.config.auto.wake_delay_min * 60_000, submissionId: stableId(), resetGeneration });
     this.store.write(jobIdentity(job), 'timeline', { checkpointId, resetGeneration, resetAtMs, kind: 'reset-wake', ...(projectRoot ? { projectRoot } : {}) });
     return { job: this.schedule(job), checkpointId };
   }

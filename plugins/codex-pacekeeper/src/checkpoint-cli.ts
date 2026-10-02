@@ -171,19 +171,21 @@ export interface SaveCheckpointWithResetWakeResult {
 /** Save normally even when native reset evidence is unavailable; register a
  * wake only after an exact fresh owner and five-hour reset identity are read. */
 export async function saveCheckpointWithResetWake(input: SaveCheckpointWithResetWakeInput): Promise<SaveCheckpointWithResetWakeResult> {
-  const nowMs = input.nowMs ?? Date.now();
+  let nowMs = input.nowMs ?? Date.now();
   let owner = input.owner;
   let observedResetAtMs: number | undefined;
   let withheldReason: string | undefined;
   let client: NativeClient | null = null;
   try {
     client = await (input.resolveClient ?? discoverNativeControlClient)(owner.threadId, owner.accountId);
+    nowMs = input.nowMs ?? Date.now();
     const loadedAtMs = client?.owner.loadedThreadsObservedAtMs;
     if (client === null || !client.owner.threadIds.includes(owner.threadId)
       || loadedAtMs === undefined || !Number.isFinite(loadedAtMs) || loadedAtMs > nowMs || nowMs - loadedAtMs > 5_000) {
       withheldReason = 'native owner for this thread is unavailable';
     } else {
       const rateLimits = await client.readRateLimits();
+      nowMs = input.nowMs ?? Date.now();
       if (rateLimits.accountId === null) {
         withheldReason = 'native account identity is unavailable';
       } else if (owner.accountId !== null && rateLimits.accountId !== owner.accountId) {
