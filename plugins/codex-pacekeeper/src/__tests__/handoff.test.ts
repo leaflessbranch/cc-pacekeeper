@@ -6,6 +6,35 @@ import { CODEX_DEFAULTS } from '../config';
 import { acknowledgeHandoff, archiveHandoff, checkpointCliPath, listHandoffs, writeHandoff } from '../agent-budget';
 
 describe('Codex handoff registry', () => {
+  test('accepts a project-root alias for scoped write, list, acknowledgement and archive', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'codex-handoff-root-alias-'));
+    const root = join(fixture, 'project');
+    const alias = join(fixture, 'project-alias');
+    const ownership = { accountId: 'acct-one', childThreadId: 'child-thread', parentThreadId: 'parent-thread' };
+    try {
+      mkdirSync(root);
+      symlinkSync(root, alias);
+      writeHandoff({ cwd: alias, checkpointDirName: CODEX_DEFAULTS.checkpoint_dir_name, agentId: 'agent-1', trigger: 'budget_pause', body: 'Aliased project result.', ownership });
+      expect(listHandoffs(alias, CODEX_DEFAULTS.checkpoint_dir_name, 'codex', ownership)[0]?.body).toBe('Aliased project result.');
+      expect(acknowledgeHandoff(alias, CODEX_DEFAULTS.checkpoint_dir_name, 'agent-1', ownership)?.status).toBe('acknowledged');
+      expect(archiveHandoff(alias, CODEX_DEFAULTS.checkpoint_dir_name, 'agent-1', 'codex', ownership)).toContain('archive');
+    } finally { rmSync(fixture, { recursive: true, force: true }); }
+  });
+
+  test('rejects an owned-subtree symlink even through a legitimate project-root alias', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'codex-handoff-alias-escape-'));
+    const root = join(fixture, 'project');
+    const alias = join(fixture, 'project-alias');
+    const outside = join(fixture, 'outside');
+    try {
+      mkdirSync(join(root, CODEX_DEFAULTS.checkpoint_dir_name), { recursive: true });
+      mkdirSync(outside);
+      symlinkSync(root, alias);
+      symlinkSync(outside, join(root, CODEX_DEFAULTS.checkpoint_dir_name, 'codex'));
+      expect(() => writeHandoff({ cwd: alias, checkpointDirName: CODEX_DEFAULTS.checkpoint_dir_name, agentId: 'agent-1', trigger: 'budget_pause', body: 'Refuse escape.' })).toThrow(/symlink/);
+    } finally { rmSync(fixture, { recursive: true, force: true }); }
+  });
+
   test('writes, lists and archives one owned handoff atomically', () => {
     const root = mkdtempSync(join(tmpdir(), 'codex-handoff-'));
     const file = writeHandoff({ cwd: root, checkpointDirName: CODEX_DEFAULTS.checkpoint_dir_name, agentId: 'agent-1', agentType: 'worker', trigger: 'budget_pause', body: '## Goal\nresume work' });

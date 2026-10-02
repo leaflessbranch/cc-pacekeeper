@@ -84,7 +84,7 @@ or capacity percentage as a substitute for those semantics.
 | 23 | Security-scoped automation | partial | Jobs, queues, checkpoints, state roots, archive receipts, account/thread ownership, and reset generations are validated. Live owner authorization remains. |
 | 24 | Diagnostics | partial | Doctor and service diagnostics distinguish auth, quota, owner, control-socket path, in-flight correlation outcome, queue/schema, stale facts, trust, executable, permissions, crash, cache, presence delivery, and unsupported native controls. Correlation diagnostics explicitly do not claim atomic suppression; live hook-trust evidence remains. |
 | 25 | Configuration | partial | Legacy config is read as input, Codex overrides are field-preserving, Claude config is never written, and invalid fields diagnose independently. A live install override check remains. |
-| 26 | Platform behavior | pending | Linux and macOS jobs cover Claude, Codex, parity, and the branch-scoped Claude-preservation check. Hosted CI evidence remains. |
+| 26 | Platform behavior | pending | Linux and macOS jobs cover Claude, Codex, parity, and the branch-scoped Claude-preservation check. Per-revision hosted results are recorded in PR #21; real native session acceptance on both platforms remains unverified. |
 | 27 | Documentation and release | partial | Opt-in manifest, native hook file, executable shims, skills, and a Codex-only `.agents/plugins/marketplace.json` route are shipped. A disposable shipped-route marketplace/add/read/disable/remove smoke passed; trusted live publication remains outside this local pass. |
 
 Unknown or unsupported native behavior remains a diagnostic and closes the
@@ -103,7 +103,7 @@ environments. The review record identifies the tested code and retained logs:
 
 | Suite | Command | Evidence |
 |---|---|---|
-| Codex | `bun test` in `plugins/codex-pacekeeper` | 296 passed, 0 failed; current independent evidence in the review record |
+| Codex | `bun test` in `plugins/codex-pacekeeper` | 298 passed, 0 failed; current independent evidence in the review record |
 | Codex typecheck | `bun run typecheck` in `plugins/codex-pacekeeper` | Exit 0; current independent evidence in the review record |
 | Claude | `bun test` in `plugins/cc-pacekeeper` | 418 passed, 0 failed; current independent evidence in the review record |
 | Claude typecheck | `bun run typecheck` in `plugins/cc-pacekeeper` | Exit 0; current independent evidence in the review record |

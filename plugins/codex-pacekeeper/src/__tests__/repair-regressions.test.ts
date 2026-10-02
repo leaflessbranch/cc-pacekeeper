@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, existsSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkSync, existsSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -29,7 +29,7 @@ import {
   type NativeTransport
 } from '../native';
 
-const FIXTURE_ROOT = mkdtempSync(join(tmpdir(), 'codex-pacekeeper-repairs-'));
+const FIXTURE_ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'codex-pacekeeper-repairs-')));
 const ROLLOUT_HOME = mkdtempSync(join(FIXTURE_ROOT, 'codex-home-'));
 mkdirSync(join(ROLLOUT_HOME, 'sessions'), { recursive: true });
 const fixtureUnsafe = (dir: string): boolean => !dir.startsWith(FIXTURE_ROOT);

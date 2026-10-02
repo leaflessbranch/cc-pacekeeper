@@ -235,7 +235,7 @@ function handoffRoot(cwd: string, checkpointDirName: string, checkpointSubdir = 
 }
 
 function assertHandoffConfined(root: string, target: string): void {
-  const base = path.resolve(root);
+  const base = realOrResolve(root);
   const absolute = path.resolve(target);
   if (absolute !== base && !absolute.startsWith(base + path.sep)) throw new Error('handoff path escapes project root');
   let cursor = base;

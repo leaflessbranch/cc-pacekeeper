@@ -4,6 +4,9 @@ The local completion pass resumed checkpoint
 `e96426bf273db327c7b0be2de527f35c4e75c930`, repaired the first review findings,
 and reviewed integration commit `3258fd6a9af420e862e66080b3b77fb48b78aeb8`.
 The fresh parent review found and repaired two additional reset defects.
+The first hosted macOS run subsequently exposed a project-alias handoff
+defect and three fixture comparisons against noncanonical paths; these are
+also repaired, with a portable alias regression and retained escape checks.
 Independent Linux suites and typechecks pass after those amendments. Full
 parity acceptance remains blocked by native capabilities, live integration,
 and hosted platform gates. This record is not release or merge approval.
@@ -24,6 +27,7 @@ that a checkpoint cannot be retargeted after native submission begins.
 |---|---|---|
 | Discovery clock | The save command captured its clock before asynchronous discovery; a valid newly observed owner was consequently rejected as a future observation. Freshness is now evaluated after discovery and rate-limit reads. | Delayed native discovery fails before the amendment and registers the exact reset afterward. Existing stale-owner and account mismatch checks remain green. |
 | Replacement checkpoint | A second save in the same reset window superseded the first file, but the existing wake still referenced that first checkpoint. A still-scheduled wake now follows the exact replacement and project without changing its submission identity. Retargeting is refused once submission starts, and contradictory reset identity is refused. | Two saves retain one wake pointing to the new active checkpoint. A submitting wake retains its original metadata and the new manual save reports why registration was withheld. |
+| Project aliases on macOS | The handoff writer compared a canonical destination against an aliased project root. The root is now canonicalized before containment checks, while symlinks inside the owned subtree remain forbidden. Worktree regression fixtures also use canonical paths, matching Git's output. | An aliased-root write failed before the repair and now passes through scoped list, acknowledgement and archive. An owned-subtree symlink through that same alias is still refused. The hosted failure log identified all nine failures; six were handoff failures and three were fixture path comparisons. |
 
 The reviewed integration adds automatic registration after a verified save,
 paginated loaded-thread discovery without a fabricated process PID, native
@@ -78,7 +82,7 @@ changes or external messages were used.
 
 | Check | Result |
 |---|---|
-| Codex `bun test` | 296 passed, 0 failed |
+| Codex `bun test` | 298 passed, 0 failed |
 | Parity `bun test` | 41 passed, 0 failed |
 | Claude `bun test` | 418 passed, 0 failed |
 | All three `bun run typecheck` commands | Exit 0 |
@@ -88,10 +92,12 @@ changes or external messages were used.
 | Earlier public transcript refresh/tick, owner unavailable | Fresh critical context and later invalidation observed at the preceding checkpoint |
 | Diff whitespace check | Passed |
 
-Retained final evidence: `/tmp/issue19-parent-validation-bd7a1h7r/` holds
+Retained final evidence: `/tmp/issue19-parent-validation-xej2l3z3/` holds
 `results.json` and suite/typecheck logs. The independent pre-amendment run is
 `/tmp/issue19-parent-validation-cx6mghsp/`; delayed discovery reproduction is
-`/tmp/issue19-parent-review-clock-8inz2ma0/red.log`. Earlier package and native
+`/tmp/issue19-parent-review-clock-8inz2ma0/red.log`. The portable handoff alias
+reproduction is `/tmp/issue19-macos-alias-review-4475k1wc/red.log`.
+Earlier package and native
 registration evidence remains in the preceding local completion record.
 Temporary artifacts may disappear; the table records their essential results.
 The fresh review was bounded source/integration review and reproduced failures;
@@ -115,8 +121,10 @@ it does not establish exhaustive coverage or live/native product acceptance.
 - Automatic verified-save-to-reset registration is implemented; a real
   reset/bridge/wake trace remains unrun and production dispatch stays closed.
 - Authenticated quota/context/logout and weekly comparisons, trusted hook
-  execution, child lifecycle/spawn traces, live away/back, macOS and hosted CI
-  remain unrun. Existing tests and offline plugin discovery do not replace them.
+  execution, child lifecycle/spawn traces, live away/back and real macOS session
+  acceptance remain unrun. Hosted suite results are tracked per revision in
+  [PR #21](https://github.com/leaflessbranch/cc-pacekeeper/pull/21/checks).
+  Existing tests and offline plugin discovery do not replace live acceptance.
 
 Only capabilities 9 and 21 are deferred. Other incomplete rows remain explicit
 in [the acceptance ledger](codex-acceptance.md). No push, PR publication, merge,
