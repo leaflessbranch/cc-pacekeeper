@@ -1,173 +1,120 @@
 # Codex acceptance ledger
 
-This document records the implementation evidence for issue #19. It keeps
-native facts, deterministic policy behavior, and unverified live outcomes
-separate. The Codex package is opt-in and has its own state subtree; the
-shipped Claude package remains at version 0.8.2 and is not rewritten here.
+This ledger records the Codex parity implementation, the native evidence that
+is available, and the gates that still need live or hosted verification. The
+Codex package is opt in and keeps its state, configuration reads, checkpoints,
+and jobs separate from the Claude package.
 
-## Current implementation pass
+## Current pass
 
-This branch received the authorized F1-F11 repair pass on 2026-09-07.
-Disposable local tests and typechecks ran after the repairs. Independent
-review, live native actions, trusted profile changes and external acceptance
-remain separate gates.
+This pass was interrupted on 2026-10-02 at the user's request. The saved
+changes are WIP; final worker validation and independent review are incomplete.
+See [the paused handoff](handoffs/2026-10-02-issue-19-paused.md) for the
+observed evidence and outstanding work. Implementation claims below remain
+subject to that review.
 
-## Baseline
+The implementation targets the installed Codex CLI 0.160.0 contract. The
+branch began at `45fb37edd8ad27fd38c4e11c4c3b7390f0fbf0bf`; the Claude package
+is compared with main at `e043d1d12ea17b48a4c1912a534ec5ab431dc5e3`.
 
-- Base: `2751789890e13f0c5ca0d33bb7097a7e45666d48`.
-- Historical Claude verification report: `bun test --cwd plugins/cc-pacekeeper`
-  in a child process with disposable HOME/config/cache: 342 passed, 0 failed.
-- Historical Claude typecheck report: `bun run --cwd plugins/cc-pacekeeper typecheck`:
-  exit 0.
-- The supplied `/tmp` worktree reproduces five existing path-safety fixture
-  failures because the Claude tests intentionally reject project roots under
-  `/tmp`; this is why the baseline was also run from the safe original
-  checkout. No tracked Claude file was changed.
+The generated 0.160.0 schema and current native sources were checked before
+the adapter was changed. The native Unix control socket is a WebSocket over a
+Unix stream. A disposable, empty-profile server accepted the WebSocket
+handshake and completed `initialize`/`initialized`, `thread/loaded/list`, and
+`account/read`; no account-authenticated turn or model execution was used.
+The production transport validates `Sec-WebSocket-Accept`, bounds frames and
+messages, preserves ping payload bytes, and only uses the raw newline socket
+adapter in injected protocol fixtures.
 
-## Native boundary evidence
+The current schema's `GetAccountRateLimitsResponse.ordinaryUsageAllowed` is
+the authoritative included-usage permission. It is accepted only when the
+active account identity and freshness are established. `false` and `null`
+close automation and do not get inferred from percentages, reset times,
+credits, or upsell fields. Quota windows remain duration-mapped and unknown
+buckets are retained.
 
-The acceptance target is Codex CLI 0.153.4. The generated local protocol
-schema and the pinned release source establish `thread/queue/add` with
-`threadId`, `input`, and a stable caller-provided `clientUserMessageId`.
-Queue acceptance is tracked independently from turn completion.
+## Native contract and explicit blockers
 
-The repair transport now sends `initialize` with `experimentalApi: true`,
-validates the native initialize shape, waits for the `initialized` notification,
-and only then sends the business request. Its protocol fixture enforces that
-ordering; the fixture uses no real owner or socket.
-
-### Verified against the pinned schema and source
-
-Each of the following was checked directly, not inferred from a hook name.
-
-| Assumption | Verdict | Where checked |
+| Contract | Result | Evidence |
 |---|---|---|
-| `thread/queue/add` params are `threadId`, `input`, `clientUserMessageId` | confirmed | `ThreadQueueAddParams`, all three required |
-| The add response carries a flat submission id | **refuted** | `ThreadQueueAddResponse` requires a nested `queuedSubmission` object holding `id`, `clientUserMessageId`, `input`. The pinned CLI reads `response.queued_submission.id`. |
-| `turn/start/tools-disabled`, `turn/input/suppress`, `turn/compact/save-barrier` exist | **refuted** | None of the 155 `ClientRequest` methods matches. These names appear in no published version. |
-| `account/read` identifies the account mode without returning credentials | confirmed | `GetAccountResponse` carries `chatgpt`, `apiKey` and `amazonBedrock` account variants plus `requiresOpenaiAuth`; the adapter retains only mode, plan and boolean observations. |
-| `TurnStartParams` exposes a tool-disable field | **refuted** | Its 24 properties include `outputSchema`, `sandboxPolicy` and `permissions`, but no `tools` or `tool_choice`. None of those three is a no-tools boundary. |
-| Quota windows can be mapped by primary/secondary position | **refuted** | `RateLimitWindow` carries `windowDurationMins`; both orderings occur in real records, so mapping is by duration. |
-| The rate-limit reply is a single snapshot | **refuted** | `GetAccountRateLimitsResponse` wraps a compatibility `rateLimits` view plus a `rateLimitsByLimitId` multi-bucket map, with `accountId`, `limitId`, `limitName` and `rateLimitReachedType`. |
-| Current context can be read from native usage | confirmed | `ThreadTokenUsage` separates `last` from `total` and carries a nullable `modelContextWindow`. |
-| Cache fields are observable | confirmed | `TokenUsageBreakdown` has `cachedInputTokens` (required) and `cacheWriteInputTokens` (optional, so absent is not zero). |
-| Fixture method names are real | confirmed | All eight resolve; the queue family is broader than recorded (`reorder`, `start`, `update` also exist). |
+| Queue add accepts `threadId`, `input`, and `clientUserMessageId` | confirmed | Generated 0.160.0 request schema and `NativeClient.queueExistingThread`. |
+| Queue add returns a nested `queuedSubmission` | confirmed | Generated response schema and parser; a flat id is rejected. |
+| `account/read` establishes account mode and authentication state without retaining credentials | confirmed | Parsed account adapter keeps mode, plan, and booleans only. |
+| `ordinaryUsageAllowed` establishes included capacity | confirmed | Current schema description calls it backend permission for the active account; tests cover true, false, null, and revocation. |
+| Five-hour and weekly windows are identified by duration | confirmed | Both native positions are parsed by `windowDurationMins`; malformed values remain unknown. |
+| Current-turn context and cache fields are observable | partial | The installed 0.160.0 rollout source persists `TokenCount`; the bounded `transcript_path` observer reads `last_token_usage`, nullable `model_context_window`, and cache fields, preserves the native record timestamp, validates the first `SessionMeta` thread id, and invalidates at compaction/turn boundaries. A live hook/turn comparison remains. |
+| Native Unix control transport is newline JSON | refuted | Current Unix socket upgrades to WebSocket; the production adapter implements the upgrade and frames. |
+| Blanket strict no-tools control exists | refuted | `TurnStartParams` has no tool-disable field and no native method provides the required boundary. |
+| Atomic pre-model suppression exists for queued synthetic input | refuted | `thread/queue/delete` is available, but the protocol does not prove deletion wins the execution race. |
+| A hook can create a model-generated save barrier before compaction | refuted | Hook output can block compaction, but does not create a resumable model turn. |
+| Native spawn mapping is available to the hook adapter | partial | The native ThreadItem union exposes spawn-related variants and the hook schema exposes `tool_name`/`tool_input`; guarded local mappings cover known values, but a live hook payload trace is still required before treating the mapping as universal. |
 
-### Blocked by a missing platform capability
-
-These are not unfinished work. Two independent sources agree that the
-capability does not exist, so the rows stay incomplete rather than being
-satisfied by a weaker substitute.
-
-- **Strict no-tools (row 18).** The protocol has no tool-disable field or
-  method, and the official hooks documentation states there is no blanket
-  no-tools mode: `PreToolUse` denies individual calls only. Coverage is also
-  incomplete by design — hosted tools such as web search do not take the local
-  function-tool hook path, and `write_stdin` on an existing exec session does
-  not re-run `PreToolUse`. A deny-all hook is therefore not a boundary, and a
-  prompt instructing no tools is not enforcement.
-- **Pre-model suppression of a queued synthetic message (row 18).** The
-  pinned interface does expose `thread/queue/delete`, and the package can
-  request deletion of an exact queued id. The interface does not prove that a
-  deletion wins an execution race before model work begins, so this remains an
-  explicit blocker rather than a claim of atomic suppression.
-- **A save barrier before compaction (row 11).** `PreCompact` ignores plain
-  stdout; JSON stdout only supports the common fields, so a hook can prevent
-  compaction via `continue: false` but cannot cause a model-generated
-  resumable save. Preventing compaction is not the same as having saved.
-
-Sources: the generated 0.153.4 schema, the pinned release source
-(`session_queue_commands.rs`), and <https://learn.chatgpt.com/docs/hooks>.
+Rows 11 and 18 therefore retain explicit platform blockers. Hosted tools and
+existing exec sessions also do not share a blanket local tool hook boundary.
+The service never treats a prompt instruction, fixture boolean, queue delete,
+or capacity percentage as a substitute for those semantics.
 
 ## Capability ledger
 
-| # | Capability | Status | Evidence or remaining gate |
+| # | Capability | Status | Evidence and remaining gate |
 |---:|---|---|---|
-| 1 | Subscription authentication | partial | `account/read` mode parsing is implemented: API-key/Bedrock/unknown modes stay outside included automation, and available credits never imply paid spending. The pinned rate-limit schema does not establish included spending capacity: `spendControlReached: false` remains unknown until an authoritative included-capacity fact exists. Remaining: a real owner API-key negative case and a live paid-credit transition. |
-| 2 | Quota acquisition | partial | Duration-based mapping tested in both native orderings; unknown buckets retained; the multi-bucket `rateLimitsByLimitId` map parsed; a malformed percentage stays null instead of reading as 0. Remaining: only the `codex` bucket id has ever been observed, so no model-family mapping is claimed. |
-| 3 | Context meter | partial | Reads `last`, not lifetime `total`; a missing `modelContextWindow` yields an unknown percentage rather than inheriting Claude's 200k. Remaining: live comparison against a running thread. |
-| 4 | Compact status injection | partial | `tick.ts` maps each supported event to the pure policy and uses event-specific output: `decision:block`/`reason` for Stop/SubagentStop, `continue:false`/`stopReason` for PreCompact, and `hookSpecificOutput.additionalContext` only where supported. Refresh records native observations through a selected existing owner when one is available. Native hook execution still needs live acceptance. |
-| 5 | Threshold state machine | partial | Codex policy and parity tests cover inclusive ladders, escalation, debounce, reset identity and re-arm. Live native event comparison remains. |
-| 6 | Debounce/idempotency | partial | Policy state is keyed by hashed account/thread/agent; ordinary re-emission, escalation, continuation and synthetic suppression run through the hook adapter. Live duplicate event streams remain. |
-| 7 | Time/AFK awareness | partial | User/tool/synthetic timestamps are separate; synthetic turns do not write state. Independent presence sampling is wired, with live away/back observation pending. |
-| 8 | Cross-session awareness | partial | `findLiveOwner` requires a readable owner registry, live PID, exact account/thread and a usable endpoint; unknown records fail closed. Service eligibility and refresh now consume those observed facts. A native owner registry producer remains an integration gate. |
-| 9 | Model/window arbitrage | deferred | Existing Claude behavior is preserved; no Codex arbitrage. |
-| 10 | Checkpoint lanes | partial | Owned subtree, exact-id CLI selection, verified persistence, ambiguous bare selection, and same-named Claude-lane isolation are implemented. Real project-root CLI acceptance remains. |
-| 11 | Context auto-save | blocked | Confirmed unavailable, not merely unproved: `PreCompact` ignores plain stdout and can only prevent compaction via `continue: false`; it cannot cause a model-generated resumable save. Preventing compaction is not saving. |
-| 12 | Five-hour renewal | partial | Reset-wake is a separate job identity carrying a reset generation, and a rolled-over window blocks automation until re-read. Remaining: live reset trace. |
-| 13 | Near-reset bridge | pending | The service has a bounded reset-wake identity; a live reset/bridge trace remains required. |
-| 14 | Resume consumption | partial | Exact-ID claim/read/ack preserves active content until acknowledgement, archives once, distinguishes consumed/superseded/discarded states, and protects owners. End-to-end live consumption remains. |
-| 15 | Subagent budgets | partial | Spawn-relative estimate is explicitly shared-account, rollover rebases without negatives, and unreadable meters never pause on a guess. Native lifecycle wiring remains. |
-| 16 | Subagent handoffs | partial | Absolute CLI contract, atomic owned handoff writes, list and archive verbs are wired; a live parent absorption trace remains. |
-| 17 | Dispatch advisory | partial | `dispatchAdvice` never denies and the service validates complete owned job payloads. Native spawn-tool mapping remains. |
-| 18 | Cache keepalive | blocked | Exact 30-minute job identity, existing-owner delivery, queue reconciliation and queue deletion are implemented. Unresolved submissions are never replayed, and `require_pending=false` skips only that gate. Strict no-tools and execution-time suppression are unavailable/unproved in the pinned protocol; the one-hour TTL is an accepted assumption. |
-| 19 | Cache observability | partial | Last-turn context, observed cache read/write fields, full sanitized multi-bucket quota metadata and separate quota/context/auth/activity clocks are persisted without fabricating absent values; live diagnostics remain. |
-| 20 | Presence detection | partial | Linux tmux/tty/SSH/logind probes, attachment/activity fusion, non-Linux unknown fallback, an independent sampler, persisted transition records and unreadable-SSH fail-closed behavior are implemented. A native proactive notification path and live away/back observation remain unavailable/unverified. |
-| 21 | Away routing | deferred | Existing Claude routing is preserved; no Codex channel onboarding. |
-| 22 | Worktree helper | partial | List/create and conservative cleanup refuse dirty, locked, live-owned or unknown-liveness worktrees and always protect the actual invoking checkout even when root resolution follows a linked worktree. Git fixture acceptance remains. |
-| 23 | Security-scoped automation | partial | Job identity covers kind, account, thread and reset generation; queue payloads, IDs, checkpoint lanes and state roots are confined. Live owner authorization remains. |
-| 24 | Diagnostics | partial | Doctor distinguishes owner, observed queue/schema, auth freshness, quota, executable, trust, permissions, crash, cache, presence-delivery and config observations; environment configuration booleans are not treated as receipts. Blocked/deferred rows remain explicit. Live hook-trust and native fact evidence remain. |
-| 25 | Configuration | partial | Codex reads legacy values and `adapters.codex` overrides field-by-field, preserving valid siblings and never writing the Claude file. A live install override check remains. |
-| 26 | Platform behavior | pending | CI runs Claude, Codex and parity suites on Linux and macOS and asserts the Claude package is unchanged. Local Linux checks are green after F1-F11; hosted macOS/CI evidence is still pending. |
-| 27 | Documentation/release | partial | Opt-in manifest, hook wire, executable shims and both Codex skills exist; release publication and live install/trust evidence remain outside this authorization. |
+| 1 | Subscription authentication | partial | Account mode parsing, active-account matching, auth freshness, and API-key/Bedrock fail-closed paths are implemented. Live authenticated and logout traces remain. |
+| 2 | Quota acquisition | partial | Duration mapping, multi-bucket parsing, unknown bucket retention, invalid percentage handling, and authoritative permission transitions are tested. A live comparison of all account buckets remains. |
+| 3 | Context meter | partial | The bounded `transcript_path` observer consumes persisted native `TokenCount` records, uses `last_token_usage` and nullable model-window/cache fields, preserves original timestamps, validates the canonical first `SessionMeta`, and invalidates usage across compaction/turn boundaries. Claude's fallback window is not used; a running-thread comparison remains. |
+| 4 | Compact status injection | partial | Event-specific `systemMessage`, `hookSpecificOutput`, and Stop/SubagentStop `decision:block` output are tested. Native hook trust and firing remain live gates. |
+| 5 | Threshold state machine | partial | Inclusive ladders, escalation, debounce, rollover reset, and context re-arm are covered by Codex and parity tests. A live native event trace remains. |
+| 6 | Debounce and idempotency | partial | Hashed account/thread/agent state, continuation suppression, synthetic suppression, duplicate lifecycle handling, and stable job IDs are implemented. Duplicate live event delivery remains. |
+| 7 | Time and AFK awareness | partial | User, tool, synthetic, session, and pending-work clocks are separate; independent presence sampling persists transitions. Live away/back behavior remains. |
+| 8 | Cross-session awareness | partial | Owner registry parsing is strict, malformed rows are unknown, native control-socket discovery verifies loaded threads, and account mismatches withhold jobs. A native owner producer and live multi-session trace remain. |
+| 9 | Model/window arbitrage | deferred | Explicitly deferred; native model switching and bucket recommendations are not duplicated. |
+| 10 | Checkpoint lanes | partial | Codex-owned roots, exact IDs, atomic writes, provenance, claim/ack/archive, ambiguous selection, and Claude-lane isolation are tested. Real project-root CLI acceptance remains. |
+| 11 | Context auto-save | blocked | The examined hook/native boundary cannot produce a model-generated save barrier before compaction. The adapter reports that limitation and never claims a save from hook output. |
+| 12 | Five-hour renewal | partial | The public `schedule-reset` service entrypoint records separate reset identity/generation, bounded wait, fresh post-reset five-hour identity checks, and cancellation gates. A live reset trace remains. |
+| 13 | Near-reset bridge | partial | The public reset scheduler retains the same owner/thread, bounds the wait with `max_wait_min`, and withholds delivery until an active next window is observed. Live bridge acceptance remains. |
+| 14 | Resume consumption | partial | Exact-ID claim, owner-bound acknowledgement, archive corruption checks, replay idempotency, crash recovery, and native turn correlation are implemented. A live CLI consumption trace remains. |
+| 15 | Subagent budgets | partial | Shared-account spawn-relative estimates, rollover rebasing, and unknown-meter fail-closed behavior are tested. Native lifecycle acceptance remains. |
+| 16 | Subagent handoffs | partial | Absolute CLI contracts, atomic owned handoffs, one-time parent receipt, and archive verbs are implemented. A live parent absorption trace remains. |
+| 17 | Dispatch advisory | partial | Known hook `tool_name` values are mapped conservatively and advice never denies ordinary spawning; unknown values fail closed. A live specialized spawn trace remains. |
+| 18 | Cache keepalive | blocked | Durable 30-minute identities, existing-owner delivery, fresh quota/auth refresh, pending-work production, queue reconciliation, cancellation intent, and strict completion parsing are implemented. Production dispatch remains blocked because strict no-tools and atomic pre-model suppression are unavailable. |
+| 19 | Cache observability | partial | Context, cache read/write, multi-bucket quota, ordinary permission, auth, activity, and freshness clocks are persisted without fabricating absent values. Live diagnostics remain. |
+| 20 | Presence detection | blocked | Linux probes, an independent sampler, canonical cache containment, transition persistence, and unavailable-probe fail-closed behavior are implemented. Native proactive notification and live away/back traces remain unavailable, so the full capability stays blocked. |
+| 21 | Away routing | deferred | Explicitly deferred; existing Claude routing is preserved and no Codex channel is added. |
+| 22 | Worktree helper | partial | List/create/cleanup refuse dirty, locked, live-owned, malformed, or unknown-liveness rows; child-directory owners map to their worktree and the main checkout is protected. Hosted Git acceptance remains. |
+| 23 | Security-scoped automation | partial | Jobs, queues, checkpoints, state roots, archive receipts, account/thread ownership, and reset generations are validated. Live owner authorization remains. |
+| 24 | Diagnostics | partial | Doctor and service diagnostics distinguish auth, quota, owner, queue/schema, stale facts, trust, executable, permissions, crash, cache, presence delivery, and unsupported native controls. Live hook-trust evidence remains. |
+| 25 | Configuration | partial | Legacy config is read as input, Codex overrides are field-preserving, Claude config is never written, and invalid fields diagnose independently. A live install override check remains. |
+| 26 | Platform behavior | pending | Linux and macOS jobs cover Claude, Codex, parity, and the branch-scoped Claude-preservation check. Hosted CI evidence remains. |
+| 27 | Documentation and release | partial | Opt-in manifest, native hook file, executable shims, skills, and a Codex-only `.agents/plugins/marketplace.json` route are shipped. A disposable shipped-route marketplace/add/read/disable/remove smoke passed; trusted live publication remains outside this local pass. |
 
-Unknown or unsupported native behavior is retained as an explicit diagnostic
-and does not authorize a retry, second owner, API fallback, automated spending,
-or reset-credit consumption. In particular, the pinned `spendControlReached:
-false` observation is not treated as proof of included capacity.
-
-## Status of this branch
-
-No row is complete. The package now has an opt-in manifest and hook wire,
-executable shims, bounded native transport, owner discovery, fact assembly,
-an event adapter, isolated state, checkpoints, durable jobs, subagent
-handoffs, presence sampling, worktree helpers and diagnostics. End-to-end
-native execution and platform/live gates still need independent acceptance.
-
-Specifically, and this bounds every claim above:
-
-- No message has been queued to a real thread. Delivery is exercised through
-  injected transports and a bounded transport fixture, which proves parsing
-  and state transitions but not that a real Codex owner accepts or executes it.
-- Hook input/output is exercised through the package shim with disposable
-  state, but no live Codex installation has trusted and fired this manifest.
-- Neither platform has been exercised in CI. The workflow jobs were added on
-  this branch and have not run.
-- Rows 11 and 18 are blocked by capabilities the platform does not provide.
-  They are not awaiting more effort.
-
-No claim of Codex support, general or partial, is warranted from these tests.
+Unknown or unsupported native behavior remains a diagnostic and closes the
+operation. The package does not use an API fallback, start a second server for
+a live thread, spend paid or unknown credits, infer capacity from reset times,
+or send external messages.
 
 ## Verification
 
-All suites run in child processes with disposable HOME/config/cache
-directories. The directory each ran in matters and is stated, because the
-Claude suite's path-safety tests deliberately reject roots under /tmp:
+Every local command below uses child-process HOME, Claude config, Codex home,
+XDG config, and XDG cache overrides. No real profile, credential, raw
+transcript, live model turn, or normal-session queue was used.
 
-| Suite | Directory | Result |
+No final worker report or independent final suite run was completed before
+the pause. Existing logs predate some saved edits and do not certify this
+checkpoint. The commands to run after authorized resume are:
+
+| Suite | Command | Evidence |
 |---|---|---|
-| Claude | the original checkout (a safe root) | 342 pass, 0 fail; typecheck exit 0 |
-| Claude | the /tmp worktree | five resolveProjectRoot tests fail BY DESIGN, because production refuses transient roots |
-| Codex | `plugins/codex-pacekeeper` | 217 pass, 0 fail; typecheck exit 0 after F1-F11 repairs |
-| Parity | `tests/parity` | 41 pass, 0 fail; typecheck exit 0 after F1-F11 repairs |
+| Codex | `bun test` in `plugins/codex-pacekeeper` | Disposable suite log under `/tmp/issue19-final-logs/` |
+| Codex typecheck | `bun run typecheck` in `plugins/codex-pacekeeper` | Disposable typecheck log under `/tmp/issue19-final-logs/` |
+| Claude | `bun test` in `plugins/cc-pacekeeper` | Isolated suite log under `/tmp/issue19-final-logs/` |
+| Claude typecheck | `bun run typecheck` in `plugins/cc-pacekeeper` | Isolated typecheck log under `/tmp/issue19-final-logs/` |
+| Parity | `bun test` in `tests/parity` | Isolated parity log under `/tmp/issue19-final-logs/` |
+| Parity typecheck | `bun run typecheck` in `tests/parity` | Isolated parity typecheck log under `/tmp/issue19-final-logs/` |
 
-The Claude package is byte-identical to the base commit; `git diff
-2751789..HEAD -- plugins/cc-pacekeeper/` is empty, and CI now enforces this.
+The actual native disposable smoke also covered WebSocket handshake and
+bootstrap methods, and the disposable package smoke covered marketplace add,
+plugin add, plugin metadata, hook declarations, disable configuration, and
+plugin removal. Those smoke tests did not authenticate or execute a model turn.
 
-The parity assertions were mutation-checked: reintroducing the fabricated-zero
-percentage, the flat queue-response id, or the default-true owner liveness each
-turns the suite red, so the green result is not vacuous.
-
-The current local suite results above are disposable behavioral/type checks,
-not independent review or live/native acceptance. Parent review and live
-acceptance remain pending.
-
-### A note on the parity harness
-
-`tests/parity/harness.ts` imports the shipped Claude runtime directly. That is
-deliberate — the corpus exists to compare against what actually ships, not
-against a restatement of it — but it has a real cost: the parity suite needs
-the Claude package's dependencies installed, so it does not demonstrate that
-the Codex package works standalone. The separate `codex` CI job covers that
-case, installing and running `plugins/codex-pacekeeper` on its own with no
-sibling checkout. Neither production package imports this harness.
+The Claude package is checked byte-for-byte against the current main reference;
+the workflow's `claude-unchanged` job is scoped to this parity branch so the
+preservation check cannot freeze unrelated future Claude work.

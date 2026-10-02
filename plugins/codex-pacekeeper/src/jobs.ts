@@ -48,6 +48,8 @@ export interface Job {
    */
   submissionId: string;
   queuedSubmissionId?: string;
+  /** Native turn identity once the queued submission has started. */
+  turnId?: string;
   /** Reset generation for a wake, so a rolled-over reset cannot be reused. */
   resetGeneration?: number;
   /** Whether this attempt may be retried. False whenever delivery is unproven. */
@@ -96,8 +98,8 @@ export function createJob(input: CreateJobInput): Job {
 export type JobEvent =
   | { type: 'submitting' }
   | { type: 'accepted'; queuedSubmissionId: string }
-  | { type: 'turn-started' }
-  | { type: 'completed'; result: string; nativeCompleted?: boolean; toolCalls?: number }
+  | { type: 'turn-started'; turnId?: string }
+  | { type: 'completed'; result: string; nativeCompleted?: boolean; toolCalls?: number; submissionId?: string; turnId?: string }
   | { type: 'rejected'; reason: string }
   | { type: 'ambiguous'; reason: string }
   | { type: 'cancelled' };
@@ -125,15 +127,18 @@ export function advance(job: Job, event: JobEvent): Job {
       return { ...job, state: 'queued', queuedSubmissionId: event.queuedSubmissionId, retryable: false };
     case 'turn-started':
       if (job.state !== 'queued') return job;
-      return { ...job, state: 'running' };
+      return { ...job, state: 'running', ...(event.turnId && event.turnId.trim() !== '' ? { turnId: event.turnId } : {}) };
     case 'completed':
       // Some native owners do not emit a distinct queue-running notification;
       // a verified completion may therefore arrive directly from queued. A
       // scheduled/submitting job still cannot jump to completion.
       if (job.state !== 'running' && job.state !== 'queued') return job;
+      if (event.submissionId !== undefined && event.submissionId !== job.submissionId) return job;
+      if (event.turnId !== undefined && job.turnId !== undefined && event.turnId !== job.turnId) return job;
       return {
         ...job,
         state: 'completed',
+        ...(event.turnId !== undefined && event.turnId.trim() !== '' ? { turnId: event.turnId } : {}),
         // Exact means byte-for-byte lowercase `pong`: whitespace and case
         // changes are observable model output and do not prove the contract.
         pongVerified:

@@ -1,11 +1,13 @@
 /**
  * Wire-conformance tests for the native Codex boundary.
  *
- * Every expectation here is derived from the pinned 0.153.4 protocol schema
+ * Every expectation here is derived from the pinned 0.160.0 protocol schema
  * and the pinned release source, not from a hook name or a plausible-looking
- * field. The fixture in `fixtures/native-0.153.4/` records the exact shapes
- * these tests assert against so a protocol drift shows up as a test failure
- * rather than as a silent runtime null.
+ * field. The legacy fixture in `fixtures/native-0.153.4/` records older
+ * queue shapes that remain useful for drift checks; current 0.160 fields are
+ * asserted directly below.
+ * Protocol drift shows up as a test failure rather than as a silent runtime
+ * null.
  */
 import { describe, expect, test } from 'bun:test';
 import {
@@ -19,6 +21,7 @@ import {
   findExistingOwner,
   normalizeNativeCapabilities,
   parseAccountResponse,
+  parseCompletedTurn,
   parseRateLimitsResponse,
   parseThreadTokenUsage,
   type NativeTransport
@@ -108,6 +111,52 @@ describe('thread/queue/add response parsing', () => {
   });
 });
 
+describe('native completion correlation', () => {
+  test('requires a full turn and matches the queued client id before counting tools', () => {
+    const response = {
+      thread: {
+        turns: [{
+          id: 'turn-1',
+          status: 'completed',
+          itemsView: 'full',
+          items: [
+            { id: 'user-1', type: 'userMessage', clientId: 'submission-1', content: [] },
+            { id: 'assistant-1', type: 'agentMessage', text: 'pong' }
+          ]
+        }]
+      }
+    };
+    expect(parseCompletedTurn(response, 'submission-1')).toEqual({ turnId: 'turn-1', result: 'pong', toolCalls: 0 });
+    expect(parseCompletedTurn({ ...response, thread: { turns: [{ ...response.thread.turns[0], itemsView: 'summary' }] } }, 'submission-1')).toBeNull();
+    expect(parseCompletedTurn(response, 'other-submission')).toBeNull();
+  });
+
+  test('counts every known effect item and refuses unknown or malformed evidence', () => {
+    const base = {
+      thread: {
+        turns: [{
+          id: 'turn-1',
+          status: 'completed',
+          itemsView: 'full',
+          items: [
+            { id: 'user-1', type: 'userMessage', clientId: 'submission-1', content: [] },
+            { id: 'assistant-1', type: 'agentMessage', text: 'pong' }
+          ]
+        }]
+      }
+    };
+    const turn = base.thread.turns[0];
+    if (turn === undefined) throw new Error('fixture turn missing');
+    const withItem = (item: Record<string, unknown>) => ({
+      thread: { turns: [{ ...turn, items: [...turn.items, item] }] }
+    });
+    expect(parseCompletedTurn(withItem({ id: 'change-1', type: 'fileChange', changes: [], status: 'completed' }), 'submission-1')?.toolCalls).toBe(1);
+    expect(parseCompletedTurn(withItem({ id: 'search-1', type: 'webSearch', query: 'query' }), 'submission-1')?.toolCalls).toBe(1);
+    expect(parseCompletedTurn(withItem({ id: 'future-1', type: 'futureNativeItem' }), 'submission-1')).toBeNull();
+    expect(parseCompletedTurn({ thread: { turns: [{ ...turn, items: [null] }] } }, 'submission-1')).toBeNull();
+  });
+});
+
 describe('native capability probing', () => {
   // These three names appear in no version of the protocol. Reporting them as
   // probeable invents a native control surface that does not exist.
@@ -154,7 +203,7 @@ describe('native capability probing', () => {
 describe('account/read response parsing', () => {
   test('recognizes a ChatGPT subscription without retaining email', () => {
     const parsed = parseAccountResponse({
-      account: { type: 'chatgpt', email: 'private@example.invalid', planType: 'plus' },
+      account: { type: 'chatgpt', email: 'masked-account', planType: 'plus' },
       requiresOpenaiAuth: true
     });
     expect(parsed).toEqual({
@@ -164,7 +213,7 @@ describe('account/read response parsing', () => {
       requiresOpenaiAuth: true,
       diagnostics: []
     });
-    expect(JSON.stringify(parsed)).not.toContain('private@example.invalid');
+    expect(JSON.stringify(parsed)).not.toContain('masked-account');
   });
 
   test('keeps API-key and Bedrock accounts outside subscription automation', () => {
@@ -266,6 +315,16 @@ describe('rate limit normalization', () => {
     expect(parsed.byLimitId['codex']?.buckets[0]?.usedPercent).toBe(17);
   });
 
+  test('retains the 0.160 ordinary usage permission beside quota buckets', () => {
+    const parsed = parseRateLimitsResponse({
+      accountId: 'acct-1',
+      ordinaryUsageAllowed: true,
+      rateLimitResetCredits: { availableCount: 1, credits: null },
+      rateLimits: { planType: 'plus', primary: { usedPercent: 17, windowDurationMins: 300 } }
+    }, 1_700_000_100_000);
+    expect(parsed.ordinaryUsageAllowed).toBe(true);
+  });
+
   test('an absent rateLimits field is a diagnostic, not an empty success', () => {
     const parsed = parseRateLimitsResponse({}, 1_700_000_100_000);
     expect(parsed.buckets).toEqual([]);
@@ -320,6 +379,27 @@ describe('subscription capacity classification', () => {
         spendControlReached: false,
         fresh: true,
         authenticated: true
+      })
+    ).toBe('unknown');
+  });
+
+  test('0.160.0 ordinaryUsageAllowed is the authoritative included-capacity observation', () => {
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        fresh: true,
+        authenticated: true,
+        ordinaryUsageAllowed: true
+      })
+    ).toBe('included');
+    expect(
+      classifySubscriptionCapacity({
+        planType: 'plus',
+        spendControlReached: false,
+        fresh: true,
+        authenticated: true,
+        ordinaryUsageAllowed: null
       })
     ).toBe('unknown');
   });

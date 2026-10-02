@@ -237,7 +237,7 @@ describe('cross-harness executable scenarios', () => {
       authenticated: true
     }, { config: codexConfig(), store });
     expect(result.facts.context?.level).toBe('critical');
-    expect(result.output).toContain('continue');
+    expect(result.output).toContain('systemMessage');
     expect(result.output).toContain('Save a resumable checkpoint');
     expect(levelOf(claudeSnapshot({ contextPercent: 95, fiveHourPercent: 10 }, effectiveConfig(), OBSERVED_AT), 'context')).toBe('critical');
   });
@@ -286,7 +286,7 @@ describe('cross-harness executable scenarios', () => {
   test('reset bridge identity and cache observations are explicit', () => {
     const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-parity-reset-')));
     const owner = { accountId: 'acct-parity', threadId: 'thread' };
-    const service = new CodexService({ config: codexConfig(), store, now: () => OBSERVED_AT });
+    const service = new CodexService({ config: codexConfig(), store, now: () => OBSERVED_AT, checkpointExists: () => true });
     const wake = service.scheduleResetWake(owner, 'checkpoint-exact', OBSERVED_AT + 5_000, OBSERVED_AT + 5_000);
     expect(wake.job.kind).toBe('reset-wake');
     expect(wake.job.resetGeneration).toBe(OBSERVED_AT + 5_000);
@@ -309,8 +309,8 @@ describe('cross-harness executable scenarios', () => {
     expect(manifest.name).toBe('codex-pacekeeper');
     expect(manifest.version).toBe('0.1.0');
     expect(manifest.optIn).toBe(true);
-    expect(manifest.hooks).toBe('hooks/hooks.json');
-    expect(hooks.optIn).toBe(true);
+    expect(manifest.hooks).toBe('./hooks/hooks.json');
+    expect(hooks.optIn).toBeUndefined();
     expect(Object.keys(hooks.hooks ?? {})).toContain('UserPromptSubmit');
     expect(existsSync(shim)).toBe(true);
     expect(statSync(shim).mode & 0o111).toBeGreaterThan(0);

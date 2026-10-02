@@ -79,6 +79,20 @@ export interface PresenceResult {
   lastActivityMs: number | null;
 }
 
+/** Find recent activity from a live parent session, excluding agent lanes. */
+export function latestParentUserActivity(store: { list: (kind: 'timeline') => unknown[] }, nowMs = Date.now()): number | null {
+  let latest: number | null = null;
+  for (const value of store.list('timeline')) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue;
+    const row = value as Record<string, unknown>;
+    if (row['agentId'] !== undefined || typeof row['sessionEndedAtMs'] === 'number') continue;
+    const activity = row['lastUserActivityAtMs'];
+    if (typeof activity !== 'number' || !Number.isFinite(activity) || activity < 0 || activity > nowMs) continue;
+    latest = latest === null ? activity : Math.max(latest, activity);
+  }
+  return latest;
+}
+
 function command(name: string, args: string[]): string | null {
   try {
     return execFileSync(name, args, { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -169,20 +183,41 @@ export interface PresenceSample {
   signals: Signal[];
   lastActivityMs: number | null;
   checkedAtMs: number;
+  /** False when probes ran but the durable sample could not be published. */
+  persisted: boolean;
   /** A transition is emitted once by the sampler that atomically published it. */
   transition?: { from: Presence; to: Presence; atMs: number };
 }
 
+function realOrResolve(target: string): string {
+  const resolved = path.resolve(target);
+  let base = resolved;
+  const missing: string[] = [];
+  while (!fs.existsSync(base)) {
+    const parent = path.dirname(base);
+    if (parent === base) return resolved;
+    missing.unshift(path.basename(base));
+    base = parent;
+  }
+  try { return path.join(fs.realpathSync(base), ...missing); } catch { return resolved; }
+}
+
 function cacheRoot(cacheHome?: string): string {
-  return path.resolve(cacheHome ?? process.env['XDG_CACHE_HOME'] ?? path.join(os.homedir(), '.cache'), 'cc-pacekeeper', 'codex');
+  const home = cacheHome ?? process.env['XDG_CACHE_HOME'] ?? path.join(os.homedir(), '.cache');
+  return path.join(realOrResolve(home), 'cc-pacekeeper', 'codex');
+}
+
+function cacheHomeRoot(cacheHome?: string): string {
+  return realOrResolve(cacheHome ?? process.env['XDG_CACHE_HOME'] ?? path.join(os.homedir(), '.cache'));
 }
 
 export function presenceStateFile(cacheHome?: string): string { return path.join(cacheRoot(cacheHome), 'presence-state.json'); }
 
-function assertNoSymlinkPath(target: string): void {
+function assertNoSymlinkPath(target: string, root = cacheRoot()): void {
   const absolute = path.resolve(target);
-  let cursor = path.parse(absolute).root;
-  for (const component of path.relative(cursor, absolute).split(path.sep).filter(Boolean)) {
+  if (absolute !== root && !absolute.startsWith(root + path.sep)) throw new Error('Codex presence state escapes its cache root');
+  let cursor = root;
+  for (const component of path.relative(root, absolute).split(path.sep).filter(Boolean)) {
     cursor = path.join(cursor, component);
     try {
       if (fs.lstatSync(cursor).isSymbolicLink()) throw new Error('Codex presence state contains a symlink');
@@ -217,6 +252,7 @@ export function samplePresence(config: CodexConfig, nowMs = Date.now(), hookGapM
     signals,
     lastActivityMs: fused.lastActivityMs,
     checkedAtMs: nowMs,
+    persisted: false,
     ...(previous !== null && previous.state !== fused.state
       ? { transition: { from: previous.state, to: fused.state, atMs: nowMs } }
       : {})
@@ -224,13 +260,16 @@ export function samplePresence(config: CodexConfig, nowMs = Date.now(), hookGapM
   const file = presenceStateFile(cacheHome);
   const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
   try {
-    assertNoSymlinkPath(path.dirname(file));
+    const root = cacheHomeRoot(cacheHome);
+    assertNoSymlinkPath(path.dirname(file), root);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    assertNoSymlinkPath(path.dirname(file));
+    assertNoSymlinkPath(path.dirname(file), root);
+    sample.persisted = true;
     fs.writeFileSync(temp, JSON.stringify(sample), { encoding: 'utf8', mode: 0o600 });
-    assertNoSymlinkPath(path.dirname(file));
+    assertNoSymlinkPath(path.dirname(file), root);
     fs.renameSync(temp, file);
   } catch {
+    sample.persisted = false;
     try { fs.unlinkSync(temp); } catch { /* best effort */ }
     /* diagnostics can report unknown state; hooks stay usable */
   }
@@ -242,6 +281,7 @@ const PresenceSampleSchema = z.object({
   signals: z.array(z.object({ name: z.string(), state: z.enum(['active', 'idle', 'unavailable']), lastActivityMs: z.number().optional(), detail: z.string().optional() })),
   lastActivityMs: z.number().nullable(),
   checkedAtMs: z.number(),
+  persisted: z.boolean().optional().default(true),
   transition: z.object({ from: z.enum(['online', 'afk', 'unknown']), to: z.enum(['online', 'afk', 'unknown']), atMs: z.number() }).optional()
 });
 

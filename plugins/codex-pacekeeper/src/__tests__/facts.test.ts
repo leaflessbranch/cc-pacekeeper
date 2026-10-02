@@ -86,6 +86,23 @@ describe('fact assembly', () => {
     expect(facts.blockers.join(' ')).toContain('not confirmed included');
   });
 
+  test('ordinary usage permission can be fresh while empty quota buckets remain blocked', () => {
+    const facts = buildFacts(
+      {
+        rateLimits: { accountId: 'acct-1', ordinaryUsageAllowed: true, rateLimits: { planType: 'plus', spendControlReached: false } },
+        observedAtMs: STALE,
+        ordinaryUsageObservedAtMs: FRESH,
+        tokenUsage: null,
+        authenticated: true
+      },
+      CODEX_DEFAULTS,
+      NOW
+    );
+    expect(facts.capacity).toBe('included');
+    expect(facts.automationAllowed).toBe(false);
+    expect(facts.blockers.join(' ')).toContain('five-hour');
+  });
+
   test('paid capacity disables automation, with no purchase path', () => {
     const facts = buildFacts(
       {

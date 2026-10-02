@@ -75,6 +75,9 @@ jobs:
 
   # The Claude runtime must stay byte-identical on this branch.
   claude-unchanged:
+    # This safeguard belongs to the Codex parity change. Keeping it scoped to
+    # this pull request avoids freezing unrelated future Claude maintenance.
+    if: github.event_name == 'pull_request' && github.head_ref == 'feat/issue-19-codex-parity'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

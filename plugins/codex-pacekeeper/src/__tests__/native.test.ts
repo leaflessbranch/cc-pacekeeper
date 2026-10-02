@@ -23,18 +23,21 @@ describe('native Codex boundary', () => {
   });
 
   test('preserves unsupported native controls as explicit capabilities', () => {
-    expect(normalizeNativeCapabilities({
+    const capabilities = normalizeNativeCapabilities({
       version: '0.153.4',
       methods: ['thread/queue/add', 'account/rateLimits/read']
-    })).toEqual({
-      protocolVersion: NATIVE_PROTOCOL_VERSION,
-      versionMatchesPin: true,
-      queue: 'supported',
-      accountRateLimits: 'supported',
-      toolDisable: 'unsupported',
-      preModelSuppression: 'unsupported',
-      saveBarrier: 'unsupported'
     });
+    expect(capabilities.protocolVersion).toBe('0.153.4');
+    expect(capabilities.versionMatchesPin).toBe(false);
+    expect(capabilities.queue).toBe('supported');
+    expect(capabilities.accountRateLimits).toBe('supported');
+    expect(capabilities.accountRead).toBe('unsupported');
+    expect(capabilities.queueDelete).toBe('unsupported');
+    expect(capabilities.queueList).toBe('unsupported');
+    expect(capabilities.threadRead).toBe('unsupported');
+    expect(capabilities.toolDisable).toBe('unsupported');
+    expect(capabilities.preModelSuppression).toBe('unsupported');
+    expect(capabilities.saveBarrier).toBe('unsupported');
   });
 
   test('normalizes native rate limits without trusting primary position', () => {

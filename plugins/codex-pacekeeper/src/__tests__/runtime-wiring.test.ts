@@ -40,6 +40,18 @@ describe('Codex runtime wiring', () => {
     expect((store.read(before.identity, 'timeline') as Record<string, unknown>)['lastEventAtMs']).toBe(NOW);
   });
 
+  test('owned submission evidence classifies an unmarked synthetic stop and preserves user idle state', () => {
+    const home = mkdtempSync(join(tmpdir(), 'codex-runtime-owned-synthetic-'));
+    const store = new CodexStore(home);
+    const created = createJob({ kind: 'keepalive', owner: { accountId: 'acct-1', threadId: 'thread-1' }, dueAtMs: NOW, submissionId: 'owned-submission' });
+    const running = advance(advance(advance(created, { type: 'submitting' }), { type: 'accepted', queuedSubmissionId: 'queued-owned' }), { type: 'turn-started', turnId: 'turn-owned' });
+    store.write({ accountId: 'acct-1', threadId: 'thread-1', agentId: `job-${created.id}` }, 'job', running);
+    const result = runTick({ hook_event_name: 'Stop', thread_id: 'thread-1', account_id: 'acct-1', submission_id: 'owned-submission', turn_id: 'turn-owned', job_result: 'pong', native_completed: true, tool_calls: 0, now_ms: NOW }, { config: CODEX_DEFAULTS, store });
+    expect(result.output).toBe('{}');
+    expect(store.read(result.identity, 'timeline')).toBeNull();
+    expect((store.read({ accountId: 'acct-1', threadId: 'thread-1', agentId: `job-${created.id}` }, 'job') as Record<string, unknown>)['state']).toBe('completed');
+  });
+
   test('refresh stores normalized facts without the prompt payload', () => {
     const home = mkdtempSync(join(tmpdir(), 'codex-runtime-refresh-'));
     const store = new CodexStore(home);
@@ -62,11 +74,56 @@ describe('Codex runtime wiring', () => {
   test('stop and precompact use their event-specific native output fields', () => {
     const home = mkdtempSync(join(tmpdir(), 'codex-runtime-events-'));
     const store = new CodexStore(home);
-    const stop = runTick({ hook_event_name: 'Stop', thread_id: 'thread-1', account_id: 'acct-1', now_ms: NOW, observed_at_ms: NOW, rateLimits: limits, tokenUsage: { modelContextWindow: 100, last: { totalTokens: 1 } }, authenticated: true }, { config: CODEX_DEFAULTS, store });
-    expect(JSON.parse(stop.output)).toMatchObject({ decision: 'block' });
+    const stop = runTick({ hook_event_name: 'Stop', thread_id: 'thread-1', account_id: 'acct-1', stop_hook_active: true, now_ms: NOW, observed_at_ms: NOW, rateLimits: limits, tokenUsage: { modelContextWindow: 100, last: { totalTokens: 1 } }, authenticated: true }, { config: CODEX_DEFAULTS, store });
+    expect(JSON.parse(stop.output)).toEqual({});
     const compact = runTick({ hook_event_name: 'PreCompact', thread_id: 'thread-2', account_id: 'acct-1', now_ms: NOW, observed_at_ms: NOW, rateLimits: limits, tokenUsage: { modelContextWindow: 100, last: { totalTokens: 95 } }, authenticated: true }, { config: CODEX_DEFAULTS, store });
-    expect(JSON.parse(compact.output)).toMatchObject({ continue: false });
+    expect(JSON.parse(compact.output)).toMatchObject({ systemMessage: expect.any(String) });
+    expect(JSON.parse(compact.output).continue).toBeUndefined();
     expect(JSON.parse(compact.output).hookSpecificOutput).toBeUndefined();
+    const postCompact = runTick({ hook_event_name: 'PostCompact', thread_id: 'thread-2', account_id: 'acct-1', now_ms: NOW, observed_at_ms: NOW, rateLimits: limits, tokenUsage: { modelContextWindow: 100, last: { totalTokens: 95 } }, authenticated: true }, { config: CODEX_DEFAULTS, store: new CodexStore(mkdtempSync(join(tmpdir(), 'codex-runtime-postcompact-'))) });
+    expect(JSON.parse(postCompact.output)).toMatchObject({ systemMessage: expect.any(String) });
+    expect(JSON.parse(postCompact.output).hookSpecificOutput).toBeUndefined();
+  });
+
+  test('subagent stop suppresses output when the host is already continuing', () => {
+    const home = mkdtempSync(join(tmpdir(), 'codex-runtime-subagent-stop-'));
+    const store = new CodexStore(home);
+    const result = runTick({ hook_event_name: 'SubagentStop', thread_id: 'thread-1', account_id: 'acct-1', agent_id: 'child-1', now_ms: NOW, stop_hook_active: true }, { config: CODEX_DEFAULTS, store });
+    expect(result.decision.inject).toBe(false);
+    expect(JSON.parse(result.output)).toEqual({});
+  });
+
+  test('native spawn tool input receives advisory fan-out guidance without denial', () => {
+    const home = mkdtempSync(join(tmpdir(), 'codex-runtime-spawn-advice-'));
+    const result = runTick({
+      hook_event_name: 'PreToolUse',
+      thread_id: 'thread-1',
+      account_id: 'acct-1',
+      tool_name: 'spawn_agent',
+      tool_input: { agents: [{ type: 'worker' }, { type: 'worker' }] },
+      now_ms: NOW,
+      observed_at_ms: NOW,
+      rateLimits: limits,
+      authenticated: true
+    }, { config: CODEX_DEFAULTS, store: new CodexStore(home) });
+    expect(result.output).toContain('Dispatching 2 agents');
+    expect(result.output).not.toContain('"decision":"block"');
+  });
+
+  test('native collab spawnAgent input maps receiver threads to advisory fan-out', () => {
+    const result = runTick({
+      hook_event_name: 'PreToolUse',
+      thread_id: 'thread-1',
+      account_id: 'acct-1',
+      tool_name: 'collabAgentToolCall',
+      tool_input: { tool: 'spawnAgent', receiverThreadIds: ['child-1', 'child-2'] },
+      now_ms: NOW,
+      observed_at_ms: NOW,
+      rateLimits: limits,
+      authenticated: true
+    }, { config: CODEX_DEFAULTS, store: new CodexStore(mkdtempSync(join(tmpdir(), 'codex-runtime-native-spawn-'))) });
+    expect(result.output).toContain('Dispatching 2 agents');
+    expect(result.output).not.toContain('"decision":"block"');
   });
 
   test('delivery records submitting intent before queue acceptance and preserves stable id', async () => {

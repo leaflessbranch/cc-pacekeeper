@@ -3,8 +3,8 @@
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { listLiveOwners } from './live-sessions';
-import { resolveProjectRoot } from './resolve-root';
+import { listLiveClaudeSessions, listLiveOwners } from './live-sessions';
+import { resolveProjectRoot, worktreeInfo } from './resolve-root';
 
 export interface WorktreeRow {
   path: string;
@@ -15,6 +15,8 @@ export interface WorktreeRow {
   locked: boolean;
   dirty: boolean | null;
   liveOwners: number | null;
+  /** Occupancy from the sibling Claude harness; undefined means unobserved. */
+  liveClaudeOwners?: number | null;
 }
 
 function git(cwd: string, args: string[]): string | null {
@@ -30,7 +32,7 @@ export function parseWorktreePorcelain(output: string): WorktreeRow[] {
   let current: Partial<WorktreeRow> | null = null;
   const flush = (): void => {
     if (current?.path) {
-      rows.push({ path: current.path, branch: current.branch, head: current.head, bare: current.bare ?? false, detached: current.detached ?? false, locked: current.locked ?? false, dirty: null, liveOwners: null });
+      rows.push({ path: current.path, branch: current.branch, head: current.head, bare: current.bare ?? false, detached: current.detached ?? false, locked: current.locked ?? false, dirty: null, liveOwners: null, liveClaudeOwners: null });
     }
     current = null;
   };
@@ -48,6 +50,10 @@ export function parseWorktreePorcelain(output: string): WorktreeRow[] {
 
 function canonical(input: string): string {
   try { return fs.realpathSync(input); } catch { return path.resolve(input); }
+}
+
+function occupancyRoot(cwd: string): string {
+  return canonical(worktreeInfo(cwd)?.worktreeRoot ?? cwd);
 }
 
 function assertSafeDestination(root: string, target: string): void {
@@ -72,20 +78,25 @@ function assertSafeDestination(root: string, target: string): void {
 export interface WorktreeListOptions {
   cwd: string;
   ownerRegistryFile?: string;
+  claudeSessionsDir?: string;
 }
 
 export function listWorktrees(options: WorktreeListOptions): WorktreeRow[] | null {
   const output = git(options.cwd, ['worktree', 'list', '--porcelain']);
   if (output === null) return null;
   const owners = listLiveOwners(options.ownerRegistryFile);
+  const claudeSessions = listLiveClaudeSessions(options.claudeSessionsDir);
   const rows = parseWorktreePorcelain(output);
   for (const row of rows) {
-    if (row.bare) { row.dirty = false; row.liveOwners = 0; continue; }
+    if (row.bare) { row.dirty = false; row.liveOwners = 0; row.liveClaudeOwners = 0; continue; }
     const cleanStatus = status(row.path);
     row.dirty = cleanStatus === null ? null : cleanStatus.length > 0;
     if (owners === null) row.liveOwners = null;
     else if (owners.some((owner) => owner.cwd === undefined)) row.liveOwners = null;
-    else row.liveOwners = owners.filter((owner) => owner.cwd !== undefined && canonical(owner.cwd) === canonical(row.path)).length;
+    else row.liveOwners = owners.filter((owner) => owner.cwd !== undefined && occupancyRoot(owner.cwd) === canonical(row.path)).length;
+    if (claudeSessions === null) row.liveClaudeOwners = null;
+    else if (claudeSessions.some((session) => session.cwd === undefined)) row.liveClaudeOwners = null;
+    else row.liveClaudeOwners = claudeSessions.filter((session) => session.cwd !== undefined && occupancyRoot(session.cwd) === canonical(row.path)).length;
   }
   return rows;
 }
@@ -117,27 +128,32 @@ export interface CleanupDecision {
 }
 
 export function cleanupDecision(row: WorktreeRow, currentCwd: string): CleanupDecision {
-  if (canonical(row.path) === canonical(currentCwd)) return { path: row.path, removable: false, reason: 'current worktree' };
+  const invokingRoot = worktreeInfo(currentCwd)?.worktreeRoot ?? canonical(currentCwd);
+  if (canonical(row.path) === canonical(invokingRoot)) return { path: row.path, removable: false, reason: 'current worktree' };
+  if (worktreeInfo(row.path)?.isWorktree === false) return { path: row.path, removable: false, reason: 'main checkout' };
   if (row.bare) return { path: row.path, removable: false, reason: 'bare repository' };
   if (row.locked) return { path: row.path, removable: false, reason: 'worktree is locked' };
   if (row.dirty === null) return { path: row.path, removable: false, reason: 'git status was unavailable' };
   if (row.dirty) return { path: row.path, removable: false, reason: 'worktree is dirty' };
   if (row.liveOwners === null) return { path: row.path, removable: false, reason: 'owner liveness is unknown' };
   if (row.liveOwners > 0) return { path: row.path, removable: false, reason: 'a live Codex owner is using the worktree' };
+  if (row.liveClaudeOwners === undefined || row.liveClaudeOwners === null) return { path: row.path, removable: false, reason: 'cross-harness occupancy is unknown' };
+  if (row.liveClaudeOwners > 0) return { path: row.path, removable: false, reason: 'a live Claude session is using the worktree' };
   return { path: row.path, removable: true, reason: 'clean, unlocked and idle' };
 }
 
 export function cleanupWorktrees(options: WorktreeListOptions & { apply?: boolean; currentCwd?: string }): CleanupDecision[] {
   const rows = listWorktrees(options);
   if (rows === null) throw new Error('not a git repository');
-  const decisions = rows.map((row) => cleanupDecision(row, options.currentCwd ?? options.cwd));
+  const invokingCwd = options.currentCwd ?? options.cwd;
+  const decisions = rows.map((row) => cleanupDecision(row, invokingCwd));
   if (options.apply === true) {
     for (const decision of decisions) {
       if (!decision.removable) continue;
       // Re-read ownership and Git state immediately before a destructive
       // remove; a session can attach after the initial list.
       const latest = listWorktrees(options)?.find((row) => canonical(row.path) === canonical(decision.path));
-      const current = latest ? cleanupDecision(latest, options.currentCwd ?? options.cwd) : undefined;
+      const current = latest ? cleanupDecision(latest, invokingCwd) : undefined;
       if (!current?.removable) {
         decision.removable = false;
         decision.reason = current?.reason ?? 'worktree disappeared before cleanup';

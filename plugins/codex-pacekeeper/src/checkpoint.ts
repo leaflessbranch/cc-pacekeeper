@@ -259,22 +259,66 @@ export class CodexCheckpoints {
     return path.join(this.archiveDir, `${id}.state.json`);
   }
 
-  private archivedDisposition(id: string): CheckpointArchiveDisposition | 'legacy' | null {
+  private readArchiveState(id: string): { disposition: CheckpointArchiveDisposition; phase: 'prepared' | 'complete'; destination?: string; claimTokenHash?: string; owner?: CheckpointOwner } | null {
     try {
       const raw = JSON.parse(fs.readFileSync(this.archiveStateFile(id), 'utf8')) as Record<string, unknown>;
+      if (raw['id'] !== id) return null;
       const disposition = raw['disposition'];
-      return disposition === 'consumed' || disposition === 'superseded' || disposition === 'discarded' ? disposition : 'legacy';
+      const phase = raw['phase'];
+      if ((disposition !== 'consumed' && disposition !== 'superseded' && disposition !== 'discarded')
+        || (phase !== 'prepared' && phase !== 'complete')) return null;
+      const ownerValue = typeof raw['owner'] === 'object' && raw['owner'] !== null ? raw['owner'] as Record<string, unknown> : null;
+      const owner = ownerValue !== null && typeof ownerValue.threadId === 'string' && (ownerValue.accountId === null || typeof ownerValue.accountId === 'string')
+        ? { accountId: ownerValue.accountId as string | null, threadId: ownerValue.threadId, ...(typeof ownerValue.agentId === 'string' ? { agentId: ownerValue.agentId } : {}) }
+        : undefined;
+      return {
+        disposition,
+        phase,
+        ...(typeof raw['destination'] === 'string' ? { destination: raw['destination'] } : {}),
+        ...(typeof raw['claimTokenHash'] === 'string' ? { claimTokenHash: raw['claimTokenHash'] } : {}),
+        ...(owner ? { owner } : {})
+      };
     } catch {
-      return 'legacy';
+      return null;
     }
   }
 
-  private writeArchiveDisposition(id: string, disposition: CheckpointArchiveDisposition): void {
+  private validArchiveDestination(id: string, destination: string): boolean {
+    const absolute = path.resolve(destination);
+    if (path.dirname(absolute) !== path.resolve(this.archiveDir)) return false;
+    const filename = path.basename(absolute);
+    const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!new RegExp(`-${escapedId}(?:-\\d+)?\\.md$`).test(filename)) return false;
+    try {
+      assertConfined(this.projectRoot, absolute);
+      const stat = fs.lstatSync(absolute);
+      if (!stat.isFile() || stat.isSymbolicLink()) return false;
+      const raw = fs.readFileSync(absolute, 'utf8');
+      return frontmatterValue(raw, 'id') === id;
+    } catch {
+      return false;
+    }
+  }
+
+  private archivedDisposition(id: string): CheckpointArchiveDisposition | 'legacy' | null {
+    const state = this.readArchiveState(id);
+    if (state === null) return 'legacy';
+    if (state.phase === 'complete') {
+      // A completed sidecar without its archive bytes is corruption, not a
+      // receipt. Keep the checkpoint recoverable rather than claiming success.
+      if (state.destination === undefined || !this.validArchiveDestination(id, state.destination)) return 'legacy';
+      return state.disposition;
+    }
+    if (state.destination !== undefined && this.validArchiveDestination(id, state.destination)) return state.disposition;
+    return 'legacy';
+  }
+
+  private writeArchiveState(id: string, disposition: CheckpointArchiveDisposition, phase: 'prepared' | 'complete', destination: string, claimTokenHash?: string, owner?: CheckpointOwner): void {
     this.ensureDirectory(this.archiveDir);
     const file = this.archiveStateFile(id);
     const temp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     try {
-      fs.writeFileSync(temp, JSON.stringify({ id, disposition, archivedAtMs: Date.now() }), { encoding: 'utf8', mode: 0o600 });
+      fs.writeFileSync(temp, JSON.stringify({ id, disposition, phase, destination, ...(claimTokenHash ? { claimTokenHash } : {}), ...(owner ? { owner } : {}), archivedAtMs: Date.now() }), { encoding: 'utf8', mode: 0o600 });
       fs.renameSync(temp, file);
     } catch (error) {
       try { fs.unlinkSync(temp); } catch { /* best effort */ }
@@ -282,11 +326,24 @@ export class CodexCheckpoints {
     }
   }
 
-  private archiveEntry(entry: CheckpointEntry, disposition: CheckpointArchiveDisposition): string {
+  private writeArchiveDisposition(id: string, disposition: CheckpointArchiveDisposition, destination = '', claimTokenHash?: string, owner?: CheckpointOwner): void {
+    this.writeArchiveState(id, disposition, 'complete', destination, claimTokenHash, owner);
+  }
+
+  private archiveEntry(entry: CheckpointEntry, disposition: CheckpointArchiveDisposition, claimTokenHash?: string, owner?: CheckpointOwner): string {
     const destination = this.archiveDestination(entry);
     this.assertSafeDestinations();
-    fs.renameSync(entry.file, destination);
-    this.writeArchiveDisposition(entry.id, disposition);
+    // Publish a prepared transaction before the rename. If the process dies
+    // after rename and before the final sidecar write, the prepared state plus
+    // archive bytes still form a recoverable exact-ID receipt.
+    this.writeArchiveState(entry.id, disposition, 'prepared', destination, claimTokenHash, owner);
+    try {
+      fs.renameSync(entry.file, destination);
+    } catch (error) {
+      try { fs.unlinkSync(this.archiveStateFile(entry.id)); } catch { /* best effort */ }
+      throw error;
+    }
+    this.writeArchiveDisposition(entry.id, disposition, destination, claimTokenHash, owner);
     return destination;
   }
 
@@ -563,6 +620,18 @@ export class CodexCheckpoints {
   /** Acknowledge successful consumption and archive exactly the claimed file. */
   public acknowledge(id: string, token: string, expectedOwner?: CheckpointOwner): ResumeResult {
     this.assertSafeDestinations();
+    const archived = this.readArchiveState(id);
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    if (archived?.disposition === 'consumed'
+      && archived.claimTokenHash === tokenHash
+      && this.archivedDisposition(id) === 'consumed') {
+      if (expectedOwner !== undefined) {
+        if (archived.owner === undefined || !sameOwner(archived.owner, expectedOwner)) {
+          return { status: 'owner-mismatch' };
+        }
+      }
+      return { status: 'already-consumed' };
+    }
     const claim = this.readClaim(id);
     if (claim === null || claim.token !== token) return { status: 'not-found' };
     if (expectedOwner !== undefined && claim.owner !== undefined && !sameOwner(claim.owner, expectedOwner)) return { status: 'owner-mismatch' };
@@ -581,7 +650,7 @@ export class CodexCheckpoints {
     const currentHash = createHash('sha256').update(entry.body).digest('hex');
     if (currentHash !== claim.bodyHash) return { status: 'not-found' };
     // Rename the exact selected file only after validating its id and body hash.
-    this.archiveEntry(entry, 'consumed');
+    this.archiveEntry(entry, 'consumed', tokenHash, claim.owner ?? entry.owner);
     try { fs.unlinkSync(this.claimFile(id)); } catch { /* archive is the durable acknowledgement */ }
     return { status: 'resumed', id: entry.id, lane: entry.lane, body: entry.body };
   }

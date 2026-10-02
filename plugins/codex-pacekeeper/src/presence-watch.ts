@@ -10,7 +10,7 @@ async function main(): Promise<void> {
   for (;;) {
     const now = Date.now();
     const current = samplePresence(loadCodexConfig().config, now, null);
-    if (current.transition !== undefined && current.transition.to !== 'unknown' && current.transition.to !== previous?.state) {
+    if (current.persisted && current.transition !== undefined && current.transition.to !== 'unknown' && current.transition.to !== previous?.state) {
       process.stdout.write(`[pacekeeper-presence] ${current.transition.to}\n`);
     }
     previous = current;

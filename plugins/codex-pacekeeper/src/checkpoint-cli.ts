@@ -6,7 +6,7 @@ import { execFileSync } from 'child_process';
 import { CodexCheckpoints, type CheckpointOwner } from './checkpoint';
 import { archiveHandoff, checkpointCliPath, handoffsDir, listHandoffs, writeHandoff } from './agent-budget';
 import { loadCodexConfig } from './config';
-import { resolveProjectRoot } from './resolve-root';
+import { resolveProjectRoot, worktreeInfo } from './resolve-root';
 
 interface ParsedArgs {
   verb: string;
@@ -104,6 +104,20 @@ function projectRootFor(args: ParsedArgs): string {
   });
 }
 
+export interface CheckpointProvenance {
+  branch?: string;
+  worktree: string;
+}
+
+/** Shared storage uses the main root; metadata follows the invoking checkout. */
+export function invokingProvenance(cwd: string): CheckpointProvenance {
+  const info = worktreeInfo(cwd);
+  if (info?.worktreeRoot !== undefined) {
+    return { worktree: info.worktreeRoot, ...(info.branch ? { branch: info.branch } : {}) };
+  }
+  return { worktree: path.resolve(cwd) };
+}
+
 function makeCheckpoints(args: ParsedArgs): CodexCheckpoints {
   const loaded = loadCodexConfig(process.env['XDG_CONFIG_HOME']);
   const root = projectRootFor(args);
@@ -151,13 +165,14 @@ async function main(): Promise<void> {
     if (body.trim() === '') throw new Error('save requires --body, --body-file or piped content');
     const owner = ownerFrom(args);
     const root = projectRootFor(args);
-    const branch = stringFlag(args, 'branch') ?? gitValue(root, ['branch', '--show-current']);
+    const provenance = invokingProvenance(stringFlag(args, 'cwd') ?? process.cwd());
+    const branch = stringFlag(args, 'branch') ?? provenance.branch ?? gitValue(provenance.worktree, ['branch', '--show-current']);
     const saved = checkpoints.save({
       lane: stringFlag(args, 'lane') ?? branch ?? 'default',
       owner,
       body,
       ...(branch ? { branch } : {}),
-      worktree: root,
+      worktree: provenance.worktree,
       ...(stringFlag(args, 'reset-generation') ? { resetGeneration: Number(stringFlag(args, 'reset-generation')) } : {})
     });
     process.stdout.write(`Saved checkpoint ${saved.id} (${saved.file})\n`);

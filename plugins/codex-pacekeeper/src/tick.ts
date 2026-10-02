@@ -11,6 +11,7 @@ import { readFileSync } from 'fs';
 import { CodexService } from './service';
 
 const KEEPALIVE_MARKER = '[pacekeeper-keepalive]';
+const RESET_WAKE_MARKER = '[pacekeeper-resume]';
 
 export interface TickInput {
   hook_event_name?: unknown;
@@ -37,12 +38,24 @@ export interface TickInput {
   save_acknowledged?: unknown;
   checkpoint_saved?: unknown;
   planned_agents?: unknown;
+  /** Codex PreToolUse fields used to identify the native spawn tool. */
+  tool_name?: unknown;
+  tool_input?: unknown;
   job_id?: unknown;
+  submission_id?: unknown;
+  client_user_message_id?: unknown;
+  turn_id?: unknown;
   job_result?: unknown;
   native_completed?: unknown;
   tool_calls?: unknown;
   pending_work?: unknown;
   pendingWork?: unknown;
+  clear?: unknown;
+  model_change?: unknown;
+  model_changed?: unknown;
+  model?: unknown;
+  previous_model?: unknown;
+  source?: unknown;
 }
 
 export interface TickOptions {
@@ -62,10 +75,54 @@ function stringValue(value: unknown): string | undefined { return typeof value =
 function numberValue(value: unknown): number | undefined { return typeof value === 'number' && Number.isFinite(value) ? value : undefined; }
 function boolValue(value: unknown): boolean | undefined { return typeof value === 'boolean' ? value : undefined; }
 
+function plannedAgentCount(input: TickInput): number | undefined {
+  const explicit = numberValue(input.planned_agents);
+  if (explicit !== undefined) return explicit;
+  const toolName = stringValue(input.tool_name);
+  if (toolName !== 'spawn_agent' && toolName !== 'Agent' && toolName !== 'spawnAgent' && toolName !== 'collabAgentToolCall') return undefined;
+  if (Array.isArray(input.tool_input)) return input.tool_input.length;
+  if (typeof input.tool_input !== 'object' || input.tool_input === null) return undefined;
+  const args = input.tool_input as Record<string, unknown>;
+  // Native collaboration events expose the operation as `tool: spawnAgent`
+  // and carry one receiver thread per spawned child. Count only that exact
+  // schema value; an unrelated tool input remains advisory-free.
+  if (toolName === 'collabAgentToolCall' || toolName === 'spawnAgent') {
+    if (args['tool'] !== 'spawnAgent') return undefined;
+    if (Array.isArray(args['receiverThreadIds'])) return args['receiverThreadIds'].filter((id) => typeof id === 'string').length || 1;
+    return 1;
+  }
+  // The hook contract exposes tool_input as JSON, while the native spawn
+  // tool's argument shape can evolve. Only count an explicit collection or
+  // count supplied by that payload; never infer a fan-out from prose.
+  for (const key of ['agents', 'tasks', 'agent_ids']) {
+    if (Array.isArray(args[key])) return args[key].length;
+  }
+  for (const key of ['count', 'planned_agents']) {
+    const count = numberValue(args[key]);
+    if (count !== undefined) return count;
+  }
+  return undefined;
+}
+
 function eventName(input: TickInput): PolicyEvent {
   const event = stringValue(input.hook_event_name) ?? stringValue(input.event);
   const valid: readonly PolicyEvent[] = ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact', 'PostCompact', 'SubagentStart', 'SubagentStop', 'Stop', 'Interrupt'];
   return valid.includes(event as PolicyEvent) ? event as PolicyEvent : 'SessionStart';
+}
+
+function lifecycleBoundary(input: TickInput, event: PolicyEvent): string | null {
+  if (event === 'SessionEnd') return 'session ended';
+  if (event === 'Interrupt') return 'session interrupted';
+  const rawEvent = (stringValue(input.hook_event_name) ?? stringValue(input.event) ?? '').toLowerCase().replace(/[_ -]/g, '');
+  if (input.clear === true || rawEvent === 'clear' || rawEvent === 'clearcommand' || stringValue(input.prompt)?.trim() === '/clear') {
+    return 'session cleared';
+  }
+  if (input.model_change === true || input.model_changed === true || rawEvent === 'modelchange' || rawEvent === 'modelchanged') {
+    return 'model changed';
+  }
+  const model = stringValue(input.model);
+  const previousModel = stringValue(input.previous_model);
+  return model !== undefined && previousModel !== undefined && model !== previousModel ? 'model changed' : null;
 }
 
 function identityFor(input: TickInput, facts: CodexFacts): StateIdentity {
@@ -111,23 +168,54 @@ export function formatFacts(facts: CodexFacts): string {
   return `[pacekeeper] context=${context}; 5h=${five}; weekly=${weekly}; capacity=${capacity}${blockers}`;
 }
 
-function output(event: PolicyEvent, additionalContext?: string): string {
+function output(event: PolicyEvent, additionalContext?: string, continuationActive = false): string {
   if (!additionalContext || additionalContext.trim() === '') return '{}';
+  if (continuationActive) return '{}';
   if (event === 'Stop' || event === 'SubagentStop') {
     return JSON.stringify({ decision: 'block', reason: additionalContext });
   }
-  if (event === 'PreCompact') {
-    // Codex's compaction hook accepts continue=false to defer compaction. It
-    // does not accept hookSpecificOutput.additionalContext as a save barrier.
-    return JSON.stringify({ continue: false, stopReason: additionalContext });
+  if (event === 'PreCompact' || event === 'PostCompact') {
+    // A compaction hook is not a model turn. Report the checkpoint request or
+    // status through the documented common field; do not turn an ordinary
+    // warning into continue=false without a native save barrier.
+    return JSON.stringify({ systemMessage: additionalContext });
   }
   return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext } });
 }
 
-function isSynthetic(input: TickInput): boolean {
-  if (input.synthetic === true) return true;
-  const prompt = stringValue(input.prompt);
-  return prompt?.trimStart().startsWith(KEEPALIVE_MARKER) ?? false;
+function ownedSyntheticJob(input: TickInput, store: CodexStore): Record<string, unknown> | null {
+  const threadId = stringValue(input.thread_id) ?? stringValue(input.session_id);
+  if (threadId === undefined) return null;
+  const accountId = stringValue(input.account_id);
+  const jobId = stringValue(input.job_id);
+  const submissionId = stringValue(input.submission_id) ?? stringValue(input.client_user_message_id);
+  const turnId = stringValue(input.turn_id);
+  const matches = store.list('job').filter((candidate) => {
+    if (typeof candidate !== 'object' || candidate === null) return false;
+    const row = candidate as Record<string, unknown>;
+    const owner = typeof row['owner'] === 'object' && row['owner'] !== null ? row['owner'] as Record<string, unknown> : null;
+    if ((row['kind'] !== 'keepalive' && row['kind'] !== 'reset-wake') || owner === null || owner['threadId'] !== threadId) return false;
+    if (accountId !== undefined && owner['accountId'] !== accountId) return false;
+    return (jobId !== undefined && row['id'] === jobId)
+      || (submissionId !== undefined && row['submissionId'] === submissionId)
+      || (turnId !== undefined && row['turnId'] === turnId);
+  });
+  // When account_id is omitted, one exact same-thread owned job is enough;
+  // multiple account matches are ambiguous and must remain ordinary input.
+  const only = matches[0];
+  return matches.length === 1 && typeof only === 'object' && only !== null
+    ? only as Record<string, unknown>
+    : null;
+}
+
+function matchesOwnedSynthetic(input: TickInput, store: CodexStore): boolean {
+  return ownedSyntheticJob(input, store) !== null;
+}
+
+function isSynthetic(input: TickInput, store: CodexStore): boolean {
+  const prompt = stringValue(input.prompt)?.trimStart() ?? '';
+  const packageMarker = prompt.startsWith(KEEPALIVE_MARKER) || prompt.startsWith(RESET_WAKE_MARKER);
+  return matchesOwnedSynthetic(input, store) || (input.synthetic === true && packageMarker) || packageMarker;
 }
 
 function cachedTimeline(store: CodexStore, input: TickInput): Record<string, unknown> | null {
@@ -146,6 +234,17 @@ function cachedTimeline(store: CodexStore, input: TickInput): Record<string, unk
     if (row['threadId'] !== threadId) return false;
     return accountId === null || row['accountId'] === accountId;
   });
+  if (accountId === null) {
+    // A hook can arrive before native identity is available and leave a
+    // provisional null-account row. Once a same-thread row carries an
+    // authoritative account, discard those provisional rows for lookup. Keep
+    // the ambiguity rule when more than one real account is present.
+    const authoritative = candidates.filter((row) => typeof row['accountId'] === 'string' && row['accountId'].trim() !== '');
+    if (authoritative.length > 0) {
+      const accounts = new Set(authoritative.map((row) => row['accountId']));
+      return accounts.size === 1 ? authoritative[0] ?? null : null;
+    }
+  }
   if (candidates.length === 1) return candidates[0] ?? null;
   // A legacy record without explicit identity metadata is not safe to reuse
   // when the hook omitted the account: it could belong to another account's
@@ -175,7 +274,8 @@ function cachedTokenUsage(value: Record<string, unknown> | null): unknown | null
 
 function factsFrom(input: TickInput, config: CodexConfig, nowMs: number, store: CodexStore): CodexFacts {
   const cached = cachedTimeline(store, input);
-  const rateLimits = (input.rateLimits ?? input.rate_limits) as Parameters<typeof buildFacts>[0]['rateLimits'] | null | undefined ?? cachedRateLimits(cached);
+  const suppliedRateLimits = input.rateLimits ?? input.rate_limits;
+  const rateLimits = suppliedRateLimits as Parameters<typeof buildFacts>[0]['rateLimits'] | null | undefined ?? cachedRateLimits(cached);
   const cachedContextAt = numberValue(cached?.['contextObservedAtMs']);
   const cachedContextFresh = cachedContextAt !== undefined && nowMs >= cachedContextAt && nowMs - cachedContextAt <= config.usage_freshness_seconds * 1000;
   const tokenUsage = input.tokenUsage ?? input.token_usage ?? (cachedContextFresh ? cachedTokenUsage(cached) : null);
@@ -183,16 +283,22 @@ function factsFrom(input: TickInput, config: CodexConfig, nowMs: number, store: 
     ?? (rateLimits !== null && rateLimits !== undefined
       ? numberValue(cached?.['quotaObservedAtMs']) ?? numberValue(cached?.['lastObservedAtMs']) ?? nowMs
       : nowMs);
+  const suppliedOrdinaryPermission = typeof suppliedRateLimits === 'object'
+    && suppliedRateLimits !== null
+    && Object.prototype.hasOwnProperty.call(suppliedRateLimits, 'ordinaryUsageAllowed');
+  const ordinaryUsageObservedAtMs = suppliedOrdinaryPermission
+    ? (numberValue(input.observed_at_ms) ?? nowMs)
+    : numberValue(cached?.['ordinaryUsageObservedAtMs']);
   const cachedAuthAt = numberValue(cached?.['authObservedAtMs']);
   const cachedAuthFresh = cachedAuthAt !== undefined && nowMs >= cachedAuthAt && nowMs - cachedAuthAt <= config.usage_freshness_seconds * 1000;
   const authenticated = boolValue(input.authenticated) ?? (cachedAuthFresh && typeof cached?.['authenticated'] === 'boolean' ? cached['authenticated'] : null);
-  return buildFacts({ rateLimits: rateLimits ?? null, observedAtMs, tokenUsage, authenticated }, config, nowMs);
+  return buildFacts({ rateLimits: rateLimits ?? null, observedAtMs, ordinaryUsageObservedAtMs, tokenUsage, authenticated }, config, nowMs);
 }
 
 function saveTimeline(store: CodexStore, identity: StateIdentity, value: Record<string, unknown>): void {
   const existing = store.read(identity, 'timeline');
   const prior = typeof existing === 'object' && existing !== null ? existing as Record<string, unknown> : {};
-  store.write(identity, 'timeline', { ...prior, accountId: identity.accountId, threadId: identity.threadId, ...value });
+  store.write(identity, 'timeline', { ...prior, accountId: identity.accountId, threadId: identity.threadId, ...(identity.agentId ? { agentId: identity.agentId } : {}), ...value });
 }
 
 function buildSubagentText(input: TickInput, facts: CodexFacts, config: CodexConfig): string {
@@ -208,27 +314,37 @@ function buildSubagentText(input: TickInput, facts: CodexFacts, config: CodexCon
 
 function recordCompletionEnvelope(input: TickInput, event: PolicyEvent, config: CodexConfig, store: CodexStore, nowMs: number): void {
   if (event !== 'Stop' && event !== 'SubagentStop' && event !== 'SessionEnd') return;
-  const jobId = stringValue(input.job_id);
+  const owned = ownedSyntheticJob(input, store);
+  const jobId = stringValue(input.job_id) ?? (typeof owned?.['id'] === 'string' ? owned['id'] : undefined);
+  const submissionId = stringValue(input.submission_id) ?? stringValue(input.client_user_message_id);
+  const turnId = stringValue(input.turn_id);
   const result = typeof input.job_result === 'string' ? input.job_result : undefined;
   const nativeCompleted = boolValue(input.native_completed);
   const toolCalls = numberValue(input.tool_calls);
-  if (jobId === undefined || result === undefined || nativeCompleted === undefined || toolCalls === undefined) return;
+  if (jobId === undefined || submissionId === undefined || result === undefined || nativeCompleted === undefined || toolCalls === undefined) return;
   // This adapter accepts completion only when a caller supplies all three
   // independent facts. It never treats a hook name or queue acknowledgement
   // as model completion, and it has no effect for ordinary hooks without the
   // explicit envelope.
   const service = new CodexService({ config, store, now: () => nowMs });
-  service.recordCompletion(jobId, result, nativeCompleted, toolCalls);
+  // A hook receipt has no fresh service eligibility context. Let the service
+  // watcher create the next recurring attempt after it refreshes its owner;
+  // this receipt only completes the exact current attempt.
+  service.recordCompletion(jobId, result, nativeCompleted, toolCalls, submissionId, turnId, false);
 }
 
 export function runTick(input: TickInput, options: TickOptions = {}): TickResult {
   const config = options.config ?? loadCodexConfig().config;
   const nowMs = options.nowMs ?? numberValue(input.now_ms) ?? Date.now();
   const event = eventName(input);
-  const synthetic = isSynthetic(input);
   const store = options.store ?? new CodexStore();
+  const synthetic = isSynthetic(input, store);
   const facts = factsFrom(input, config, nowMs, store);
   const identity = identityFor(input, facts);
+  const lifecycleReason = synthetic ? null : lifecycleBoundary(input, event);
+  if (lifecycleReason !== null && identity.threadId !== 'unknown-thread') {
+    new CodexService({ config, store }).cancelOwnerJobs({ accountId: identity.accountId, threadId: identity.threadId }, lifecycleReason);
+  }
   const previous = initialState(store.read(identity, 'debounce'));
   const decision = decide({
     event,
@@ -241,6 +357,10 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
     saveAcknowledged: boolValue(input.save_acknowledged) ?? boolValue(input.checkpoint_saved)
   }, config);
 
+  // Completion receipts are allowed on an owned synthetic Stop/SessionEnd
+  // event even when that event has no prompt marker. State that represents a
+  // real user turn is still untouched below.
+  recordCompletionEnvelope(input, event, config, store, nowMs);
   if (!synthetic) {
     store.write(identity, 'debounce', decision.nextState);
     saveTimeline(store, identity, {
@@ -248,13 +368,15 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
       ...(event === 'UserPromptSubmit' ? { lastUserActivityAtMs: nowMs } : {}),
       ...(event === 'PreToolUse' || event === 'PostToolUse' ? { lastWorkAtMs: nowMs, lastToolActivityAtMs: nowMs } : {}),
       ...(boolValue(input.pending_work) !== undefined ? { pendingWork: boolValue(input.pending_work) } : boolValue(input.pendingWork) !== undefined ? { pendingWork: boolValue(input.pendingWork) } : {}),
-      ...(event === 'SessionStart' ? { sessionStartedAtMs: nowMs } : {}),
-      ...(event === 'SessionEnd' ? { sessionEndedAtMs: nowMs } : {})
+      ...(event === 'SessionStart' ? { sessionStartedAtMs: nowMs, ...(boolValue(input.pending_work) === undefined && boolValue(input.pendingWork) === undefined ? { pendingWork: false } : {}) } : {}),
+      ...(event === 'SessionEnd' ? { sessionEndedAtMs: nowMs, ...(boolValue(input.pending_work) === undefined && boolValue(input.pendingWork) === undefined ? { pendingWork: false } : {}) } : {}),
+      ...(event === 'Interrupt' && boolValue(input.pending_work) === undefined && boolValue(input.pendingWork) === undefined ? { pendingWork: false, interruptedAtMs: nowMs } : {}),
+      ...(event === 'UserPromptSubmit' && boolValue(input.pending_work) === undefined && boolValue(input.pendingWork) === undefined ? { pendingWork: true } : {}),
+      ...(lifecycleReason !== null ? { pendingWork: false } : {})
     });
     if (event === 'SubagentStart' && stringValue(input.agent_id) && facts.fiveHour?.usedPercent !== null && facts.fiveHour?.usedPercent !== undefined) {
       saveTimeline(store, identity, { spawnFiveHourPercent: facts.fiveHour.usedPercent, parentThreadId: stringValue(input.thread_id) ?? stringValue(input.session_id) ?? 'unknown-thread' });
     }
-    recordCompletionEnvelope(input, event, config, store, nowMs);
   }
 
   if (synthetic) return { output: '{}', facts, decision, identity };
@@ -264,7 +386,10 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
   else if (event === 'SubagentStop') {
     const agentId = stringValue(input.agent_id);
     const pending = agentId && hasHandoff(String(input.cwd ?? process.cwd()), config.checkpoint_dir_name, agentId, config.checkpoint_subdir);
-    context = pending ? `${formatFacts(facts)}\n\n[pacekeeper] A handoff is pending for ${agentId}; the parent must absorb it once, then run ${checkpointCliPath()} handoffs archive ${agentId}.` : formatFacts(facts);
+    const continuationActive = boolValue(input.continuation_active) ?? boolValue(input.stop_hook_active) ?? false;
+    if (pending && decision.inject && !continuationActive) {
+      context = `${formatFacts(facts)}\n\n[pacekeeper] A handoff is pending for ${agentId}; the parent must absorb it once, then run ${checkpointCliPath()} handoffs archive ${agentId}.`;
+    }
   } else if (event === 'PreCompact' && facts.context?.level === 'critical' && decision.inject) {
     context = `${formatFacts(facts)}\n\n[pacekeeper] Context is critical. Save a resumable checkpoint now with ${checkpointCliPath()} before continuing. The native hook boundary does not prove a save barrier, so do not claim the checkpoint exists until the CLI verifies it.`;
   } else if (decision.inject) {
@@ -290,12 +415,13 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
     const pause = effectivePause(config, facts.fiveHour.usedPercent);
     if (facts.fiveHour.usedPercent >= pause) context += `\n\n${formatPauseDirective({ agentId: startAgentId, pausePercent: pause })}`;
   }
-  const plannedAgents = numberValue(input.planned_agents);
+  const plannedAgents = plannedAgentCount(input);
   if (plannedAgents !== undefined && plannedAgents > 1) {
     const advice = dispatchAdvice({ plannedAgents, fiveHourPercent: facts.fiveHour?.usedPercent ?? null }, config);
     if (advice.message !== null) context += `${context ? '\n\n' : ''}[pacekeeper] ${advice.message}`;
   }
-  return { output: output(event, context), facts, decision, identity };
+  const continuationActive = boolValue(input.continuation_active) ?? boolValue(input.stop_hook_active) ?? false;
+  return { output: output(event, context, continuationActive), facts, decision, identity };
 }
 
 function readInput(): TickInput {

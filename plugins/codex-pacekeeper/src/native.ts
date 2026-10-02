@@ -7,10 +7,11 @@
  * outcome, including unsupported and ambiguous outcomes.
  */
 
-export const NATIVE_PROTOCOL_VERSION = '0.153.4';
+export const NATIVE_PROTOCOL_VERSION = '0.160.0';
 export const QUEUE_ADD_METHOD = 'thread/queue/add';
 export const QUEUE_DELETE_METHOD = 'thread/queue/delete';
 export const QUEUE_LIST_METHOD = 'thread/queue/list';
+export const THREAD_READ_METHOD = 'thread/read';
 export const ACCOUNT_READ_METHOD = 'account/read';
 export const RATE_LIMITS_READ_METHOD = 'account/rateLimits/read';
 
@@ -28,11 +29,13 @@ export interface NativeCapabilities {
   /** Queue listing is needed for crash reconciliation; acceptance alone does
    * not prove that a submission completed or never ran. */
   queueList?: NativeCapability;
+  /** Full turn/item reads are needed to correlate completion and tool use. */
+  threadRead?: NativeCapability;
   /** Account identity/auth mode is an observed native fact, not an env hint. */
   accountRead?: NativeCapability;
   accountRateLimits: NativeCapability;
   /**
-   * The following three are `unsupported` for the pinned 0.153.4 protocol:
+   * The following three are `unsupported` for the pinned 0.160.0 protocol:
    * it exposes no method or `turn/start` parameter that disables tools,
    * suppresses an input before model work, or forces a persisted save before
    * compaction. They are named here so a caller must handle the gap explicitly
@@ -144,6 +147,12 @@ export function normalizeNativeCapabilities(probe: NativeSchemaProbe): NativeCap
   });
   Object.defineProperty(result, 'accountRead', {
     value: has(ACCOUNT_READ_METHOD),
+    enumerable: false,
+    writable: false,
+    configurable: false
+  });
+  Object.defineProperty(result, 'threadRead', {
+    value: has(THREAD_READ_METHOD),
     enumerable: false,
     writable: false,
     configurable: false
@@ -279,6 +288,8 @@ export interface ParsedRateLimitSnapshot {
  */
 export interface ParsedRateLimitsResponse extends ParsedRateLimitSnapshot {
   accountId: string | null;
+  /** Backend permission for ordinary included usage, validated for the active account. */
+  ordinaryUsageAllowed: boolean | null;
   byLimitId: Record<string, ParsedRateLimitSnapshot>;
 }
 
@@ -388,8 +399,70 @@ export function parseRateLimitSnapshot(
 
 export interface NativeRateLimitsResponse {
   accountId?: unknown;
+  ordinaryUsageAllowed?: unknown;
+  rateLimitResetCredits?: unknown;
+  rateLimitUpsell?: unknown;
   rateLimits?: unknown;
   rateLimitsByLimitId?: unknown;
+}
+
+export interface CompletedTurnObservation {
+  turnId: string;
+  result: string;
+  toolCalls: number;
+}
+
+// These are the only ThreadItem variants that can establish a zero-tool
+// completion. Keep this list aligned with the generated 0.160 ThreadRead
+// schema: an unrecognized item must remain unknown rather than being silently
+// treated as harmless when the native protocol grows.
+const HARMLESS_COMPLETION_ITEMS = new Set([
+  'userMessage',
+  'agentMessage',
+  'reasoning',
+  'plan',
+  'hookPrompt'
+]);
+
+const KNOWN_COMPLETION_ITEMS = new Set([
+  ...HARMLESS_COMPLETION_ITEMS,
+  'functionCallOutput',
+  'commandExecution',
+  'fileChange',
+  'mcpToolCall',
+  'dynamicToolCall',
+  'collabAgentToolCall',
+  'subAgentActivity',
+  'webSearch',
+  'imageView',
+  'sleep',
+  'imageGeneration',
+  'enteredReviewMode',
+  'exitedReviewMode',
+  'contextCompaction'
+]);
+
+/** Match a completed turn to the stable queued client id only with full items. */
+export function parseCompletedTurn(response: unknown, clientUserMessageId: string): CompletedTurnObservation | null {
+  if (!isRecord(response) || !isRecord(response['thread'])) return null;
+  const turns = (response['thread'] as Record<string, unknown>)['turns'];
+  if (!Array.isArray(turns)) return null;
+  for (const candidate of turns) {
+    if (!isRecord(candidate) || candidate['status'] !== 'completed' || typeof candidate['id'] !== 'string') continue;
+    if (candidate['itemsView'] !== 'full' || !Array.isArray(candidate['items'])) continue;
+    // A malformed item list cannot prove that a turn used no tools. Refuse
+    // the observation instead of filtering malformed entries out of the
+    // evidence set.
+    if (!candidate['items'].every(isRecord)) continue;
+    const items = candidate['items'] as Record<string, unknown>[];
+    if (items.some((item) => typeof item['type'] !== 'string' || !KNOWN_COMPLETION_ITEMS.has(item['type'] as string))) continue;
+    const matched = items.some((item) => item['type'] === 'userMessage' && item['clientId'] === clientUserMessageId);
+    if (!matched) continue;
+    const text = items.filter((item) => item['type'] === 'agentMessage' && typeof item['text'] === 'string').map((item) => item['text'] as string).join('');
+    const toolCalls = items.filter((item) => !HARMLESS_COMPLETION_ITEMS.has(item['type'] as string)).length;
+    return { turnId: candidate['id'], result: text, toolCalls };
+  }
+  return null;
 }
 
 function isSnapshotObject(value: unknown): value is NativeRateLimitSnapshot {
@@ -417,6 +490,7 @@ export function parseRateLimitsResponse(
   if (!isSnapshotObject(response)) {
     return {
       accountId: null,
+      ordinaryUsageAllowed: null,
       planType: null,
       limitId: null,
       limitName: null,
@@ -431,10 +505,18 @@ export function parseRateLimitsResponse(
   // NativeClient returns this normalized shape so downstream fact assembly and
   // refresh can share one parser. Preserve it instead of treating it as a raw
   // wire response and reporting a missing `rateLimits` field.
-  if (isParsedRateLimitsResponse(response)) return response;
+  if (isParsedRateLimitsResponse(response)) {
+    return {
+      ...response,
+      ordinaryUsageAllowed: typeof response['ordinaryUsageAllowed'] === 'boolean' ? response['ordinaryUsageAllowed'] : null
+    };
+  }
   const responseRecord = response as NativeRateLimitsResponse;
   const accountId = typeof responseRecord.accountId === 'string' && responseRecord.accountId.trim() !== ''
     ? responseRecord.accountId
+    : null;
+  const ordinaryUsageAllowed = typeof responseRecord.ordinaryUsageAllowed === 'boolean'
+    ? responseRecord.ordinaryUsageAllowed
     : null;
   const byLimitId: Record<string, ParsedRateLimitSnapshot> = {};
   const rawByLimitId = responseRecord.rateLimitsByLimitId;
@@ -447,6 +529,7 @@ export function parseRateLimitsResponse(
   if (!isSnapshotObject(responseRecord.rateLimits)) {
     return {
       accountId,
+      ordinaryUsageAllowed,
       planType: null,
       limitId: null,
       limitName: null,
@@ -460,6 +543,7 @@ export function parseRateLimitsResponse(
   }
   return {
     accountId,
+    ordinaryUsageAllowed,
     ...parseRateLimitSnapshot(responseRecord.rateLimits, observedAtMs),
     byLimitId
   };
@@ -571,11 +655,14 @@ export function classifySubscriptionCapacity(
     fresh: boolean;
     /**
      * A separate, authoritative included-capacity observation. The pinned
-     * rate-limit schema does not provide one; `spendControlReached: false`
-     * only says that this backend control is not currently reached and must
-     * not be promoted into a spending promise.
+     * rate-limit schema also exposes `ordinaryUsageAllowed`; this legacy
+     * field remains separate because `spendControlReached: false` only says
+     * that the backend control is not currently reached and must not be
+     * promoted into a spending promise.
      */
     includedCapacity?: boolean | null;
+    /** 0.160.0 authoritative backend permission for ordinary included usage. */
+    ordinaryUsageAllowed?: boolean | null;
     authenticated?: boolean;
     /** Recorded for diagnostics only; it never moves the classification. */
     creditsAvailable?: boolean | null;
@@ -596,6 +683,10 @@ export function classifySubscriptionCapacity(
     return 'unknown';
   }
   if (parsed.spendControlReached === true) return 'paid';
+  if (parsed.ordinaryUsageAllowed !== undefined) {
+    if (parsed.ordinaryUsageAllowed === true) return 'included';
+    return 'unknown';
+  }
   if (parsed.includedCapacity === true) return 'included';
   return 'unknown';
 }
@@ -844,6 +935,14 @@ export class NativeClient {
       throw new Error(`thread/queue/list is ${capability}`);
     }
     return this.transport.request(QUEUE_LIST_METHOD, { threadId });
+  }
+
+  /** Read full persisted turns for exact completion correlation. */
+  public async readThread(threadId: string): Promise<unknown> {
+    if (!this.owner.threadIds.includes(threadId)) throw new Error('the selected owner does not hold this thread');
+    const capability = this.capabilities.threadRead ?? 'unavailable';
+    if (capability !== 'supported') throw new Error(`thread/read is ${capability}`);
+    return this.transport.request(THREAD_READ_METHOD, { threadId, includeTurns: true });
   }
 
   /**

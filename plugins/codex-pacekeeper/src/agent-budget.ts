@@ -24,7 +24,10 @@ export const RESUME_MARKER = '[pacekeeper-resume]';
 
 /** The absolute package path embedded in model-facing contracts. */
 export function checkpointCliPath(): string {
-  const root = process.env['CODEX_PLUGIN_ROOT'] ?? process.env['CODEX_PACEKEEPER_ROOT'];
+  const root = process.env['PLUGIN_ROOT']
+    ?? process.env['CODEX_PLUGIN_ROOT']
+    ?? process.env['CLAUDE_PLUGIN_ROOT']
+    ?? process.env['CODEX_PACEKEEPER_ROOT'];
   return root ? path.resolve(root, 'bin', 'pacekeeper-checkpoint') : path.resolve(import.meta.dir, '..', 'bin', 'pacekeeper-checkpoint');
 }
 

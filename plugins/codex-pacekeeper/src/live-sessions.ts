@@ -11,12 +11,21 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  ACCOUNT_READ_METHOD,
+  NATIVE_PROTOCOL_VERSION,
+  QUEUE_ADD_METHOD,
+  QUEUE_DELETE_METHOD,
+  QUEUE_LIST_METHOD,
+  RATE_LIMITS_READ_METHOD,
+  THREAD_READ_METHOD,
   findExistingOwner,
+  normalizeNativeCapabilities,
   parseOwnerRecord,
   type ExistingOwnerRecord,
   type OwnerLookup,
   type OwnerProbeRecord
 } from './native';
+import { clientForExistingOwner } from './native-transport';
 
 export interface OwnerRegistry {
   owners: OwnerProbeRecord[];
@@ -33,11 +42,93 @@ export function ownerRegistryFile(): string {
     ?? path.join(codexHome(), 'pacekeeper', 'owners.json');
 }
 
+const NATIVE_CONTROL_METHODS = [
+  ACCOUNT_READ_METHOD,
+  RATE_LIMITS_READ_METHOD,
+  QUEUE_ADD_METHOD,
+  QUEUE_DELETE_METHOD,
+  QUEUE_LIST_METHOD,
+  THREAD_READ_METHOD,
+  'thread/loaded/list'
+] as const;
+
+/** Resolve the documented app-server control socket without starting a server. */
+export function nativeControlSocketPath(): string | null {
+  const configured = process.env['CODEX_PACEKEEPER_NATIVE_SOCKET'];
+  const candidate = configured && configured.trim() !== ''
+    ? configured
+    : path.join(codexHome(), 'app-server-control', 'app-server-control.sock');
+  if (!path.isAbsolute(candidate) || candidate.includes('\u0000')) return null;
+  let real: string;
+  try { real = fs.realpathSync(candidate); } catch { return null; }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const reserved = uid === null ? null : path.join('/tmp', `codex-daemon-${uid}`);
+  const home = path.resolve(codexHome());
+  if (!real.startsWith(home + path.sep) && (reserved === null || !real.startsWith(reserved + path.sep))) return null;
+  try { if (!fs.statSync(real).isSocket()) return null; } catch { return null; }
+  return real;
+}
+
+function nativeControlOwner(threadId: string, accountId: string | null, socketPath: string): ExistingOwnerRecord {
+  return {
+    ownerId: 'codex-app-server-control',
+    // The control socket is the authoritative endpoint; this pid is only a
+    // shape-compatible placeholder and is never used as an owner liveness
+    // proof for this path.
+    pid: process.pid,
+    accountId,
+    threadIds: [threadId],
+    socketPath: `unix://${socketPath}`,
+    methods: [...NATIVE_CONTROL_METHODS],
+    protocolVersion: NATIVE_PROTOCOL_VERSION
+  };
+}
+
+function loadedThreadIds(response: unknown): string[] {
+  if (typeof response !== 'object' || response === null) return [];
+  const data = (response as Record<string, unknown>)['data'];
+  return Array.isArray(data) ? data.filter((value): value is string => typeof value === 'string') : [];
+}
+
+/**
+ * Use the actual Codex control socket as a native owner when no explicit
+ * registry publisher is present. The loaded-thread check prevents this path
+ * from taking a thread through a second server or an unrelated endpoint.
+ */
+export async function discoverNativeControlClient(threadId: string, accountId: string | null): Promise<ReturnType<typeof clientForExistingOwner>> {
+  if (threadId.trim() === '') return null;
+  const socketPath = nativeControlSocketPath();
+  if (socketPath === null) return null;
+  const owner = nativeControlOwner(threadId, accountId, socketPath);
+  const capabilities = normalizeNativeCapabilities({ version: owner.protocolVersion, methods: owner.methods });
+  const client = clientForExistingOwner(owner, capabilities, 750);
+  if (client === null) return null;
+  try {
+    const loaded = await client.request('thread/loaded/list', {});
+    if (!loadedThreadIds(loaded).includes(threadId)) return null;
+    if (accountId !== null) {
+      const limits = await client.readRateLimits();
+      // A null account id is an unavailable observation, not proof that this
+      // endpoint belongs to the requested account.
+      if (limits.accountId !== accountId) return null;
+    }
+    return client;
+  } catch { return null; }
+}
+
 function parseRecords(value: unknown): OwnerProbeRecord[] | null {
-  if (Array.isArray(value)) return value.filter((item): item is OwnerProbeRecord => typeof item === 'object' && item !== null);
+  if (Array.isArray(value)) {
+    return value.every((item) => typeof item === 'object' && item !== null && !Array.isArray(item))
+      ? value as OwnerProbeRecord[]
+      : null;
+  }
   if (typeof value === 'object' && value !== null) {
     const owners = (value as Record<string, unknown>)['owners'];
-    if (Array.isArray(owners)) return owners.filter((item): item is OwnerProbeRecord => typeof item === 'object' && item !== null);
+    if (Array.isArray(owners)) {
+      return owners.every((item) => typeof item === 'object' && item !== null && !Array.isArray(item))
+        ? owners as OwnerProbeRecord[]
+        : null;
+    }
   }
   return null;
 }
@@ -45,7 +136,13 @@ function parseRecords(value: unknown): OwnerProbeRecord[] | null {
 export function readOwnerRegistry(file: string = ownerRegistryFile()): OwnerRegistry {
   try {
     const parsed = parseRecords(JSON.parse(fs.readFileSync(file, 'utf8')));
-    return { owners: parsed ?? [], readable: parsed !== null, file };
+    // A syntactically readable registry with one malformed owner is still an
+    // unknown occupancy state. Dropping that row would let cleanup treat a
+    // live or corrupted entry as vacant.
+    if (parsed === null || parsed.some((record) => parseOwnerRecord(record) === null)) {
+      return { owners: [], readable: false, file };
+    }
+    return { owners: parsed, readable: true, file };
   } catch {
     return { owners: [], readable: false, file };
   }
@@ -114,6 +211,41 @@ export function listLiveOwners(file: string = ownerRegistryFile()): ExistingOwne
     .map(parseOwnerRecord)
     .filter((owner): owner is ExistingOwnerRecord => owner !== null)
     .filter((owner) => pidIsAlive(owner.pid));
+}
+
+export interface LiveClaudeSession {
+  pid: number;
+  cwd?: string;
+}
+
+function claudeConfigDir(): string {
+  return process.env['CLAUDE_CONFIG_DIR'] ?? path.join(os.homedir(), '.claude');
+}
+
+/** Read the installed Claude session registry defensively for worktree safety. */
+export function listLiveClaudeSessions(dir: string = path.join(claudeConfigDir(), 'sessions')): LiveClaudeSession[] | null {
+  let names: string[];
+  try { names = fs.readdirSync(dir); } catch { return null; }
+  const sessions: LiveClaudeSession[] = [];
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    let raw: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')) as unknown;
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+      raw = parsed as Record<string, unknown>;
+    } catch { return null; }
+    const pid = finiteSessionPid(raw['pid']);
+    if (pid === null) return null;
+    if (!pidIsAlive(pid)) continue;
+    const cwd = typeof raw['cwd'] === 'string' && raw['cwd'].trim() !== '' ? raw['cwd'] : undefined;
+    sessions.push({ pid, ...(cwd ? { cwd } : {}) });
+  }
+  return sessions;
+}
+
+function finiteSessionPid(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
 }
 
 /** Resolve a binary without invoking a shell; useful for read-only doctor. */

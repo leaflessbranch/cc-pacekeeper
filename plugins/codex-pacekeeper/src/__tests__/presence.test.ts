@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { fusePresence, probeSsh, type ProbeResult } from '../presence';
+import { fusePresence, latestParentUserActivity, probeSsh, type ProbeResult } from '../presence';
 
 const unavailable: ProbeResult = { status: 'unavailable' };
 const attachedActive: ProbeResult = { status: 'attached', idleSeconds: 10 };
@@ -9,6 +9,18 @@ const detached: ProbeResult = { status: 'detached' };
 const IDLE_SECONDS = 600;
 
 describe('probe fusion', () => {
+  test('parent activity ignores agent and ended timelines', () => {
+    const now = 1_700_000_000_000;
+    const store = {
+      list: () => [
+        { threadId: 'parent', lastUserActivityAtMs: now - 1_000 },
+        { threadId: 'child', agentId: 'agent-1', lastUserActivityAtMs: now - 100 },
+        { threadId: 'ended', sessionEndedAtMs: now - 50, lastUserActivityAtMs: now - 10 }
+      ]
+    };
+    expect(latestParentUserActivity(store, now)).toBe(now - 1_000);
+  });
+
   test('an attached probe with recent activity reports online', () => {
     expect(
       fusePresence({ tmux: attachedActive, tty: unavailable, ssh: unavailable, loginctl: unavailable }, IDLE_SECONDS)

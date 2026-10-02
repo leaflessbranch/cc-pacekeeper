@@ -101,6 +101,32 @@ active until `ack --token ...` confirms receipt. Native no-tools,
 execution-race suppression and model-generated PreCompact save barriers remain
 blocked by the examined interface.
 
+After a verified checkpoint save, a caller with the authoritative account,
+thread, reset timestamp, and reset generation may register its one-shot wake
+with `bin/pacekeeper-service schedule-reset --cwd <project-root>
+--account-id <id> --thread-id <id> --checkpoint-id <id> --reset-at-ms <ms>
+--reset-generation <n>`. The service rechecks that exact checkpoint and native
+reset identity before delivery.
+
+To install the Codex package from this repository, install its locked runtime
+dependencies first, then register the Codex-only marketplace and add the
+opt-in plugin:
+
+```sh
+(cd plugins/codex-pacekeeper && bun install --frozen-lockfile)
+codex plugin marketplace add <repository-root>
+codex plugin add codex-pacekeeper@pacekeeper-codex
+```
+
+The Codex catalog is `.agents/plugins/marketplace.json`; the Claude catalog is
+unchanged. Disable the installed entry by setting
+`plugins."codex-pacekeeper@pacekeeper-codex".enabled = false` in the Codex
+configuration, or remove it entirely with:
+
+```sh
+codex plugin remove codex-pacekeeper@pacekeeper-codex
+```
+
 ## Usage
 
 Once installed, every prompt gets a one-line status prefix injected into Claude's context:

@@ -56,6 +56,8 @@ export interface FactInputs {
   rateLimits: NativeRateLimitsResponse | null;
   /** When the rate-limit reading was taken. */
   observedAtMs: number;
+  /** Freshness of the independent 0.160 ordinary-usage permission. */
+  ordinaryUsageObservedAtMs?: number;
   tokenUsage: unknown;
   /** `false` disables subscription automation; `null` is unobserved. */
   authenticated: boolean | null;
@@ -138,6 +140,10 @@ export function buildFacts(
   const ageMs = nowMs - inputs.observedAtMs;
   const invalidObservationTime = !Number.isFinite(inputs.observedAtMs) || inputs.observedAtMs > nowMs;
   const stale = invalidObservationTime || ageMs > config.usage_freshness_seconds * 1000;
+  const ordinaryPermissionAgeMs = inputs.ordinaryUsageObservedAtMs === undefined ? Number.NaN : nowMs - inputs.ordinaryUsageObservedAtMs;
+  const ordinaryPermissionFresh = Number.isFinite(ordinaryPermissionAgeMs)
+    && ordinaryPermissionAgeMs >= 0
+    && ordinaryPermissionAgeMs <= config.usage_freshness_seconds * 1000;
   if (invalidObservationTime) blockers.push('the native quota observation time is invalid');
   else if (stale) blockers.push('the native quota reading is stale');
   if (parsed.accountId === null) blockers.push('the native account identity is unknown');
@@ -146,8 +152,13 @@ export function buildFacts(
     planType: parsed.planType,
     spendControlReached: parsed.spendControlReached,
     rateLimitReachedType: parsed.rateLimitReachedType,
-    fresh: !stale,
+    // The backend permission is an independent included-capacity fact. A
+    // response may carry it while quota buckets are empty; that can classify
+    // capacity, but the stale/empty bucket blockers below still prevent a
+    // dispatch until the five-hour meter is readable.
+    fresh: !stale || ordinaryPermissionFresh,
     ...(inputs.authenticated === null ? {} : { authenticated: inputs.authenticated }),
+    ordinaryUsageAllowed: parsed.ordinaryUsageAllowed,
     creditsAvailable: parsed.credits.hasCredits
   });
   if (capacity !== 'included') {
@@ -212,7 +223,7 @@ export async function readNativeFacts(
     const rateLimits = account?.planType !== null && account?.planType !== undefined && rateLimitsResult.value.planType === null
       ? { ...rateLimitsResult.value, planType: account.planType }
       : rateLimitsResult.value;
-    return buildFacts({ rateLimits, observedAtMs: nowMs, tokenUsage: options.tokenUsage ?? null, authenticated }, config, nowMs);
+    return buildFacts({ rateLimits, observedAtMs: nowMs, ordinaryUsageObservedAtMs: nowMs, tokenUsage: options.tokenUsage ?? null, authenticated }, config, nowMs);
   } catch {
     return buildFacts({
       rateLimits: null,
