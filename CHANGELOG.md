@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0]
+
+The Claude plugin is unchanged in this release.
+
 ### Added
 
 - **Codex package (opt-in, experimental), `plugins/codex-pacekeeper/`.** Pacing for Codex CLI
