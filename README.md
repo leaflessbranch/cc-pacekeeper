@@ -2,7 +2,7 @@
 
 A Claude Code plugin that hands monitoring of context window, 5-hour session block, and weekly usage limits over to Claude itself — so it can pace, warn, and checkpoint work before hitting a wall.
 
-**Status:** v0.9.0 — the context meter now agrees with Claude Code about when compaction happens: ctx% is measured against the real auto-compact point (~967K on 1M-window models, the full window otherwise) instead of ccstatusline's 0.8 × window, which read ~95% at a real ~760K and drove checkpoint-and-restart cycles that discarded ~200K of usable context. After an in-session compaction, the checkpoint saved this session is re-injected in full, so Claude resumes from what it wrote rather than the summary alone; the `PreCompact` hook is gone, since it cannot inject context. A checkpoint lane's `## Goal` is now carried forward verbatim, so a long task can't drift one paraphrase at a time. Builds on 0.8.2, where `Stop`-hook directives stopped running the turn into Claude Code's continuation cap, and 0.8.x's proactive AFK detection and away notifications (Linux-only presence probes; macOS falls back to the previous behavior). See the [changelog](CHANGELOG.md).
+**Status:** v0.10.0 — adds an **experimental**, opt-in port for the Codex CLI (see [Codex package](#codex-package-experimental)); the Claude plugin itself is unchanged since 0.9.x. 0.9.0 made the context meter agree with Claude Code about when compaction happens, re-injects this session's checkpoint after an in-session compaction, and locks a checkpoint lane's `## Goal` so long tasks can't drift; 0.9.1–0.9.2 prepared the plugin listing. See the [changelog](CHANGELOG.md).
 
 ![cc-pacekeeper in action](docs/demo.gif)
 
@@ -17,6 +17,10 @@ Three meters tracked:
 - **Weekly limits** — all-models, Sonnet-only, Opus-only
 
 Plus **extra-usage credits** state, so when limits approach Claude can ask whether to keep going on pay-as-you-go or checkpoint and resume after reset.
+
+### New in v0.10
+
+- **Codex package (experimental, opt-in)** — the same pacing for Codex CLI sessions on a ChatGPT subscription: the status line, warn/critical directives, checkpoint lanes with auto-save, subagent budgets and handoffs, and cache keepalive, installed from this repository's Codex marketplace entry. Live-tested on Codex 0.164 (Linux); the post-reset wake, macOS and account switching are not yet proven. Details in [Codex package](#codex-package-experimental).
 
 ### New in v0.9
 
