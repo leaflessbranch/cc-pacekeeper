@@ -1,0 +1,19 @@
+{
+  "name": "codex-pacekeeper",
+  "version": "0.1.0",
+  "description": "Usage-limit pacing for Codex subscription sessions: status line, threshold directives, checkpoint lanes with auto-save and post-reset wake, subagent budgets, and cache keepalive.",
+  "license": "MIT",
+  "optIn": true,
+  "runtime": "bun",
+  "hooks": "./hooks/hooks.json",
+  "entrypoints": {
+    "tick": "bin/pacekeeper-tick",
+    "refresh": "bin/pacekeeper-refresh",
+    "checkpoint": "bin/pacekeeper-checkpoint",
+    "worktrees": "bin/pacekeeper-worktrees",
+    "service": "bin/pacekeeper-service",
+    "doctor": "bin/pacekeeper-doctor",
+    "presence": "bin/pacekeeper-presence"
+  },
+  "skills": "./skills/"
+}

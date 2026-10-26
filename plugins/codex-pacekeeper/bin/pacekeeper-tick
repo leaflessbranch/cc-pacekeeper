@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Opt-in Codex hook entrypoint. Hooks fail closed and never interrupt a turn.
+set -euo pipefail
+if ! command -v bun >/dev/null 2>&1; then
+  echo '{}'
+  exit 0
+fi
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+exec bun run --silent "$DIR/../src/tick.ts"

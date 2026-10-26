@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Codex hook entrypoint: native account/quota refresh.
+# Spawns the refresh detached so the hook returns in milliseconds; the refresh
+# self-gates on the account record's age, so spawning on every event is cheap.
+set -euo pipefail
+if ! command -v bun >/dev/null 2>&1; then
+  echo '{}'
+  exit 0
+fi
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# The detached child needs the payload (thread id, event) after this shell
+# exits, so park stdin in a temp file it deletes when done.
+STDIN_TMP="$(mktemp -t pacekeeper-codex-refresh.XXXXXX)"
+cat > "$STDIN_TMP"
+# setsid(1) does not exist on macOS; nohup + background + disown detaches portably.
+nohup bash -c "bun run --silent '$DIR/../src/refresh.ts' < '$STDIN_TMP'; rm -f '$STDIN_TMP'" < /dev/null > /dev/null 2>&1 &
+disown 2>/dev/null || true
+echo '{}'

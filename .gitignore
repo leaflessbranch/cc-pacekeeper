@@ -7,3 +7,6 @@ bun.lockb
 notes/
 .claude.local.md
 plugins/cc-pacekeeper/src/__tests__/.*-fixtures/
+plugins/codex-pacekeeper/src/__tests__/.*-fixtures/
+docs/superpowers/
+.superpowers/
