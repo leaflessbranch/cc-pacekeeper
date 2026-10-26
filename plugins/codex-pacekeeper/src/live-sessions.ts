@@ -60,8 +60,10 @@ export function nativeControlSocketPath(): string | null {
     ? configured
     : path.join(codexHome(), 'app-server-control', 'app-server-control.sock');
   if (!path.isAbsolute(candidate) || candidate.includes('\u0000')) return null;
+  // Resolve the directory, not the socket: on macOS Bun's realpath opens the
+  // file, and open() on a Unix socket fails, so a live socket read as absent.
   let real: string;
-  try { real = fs.realpathSync(candidate); } catch { return null; }
+  try { real = path.join(fs.realpathSync(path.dirname(candidate)), path.basename(candidate)); } catch { return null; }
   // Compare canonical paths on both sides: the socket is realpath'd, so an
   // aliased root (macOS /var -> /private/var and /tmp -> /private/tmp, or a
   // symlinked ~/.codex) must be resolved too or a genuine socket is refused.
@@ -69,7 +71,7 @@ export function nativeControlSocketPath(): string | null {
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
   const roots = [canonical(codexHome()), ...(uid === null ? [] : [canonical(path.join('/tmp', `codex-daemon-${uid}`))])];
   if (!roots.some((root) => real.startsWith(root + path.sep))) return null;
-  try { if (!fs.statSync(real).isSocket()) return null; } catch { return null; }
+  try { if (!fs.lstatSync(real).isSocket()) return null; } catch { return null; }
   return real;
 }
 
