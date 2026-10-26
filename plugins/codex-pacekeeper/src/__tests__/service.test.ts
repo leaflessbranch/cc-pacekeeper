@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { CODEX_DEFAULTS } from '../config';
 import { ACCOUNT_READ_METHOD, NativeClient, normalizeNativeCapabilities, QUEUE_ADD_METHOD, RATE_LIMITS_READ_METHOD } from '../native';
 import { advance, createJob } from '../jobs';
-import { CodexService, parseServiceArgs } from '../service';
+import { CodexService, lastKeepalivePing, parseServiceArgs } from '../service';
 import { ACCOUNT_IDENTITY, CodexStore } from '../storage';
 import { CodexCheckpoints } from '../checkpoint';
 import { writeHandoff } from '../agent-budget';
@@ -172,6 +172,21 @@ describe('Codex durable service', () => {
     expect(calls[0]).toContain('[pacekeeper-keepalive] ping');
     const completed = service.recordCompletion(scheduled.id, 'pong', true, 0, scheduled.submissionId);
     expect(completed?.pongVerified).toBe(true);
+  });
+
+  test("the successor keeps the completed ping's outcome, which doctor reads from the store", async () => {
+    // A keepalive id is stable per thread, so the successor overwrites the
+    // completed record; the outcome must survive on it.
+    const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-service-lastping-')));
+    const service = new CodexService({ config: CODEX_DEFAULTS, store, now: () => NOW, resolveClient: async () => fakeClient([]), eligibility: () => ({ nowMs: NOW, enabled: true, capacity: 'included', pendingWork: true, ownerLive: true, fresh: true, idleForMs: 0, strict: true }) });
+    const first = service.scheduleKeepalive(owner, NOW);
+    await service.runDueJobs();
+    service.recordCompletion(first.id, 'Pong!', true, 1, first.submissionId);
+    const successor = service.jobs()[0];
+    expect(successor?.state).toBe('scheduled');
+    expect(successor?.lastPing).toEqual({ result: 'Pong!', toolCalls: 1, pongVerified: false, completedAtMs: NOW });
+    expect(lastKeepalivePing(store.list('job'), owner.threadId)).toEqual({ result: 'Pong!', toolCalls: 1, pongVerified: false, completedAtMs: NOW });
+    expect(lastKeepalivePing(store.list('job'), 'another-thread')).toBeNull();
   });
 
   test('a stale completion envelope cannot complete the successor attempt', async () => {

@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { loadCodexConfig, type CodexConfig } from './config';
 import { cancelQueuedJob, deliverJob, reconcileJob, type JobPersistence } from './delivery';
-import { createJob, cancelIf, KEEPALIVE_PING, advance, type EligibilityInput, type Job, type JobOwner } from './jobs';
+import { createJob, cancelIf, KEEPALIVE_PING, advance, type EligibilityInput, type Job, type JobOwner, type LastPing } from './jobs';
 import { discoverNativeControlClient, findLiveOwner, nativeControlSocketPath, pidIsAlive } from './live-sessions';
 import { NativeClient, normalizeNativeCapabilities, parseCompletedTurn } from './native';
 import { clientForExistingOwner } from './native-transport';
@@ -466,7 +466,13 @@ export class CodexService {
       dueAtMs: this.keepaliveDueAt(job.owner.threadId, this.now() + this.config.keepalive.interval_min * 60_000),
       submissionId: stableId()
     });
-    this.schedule({ ...next, ...(job.pongVerified ? {} : { failureReason: `previous ping replied ${JSON.stringify(job.result ?? '')} with ${job.toolCalls ?? '?'} tool call(s)` }) });
+    const lastPing = {
+      result: job.result ?? '',
+      ...(job.toolCalls !== undefined ? { toolCalls: job.toolCalls } : {}),
+      pongVerified: job.pongVerified,
+      completedAtMs: this.now()
+    };
+    this.schedule({ ...next, lastPing, ...(job.pongVerified ? {} : { failureReason: `previous ping replied ${JSON.stringify(job.result ?? '')} with ${job.toolCalls ?? '?'} tool call(s)` }) });
   }
 
   /** Execute due scheduled jobs and acknowledge queued cancellations. */
@@ -737,6 +743,16 @@ const DAY_MS = 86_400_000;
 
 /** Bound the state directories: hooks never list them, but nothing else
  * deletes a finished thread's records. */
+/** The newest keepalive outcome recorded for a thread, for doctor. */
+export function lastKeepalivePing(rows: unknown[], threadId: string): LastPing | null {
+  for (const row of rows) {
+    if (!isJob(row) || row.kind !== 'keepalive' || row.owner.threadId !== threadId) continue;
+    const ping = row.lastPing;
+    if (ping !== undefined && typeof ping.result === 'string' && typeof ping.pongVerified === 'boolean' && Number.isFinite(ping.completedAtMs)) return ping;
+  }
+  return null;
+}
+
 export function pruneState(store: CodexStore, nowMs: number): void {
   const live = (value: unknown): boolean => {
     const state = typeof value === 'object' && value !== null ? (value as Record<string, unknown>)['state'] : undefined;

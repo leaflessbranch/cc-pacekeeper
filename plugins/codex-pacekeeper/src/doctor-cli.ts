@@ -11,6 +11,7 @@ import { discoverNativeControlClient, findCodexExecutable, nativeControlSocketPa
 import { NATIVE_PROTOCOL_VERSION, normalizeNativeCapabilities } from './native';
 import { refreshFromOwner } from './refresh';
 import { findRolloutForThread, readRollout } from './rollout';
+import { lastKeepalivePing } from './service';
 import { CodexStore } from './storage';
 import { assembleFacts, readAccountRecord } from './tick';
 
@@ -63,11 +64,7 @@ export async function runDoctorCli(): Promise<DoctorReport> {
   const timeline = threadId === undefined ? null : store.read({ accountId: null, threadId }, 'timeline') as Record<string, unknown> | null;
   const heartbeat = store.read({ accountId: null, threadId: 'service' }, 'service') as Record<string, unknown> | null;
   const beatAt = typeof heartbeat?.['heartbeatAtMs'] === 'number' ? heartbeat['heartbeatAtMs'] : null;
-  const pings = store.list('job')
-    .filter((value): value is Record<string, unknown> => typeof value === 'object' && value !== null)
-    .filter((row) => row['kind'] === 'keepalive' && (row['owner'] as Record<string, unknown> | undefined)?.['threadId'] === threadId && row['state'] === 'completed');
-  const lastPing = pings[0];
-  const lastPingAt = lastPing === undefined ? null : fs.statSync(store.pathFor({ accountId: ((lastPing['owner'] as Record<string, unknown>)['accountId'] as string | null) ?? null, threadId: threadId as string, agentId: `job-${lastPing['id'] as string}` }, 'job')).mtimeMs;
+  const lastPing = threadId === undefined ? null : lastKeepalivePing(store.list('job'), threadId);
   const cache = facts.context?.cache;
   return diagnose({
     protocolVersion: NATIVE_PROTOCOL_VERSION,
@@ -83,11 +80,11 @@ export async function runDoctorCli(): Promise<DoctorReport> {
     rollout: rollout === null ? null : { found: rollout.meta !== null, tokenCount: rollout.tokenUsage !== null, rateLimits: rollout.rateLimits !== null },
     serviceHeartbeatAgeSeconds: beatAt === null ? null : Math.max(0, (nowMs - beatAt) / 1000),
     keepalive: { enabled: config.keepalive.enabled, pendingWork: typeof timeline?.['pendingWork'] === 'boolean' ? timeline['pendingWork'] : null },
-    lastPing: lastPing === undefined || lastPingAt === null ? null : {
-      pongVerified: lastPing['pongVerified'] === true,
-      result: typeof lastPing['result'] === 'string' ? lastPing['result'] : null,
-      toolCalls: typeof lastPing['toolCalls'] === 'number' ? lastPing['toolCalls'] : null,
-      ageSeconds: Math.max(0, (nowMs - lastPingAt) / 1000)
+    lastPing: lastPing === null ? null : {
+      pongVerified: lastPing.pongVerified,
+      result: lastPing.result,
+      toolCalls: lastPing.toolCalls ?? null,
+      ageSeconds: Math.max(0, (nowMs - lastPing.completedAtMs) / 1000)
     },
     executableObserved: executable !== null,
     executableVersion: version,

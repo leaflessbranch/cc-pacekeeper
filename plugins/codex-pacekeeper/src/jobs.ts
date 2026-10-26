@@ -67,6 +67,16 @@ export interface Job {
   /** What the completed turn replied, and how many tools it called. */
   result?: string;
   toolCalls?: number;
+  /** The previous ping's outcome. A keepalive id is stable per thread, so the
+   * successor overwrites the completed record and carries it for doctor. */
+  lastPing?: LastPing;
+}
+
+export interface LastPing {
+  result: string;
+  toolCalls?: number;
+  pongVerified: boolean;
+  completedAtMs: number;
 }
 
 export interface CreateJobInput {
