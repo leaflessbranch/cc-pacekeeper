@@ -23,7 +23,9 @@ interface Queued { id: string; clientUserMessageId: string; text: string }
 const server = {
   queued: [] as Queued[],
   completed: [] as Array<{ clientUserMessageId: string; reply: string; tools: number }>,
-  calls: [] as string[]
+  calls: [] as string[],
+  /** account/rateLimits/read reaches OpenAI's backend; live it takes ~0.8-1.1s. */
+  rateLimitsDelayMs: 0
 };
 
 let home: string;
@@ -84,7 +86,9 @@ beforeAll(() => {
       message(ws, raw) {
         const message = JSON.parse(String(raw)) as { id?: number; method: string; params?: Record<string, unknown> };
         if (message.id === undefined) return;
-        ws.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: reply(message.method, message.params ?? {}) }));
+        const send = () => ws.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: reply(message.method, message.params ?? {}) }));
+        if (message.method === 'account/rateLimits/read' && server.rateLimitsDelayMs > 0) setTimeout(send, server.rateLimitsDelayMs);
+        else send();
       }
     }
   });
@@ -126,6 +130,17 @@ describe('keepalive end to end through the control socket (review #4)', () => {
     expect(successor?.state).toBe('scheduled');
     expect(successor?.dueAtMs).toBe(now + 60_000 + CODEX_DEFAULTS.keepalive.interval_min * 60_000);
   });
+
+  test('a rate-limits read as slow as the live backend still delivers the ping', async () => {
+    const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-e2e-store-slow-')));
+    const now = Date.now();
+    store.write({ accountId: null, threadId: THREAD }, 'timeline', { threadId: THREAD, accountId: ACCOUNT, pendingWork: true, sessionStartedAtMs: now - 3_600_000, lastEventAtMs: now - 31 * 60_000 });
+    server.rateLimitsDelayMs = 1_100;
+    try {
+      const sent = (await serviceFor(store, now).runDueJobs()).find((job) => job.kind === 'keepalive');
+      expect(sent?.state).toBe('queued');
+    } finally { server.rateLimitsDelayMs = 0; }
+  }, 15_000);
 
   test('a non-exact reply or a tool call keeps the chain alive and is recorded for doctor', async () => {
     const store = new CodexStore(mkdtempSync(join(tmpdir(), 'codex-e2e-store-loose-')));

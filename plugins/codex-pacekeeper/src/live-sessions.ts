@@ -108,7 +108,9 @@ export async function discoverNativeControlClient(threadId: string, accountId: s
   if (socketPath === null) return null;
   const owner = nativeControlOwner(threadId, accountId, socketPath);
   const capabilities = normalizeNativeCapabilities({ version: owner.protocolVersion, methods: owner.methods });
-  const client = clientForExistingOwner(owner, capabilities, 750);
+  // account/rateLimits/read calls OpenAI's backend and takes ~0.8-1.1s live;
+  // every caller is detached or a CLI, so a slow read must not read as absent.
+  const client = clientForExistingOwner(owner, capabilities, 5000);
   if (client === null) return null;
   try {
     const loaded = await client.listLoadedThreads();
