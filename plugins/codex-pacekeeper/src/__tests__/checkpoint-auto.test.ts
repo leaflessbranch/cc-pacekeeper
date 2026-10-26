@@ -54,6 +54,21 @@ describe('save registers the post-reset wake (Codex has no in-session cron)', ()
     } finally { rmSync(state.root, { recursive: true, force: true }); }
   });
 
+  test('a read-only state directory (Codex sandbox) defers the wake; other failures withhold it', async () => {
+    const state = fixture();
+    try {
+      const fail = (code: string) => { state.service.scheduleResetWake = () => { throw Object.assign(new Error(`${code}: read-only file system`), { code }); }; };
+      fail('EROFS');
+      const sandboxed = await saveCheckpointWithResetWake({ checkpoints: state.checkpoints, service: state.service, owner, body: 'x', lane: 'a', worktree: state.root, nowMs, resetEvidence: evidence(nowMs + 3_600_000) });
+      expect(sandboxed.deferred).toBe(true);
+      expect(state.checkpoints.peek(sandboxed.checkpoint.id)?.resetGeneration).toBe(nowMs + 3_600_000);
+      state.service.scheduleResetWake = () => { throw new Error('reset wake time is more than one five-hour block away'); };
+      const refused = await saveCheckpointWithResetWake({ checkpoints: state.checkpoints, service: state.service, owner, body: 'x', lane: 'b', worktree: state.root, nowMs, resetEvidence: evidence(nowMs + 3_600_000) });
+      expect(refused.deferred).toBeUndefined();
+      expect(refused.withheldReason).toContain('more than one');
+    } finally { rmSync(state.root, { recursive: true, force: true }); }
+  });
+
   test('a replacement save in the same block retargets the one scheduled wake', async () => {
     const state = fixture();
     try {

@@ -173,7 +173,7 @@ export function formatAutoLoopDirective(facts: CodexFacts, config: CodexConfig, 
     'This overrides any keepalive single-word instruction — perform these steps now, then reply briefly.',
     `🔁 5-hour block auto-renewal (≥ ${config.auto.five_hour_pct}%${ctxAlsoCritical ? '; context also critical — one save covers both' : ''}):`,
     `  1. Save to the current lane NOW via \`${checkpointCliPath()} save --thread-id ${threadId}\` — do not ask the user first.`,
-    `  2. The save registers a one-shot wake${wakeAt ? ` for ${wakeAt} (reset + ${config.auto.wake_delay_min}m)` : ' just after the reset'}; it arrives as a prompt starting with ${RESUME_MARKER}. Check the CLI printed "Registered reset wake"; if it printed "Reset wake withheld", tell the user the work will need a manual resume.`,
+    `  2. The save registers a one-shot wake${wakeAt ? ` for ${wakeAt} (reset + ${config.auto.wake_delay_min}m)` : ' just after the reset'}; it arrives as a prompt starting with ${RESUME_MARKER}. Check the CLI printed "Registered reset wake" or "Reset wake deferred"; if it printed "Reset wake withheld", tell the user the work will need a manual resume.`,
     '  3. Continue only on small steps until renewal; defer heavy work or new subagent dispatches until the wake prompt arrives.'
   ].join('\n');
 }

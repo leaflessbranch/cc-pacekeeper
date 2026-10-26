@@ -34,6 +34,7 @@ import type { NativeRateLimitsResponse } from './native';
 import { decide, type PolicyEvent, type PolicyState } from './policy';
 import { resolveProjectRoot } from './resolve-root';
 import { readRollout, type RolloutReading } from './rollout';
+import { CodexService } from './service';
 import { ACCOUNT_IDENTITY, CodexStore, type StateIdentity } from './storage';
 
 export interface TickInput {
@@ -229,6 +230,23 @@ function projectRootFor(cwd: string | undefined, session: SessionEntry | null, o
 function activeCheckpoints(root: string | null, config: CodexConfig): CheckpointEntry[] {
   if (root === null) return [];
   try { return new CodexCheckpoints(root, config).listNewestFirst(); } catch { return []; }
+}
+
+/**
+ * A save run by the model inside Codex's workspace-write sandbox cannot write
+ * the state directory, so its checkpoint records the reset but no wake job.
+ * The hook runs outside the sandbox and registers it; the service makes this
+ * idempotent per reset.
+ */
+function registerDeferredResetWake(active: CheckpointEntry[], root: string | null, threadId: string, config: CodexConfig, store: CodexStore, nowMs: number): void {
+  if (root === null || !config.auto.enabled) return;
+  const entry = active.find((candidate) => candidate.owner.threadId === threadId && candidate.owner.accountId !== null
+    && candidate.resetGeneration !== undefined && candidate.resetGeneration > nowMs);
+  if (entry === undefined || entry.owner.accountId === null || entry.resetGeneration === undefined) return;
+  try {
+    new CodexService({ config, store, projectRoot: root, now: () => nowMs })
+      .scheduleResetWake({ accountId: entry.owner.accountId, threadId }, entry.id, entry.resetGeneration, entry.resetGeneration);
+  } catch { /* withheld, exactly as it would have been at save */ }
 }
 
 function pendingHandoffs(root: string | null, config: CodexConfig, parentThreadId?: string): Handoff[] {
@@ -670,7 +688,9 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
     let pendingWork: boolean | undefined;
     let launch = false;
     if (isMainThread) {
-      pendingWork = activeCheckpoints(root, config).length > 0 || pendingHandoffs(root, config, threadId).length > 0;
+      const active = activeCheckpoints(root, config);
+      registerDeferredResetWake(active, root, threadId, config, store, nowMs);
+      pendingWork = active.length > 0 || pendingHandoffs(root, config, threadId).length > 0;
       session = updateSession(store, identity, { pendingWork });
       launch = config.keepalive.enabled && (pendingWork || !config.keepalive.require_pending);
     }

@@ -153,6 +153,28 @@ describe('checkpoint orientation', () => {
     new CodexCheckpoints(h.project, config).save({ lane: 'main', owner: { accountId: null, threadId: MAIN }, body: 'x' });
     expect(context(h.tick({ hook_event_name: 'UserPromptSubmit', prompt: '[pacekeeper-resume] abc' }).json)).toContain('Auto-wake fired. Run');
   });
+
+  test("Stop registers the reset wake a sandboxed save could not, once", () => {
+    // Inside Codex's workspace-write sandbox the CLI cannot write the state
+    // directory, so the save records its reset but no job. The hook runs
+    // outside the sandbox and registers it.
+    const h = harness('deferred-wake');
+    const saved = new CodexCheckpoints(h.project, config).save({ lane: 'main', owner: { accountId: 'acct-1', threadId: MAIN }, body: 'x', resetGeneration: RESET });
+    h.tick({ hook_event_name: 'Stop' });
+    h.tick({ hook_event_name: 'Stop' }, rollout(), NOW + 1_000);
+    const wakes = h.store.list('job').filter((job) => (job as Record<string, unknown>)['kind'] === 'reset-wake') as Array<Record<string, unknown>>;
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]?.['dueAtMs']).toBe(RESET + config.auto.wake_delay_min * 60_000);
+    expect((wakes[0]?.['owner'] as Record<string, unknown>)['threadId']).toBe(MAIN);
+    expect(saved.id).not.toBe('');
+  });
+
+  test("Stop leaves another thread's checkpoint wake alone", () => {
+    const h = harness('foreign-wake');
+    new CodexCheckpoints(h.project, config).save({ lane: 'main', owner: { accountId: 'acct-1', threadId: CHILD }, body: 'x', resetGeneration: RESET });
+    h.tick({ hook_event_name: 'Stop' });
+    expect(h.store.list('job')).toHaveLength(0);
+  });
 });
 
 describe('keepalive ping transparency', () => {

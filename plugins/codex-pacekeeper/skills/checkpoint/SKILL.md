@@ -32,7 +32,7 @@ Checkpoints are organized into named **lanes**. A lane defaults to the current g
 
 When the 5-hour block reaches the auto threshold (default 85%) or context reaches critical, a pacekeeper directive tells you to **save immediately without asking the user**. Do it: compose the body and run `save` right away, then keep to small steps.
 
-A 5-hour save also registers a one-shot **wake** for just after the block resets (Codex has no in-session cron, so the CLI does this itself). Check the output: `Registered reset wake for …` means pacekeeper will send a prompt starting with `[pacekeeper-resume]` after the reset; `Reset wake withheld: …` means it could not, and the user will have to prompt you to continue. On a `[pacekeeper-resume]` prompt, run `resume` (this consumes the checkpoint even in the same session), then re-dispatch any pending handoffs, archiving each once absorbed.
+A 5-hour save also registers a one-shot **wake** for just after the block resets (Codex has no in-session cron, so the CLI does this itself). Check the output: `Registered reset wake for …` (or `Reset wake deferred …`, when Codex's sandbox kept the CLI from writing its state and the turn-end hook registers it instead) means pacekeeper will send a prompt starting with `[pacekeeper-resume]` after the reset; `Reset wake withheld: …` means it could not, and the user will have to prompt you to continue. On a `[pacekeeper-resume]` prompt, run `resume` (this consumes the checkpoint even in the same session), then re-dispatch any pending handoffs, archiving each once absorbed.
 
 ## Save flow
 

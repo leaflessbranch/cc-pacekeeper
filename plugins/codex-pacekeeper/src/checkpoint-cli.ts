@@ -161,6 +161,9 @@ export interface SaveCheckpointWithResetWakeResult {
   checkpoint: SavedCheckpoint;
   wake: ScheduledWake | null;
   withheldReason?: string;
+  /** The reset is known but the state directory was not writable (Codex's
+   * sandbox); the Stop hook registers the wake from the saved checkpoint. */
+  deferred?: boolean;
 }
 
 /**
@@ -226,7 +229,9 @@ export async function saveCheckpointWithResetWake(input: SaveCheckpointWithReset
   try {
     return { checkpoint, wake: input.service.scheduleResetWake({ accountId: evidence.accountId, threadId: input.owner.threadId }, checkpoint.id, evidence.resetAtMs, evidence.resetAtMs) };
   } catch (error) {
-    return { checkpoint, wake: null, withheldReason: error instanceof Error ? error.message : 'reset wake registration failed' };
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    const deferred = code === 'EROFS' || code === 'EACCES' || code === 'EPERM';
+    return { checkpoint, wake: null, withheldReason: error instanceof Error ? error.message : 'reset wake registration failed', ...(deferred ? { deferred } : {}) };
   }
 }
 
@@ -326,6 +331,8 @@ async function main(): Promise<void> {
     if (result.wake !== null) {
       process.stdout.write(`Registered reset wake for ${new Date(result.wake.job.dueAtMs).toISOString()}\n`);
       ensureService(new CodexStore(), Date.now());
+    } else if (result.deferred === true) {
+      process.stdout.write(`Reset wake deferred to the end of this turn (${result.withheldReason ?? 'registration failed'})\n`);
     } else {
       process.stdout.write(`Reset wake withheld: ${result.withheldReason ?? 'unknown reason'}\n`);
     }
