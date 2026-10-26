@@ -62,10 +62,13 @@ export function nativeControlSocketPath(): string | null {
   if (!path.isAbsolute(candidate) || candidate.includes('\u0000')) return null;
   let real: string;
   try { real = fs.realpathSync(candidate); } catch { return null; }
+  // Compare canonical paths on both sides: the socket is realpath'd, so an
+  // aliased root (macOS /var -> /private/var and /tmp -> /private/tmp, or a
+  // symlinked ~/.codex) must be resolved too or a genuine socket is refused.
+  const canonical = (dir: string): string => { try { return fs.realpathSync(dir); } catch { return path.resolve(dir); } };
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
-  const reserved = uid === null ? null : path.join('/tmp', `codex-daemon-${uid}`);
-  const home = path.resolve(codexHome());
-  if (!real.startsWith(home + path.sep) && (reserved === null || !real.startsWith(reserved + path.sep))) return null;
+  const roots = [canonical(codexHome()), ...(uid === null ? [] : [canonical(path.join('/tmp', `codex-daemon-${uid}`))])];
+  if (!roots.some((root) => real.startsWith(root + path.sep))) return null;
   try { if (!fs.statSync(real).isSocket()) return null; } catch { return null; }
   return real;
 }

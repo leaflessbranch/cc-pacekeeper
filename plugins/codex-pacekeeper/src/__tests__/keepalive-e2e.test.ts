@@ -68,7 +68,7 @@ function reply(method: string, params: Record<string, unknown>): unknown {
 }
 
 beforeAll(() => {
-  home = mkdtempSync(join(tmpdir(), 'codex-e2e-home-'));
+  home = mkdtempSync('/tmp/cpk-e2e-') /* short: macOS caps socket paths at 104 bytes */;
   const socketDir = join(home, 'app-server-control');
   mkdirSync(socketDir, { recursive: true });
   for (const key of ['CODEX_HOME', 'CODEX_PACEKEEPER_NATIVE_SOCKET', 'CODEX_PACEKEEPER_OWNER_FILE']) previous[key] = process.env[key];
