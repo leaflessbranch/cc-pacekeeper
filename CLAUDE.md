@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-A Claude Code **plugin marketplace** repo. The root holds `.claude-plugin/marketplace.json`; all code lives in the single plugin at `plugins/cc-pacekeeper/`. The plugin injects usage-limit data (context %, 5-hour block %, weekly limits) into Claude's context via hooks so Claude self-paces, warns at thresholds, and writes resumable checkpoints before hitting walls.
+A Claude Code **plugin marketplace** repo. The root holds `.claude-plugin/marketplace.json`; the Claude plugin lives at `plugins/cc-pacekeeper/`. The plugin injects usage-limit data (context %, 5-hour block %, weekly limits) into Claude's context via hooks so Claude self-paces, warns at thresholds, and writes resumable checkpoints before hitting walls.
+
+An independent, opt-in **Codex** port lives at `plugins/codex-pacekeeper/` (own Codex marketplace entry in `.agents/plugins/marketplace.json`, own state, own checkpoint subtree), and `tests/parity/` runs both packages' functions on the same inputs. The Claude package is the reference behavior: a Codex change that diverges from it needs a reason recorded in `docs/codex-acceptance.md`. See "Codex package" below.
 
 Runtime is **Bun** (no build step — the bash shims in `bin/` `exec bun run` the TypeScript directly). TypeScript is strict, `noEmit`, checked only.
 
@@ -19,6 +21,14 @@ bun test src/__tests__/state.test.ts        # single file
 bun test -t 'escalate'                      # filter by test name
 bun run typecheck    # tsc --noEmit
 bun run src/checkpoint-cli.ts doctor [--network] [--transcript <path>]  # env preflight: creds, caches, config, version skew, crash breadcrumbs
+```
+
+Codex package and parity suite (each needs its own `bun install`; parity also needs `plugins/cc-pacekeeper` installed):
+
+```
+(cd plugins/codex-pacekeeper && bun install && bun test && bun run typecheck)
+(cd tests/parity && bun install && bun test && bun run typecheck)
+plugins/codex-pacekeeper/bin/pacekeeper-checkpoint doctor   # inside a Codex session
 ```
 
 Test rules: the suite must not depend on the developer's machine — isolate `HOME`, `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_CODE_DISABLE_1M_CONTEXT`, `DISABLE_AUTO_COMPACT` in any test that reads them (`isolateAutoCompactEnv` in ctx-tokens.test.ts is the pattern). Fixtures that must be a "safe root" cannot live under `os.tmpdir()` (`isUnsafeRoot` refuses it) — use a git-initialised dir under `src/__tests__/.*-fixtures/`, removed in `finally`. Bun ignores `process.exitCode = undefined`; reset to `0`.
@@ -74,6 +84,17 @@ Behavior is coordinated through markers: `[pacekeeper]` (status lines), the keep
 ### Skills
 
 `skills/checkpoint/SKILL.md` and `skills/worktree/SKILL.md` are the model-facing docs for the two CLIs. If you change CLI verbs, flags, or semantics in `checkpoint-cli.ts` / `worktrees.ts`, update the corresponding SKILL.md (and README) in the same change — the skill text is what future Claude sessions actually follow.
+
+## Codex package
+
+Same shape as the Claude plugin (bash shims in `bin/` exec `src/*.ts`; hooks in `hooks/hooks.json`; skills in `skills/`). Codex 0.160 facts that drive the design — verified in the `openai/codex` source, pinned in `src/__tests__/fixtures/native-0.160.0/protocol.json`:
+
+- **Identity:** every hook's `session_id` is the ROOT thread of the agent tree; a child's hooks add `agent_id`, which is the child's own thread id. A hook's thread is `agent_id ?? session_id`. No hook carries a thread or account id field. Tool shells get `CODEX_THREAD_ID`.
+- **Readings:** `src/rollout.ts` reads the hook's `transcript_path` (the thread's rollout): first line `session_meta` (`id`, `parent_thread_id`, `creator_account_id`); every response appends `token_count` with context usage AND the default rate-limit bucket. Only a compaction invalidates context, never a turn start. `src/refresh.ts` (detached, self-gated at 60 s) adds the native account read via the app-server control socket into one account record.
+- **Output:** Stop/SubagentStop can only `decision: block` (SubagentStop re-opens the *child*); SessionStart/UserPromptSubmit/PreToolUse/SubagentStart take `additionalContext`; compaction hooks cannot reach the model. Hook handlers run concurrently — `CodexStore.update` locks read-merge-write.
+- **Delivery:** no in-session cron, so `src/service.ts watch` (self-launched at a turn end with pending work or by a wake-registering save; singleton lock + heartbeat; exits when idle; prunes state) queues `[pacekeeper-keepalive] ping` / `[pacekeeper-resume] <id>` with `thread/queue/add`, which Codex starts when the thread is idle. Keepalive is a prompt-level contract like Claude's: the UserPromptSubmit hook injects the reply-`pong`-no-tools guidance; a non-exact reply is recorded for doctor, not fatal.
+- **Checkpoints and handoffs** follow Claude semantics (any session may save/resume a lane; `resume` archives; handoffs keyed by `agent_id`). The checkpoint CLI registers the post-reset wake itself.
+- Tests: `CODEX_PACEKEEPER_NO_SERVICE=1` keeps a bin-level run from launching the service (runTick never launches it; only the entrypoint does). `keepalive-e2e.test.ts` drives the real transport against a fake WebSocket control socket.
 
 ## Releasing
 

@@ -77,6 +77,28 @@ Presence probes are Linux-only for now (macOS support is deferred for lack of a 
 
 Requires [Claude Code](https://claude.com/claude-code) and [Bun](https://bun.sh) on PATH. On macOS, the first usage fetch may show a Keychain prompt for `bun` — choose "Always Allow" so the 5h/weekly meters can read Claude Code's OAuth credential. Linux and macOS are supported; native Windows is not (the hook entrypoints are bash).
 
+## Codex package
+
+The repository also ships an opt-in package for the [Codex CLI](https://github.com/openai/codex) at `plugins/codex-pacekeeper/`, targeting Codex **0.160** with a ChatGPT subscription. It brings the same pacing to Codex sessions: the status line on every prompt, warn/critical directives, context auto-save, five-hour auto-renewal with a post-reset wake, the near-reset bridge, checkpoint lanes, subagent budget contracts and handoffs, need-based cache keepalive, worktree helpers and `doctor`. Codex keeps its own state and checkpoint subtree (`.claude-checkpoints/codex/`); it reads the Claude config as input but never writes it.
+
+How it differs from the Claude plugin, and why:
+
+- **Readings come from the rollout.** Codex appends a `token_count` event (context and the five-hour/weekly windows) to the session rollout on every response, and the hook reads it there. A background refresh adds the native account read through Codex's local control socket when one is available.
+- **Keepalive and the reset wake are queued messages.** Codex has no in-session cron for the model, so a small background service (`pacekeeper-service watch`) queues `[pacekeeper-keepalive] ping` or `[pacekeeper-resume] <id>` into the idle thread through the control socket. A turn end with pending work starts it and it exits on its own when nothing is pending. As with Claude, the ping is a prompt-level contract: the model is told to reply `pong` without tools, and `doctor` reports a reply that wasn't.
+- **Not ported:** the live-sessions-sharing-budget segment, model-family arbitrage (Codex has no per-family weekly bucket), and presence-driven away routing (Codex has no plugin monitor to deliver presence changes).
+
+See [`docs/codex-acceptance.md`](docs/codex-acceptance.md) for the per-capability ledger and the checks that still need a live Codex session.
+
+Install from this repository (Bun required):
+
+```sh
+(cd plugins/codex-pacekeeper && bun install --frozen-lockfile)
+codex plugin marketplace add <repository-root>
+codex plugin add codex-pacekeeper@pacekeeper-codex
+```
+
+Trust the plugin's hooks when Codex asks, then run `plugins/codex-pacekeeper/bin/pacekeeper-checkpoint doctor` from a Codex session to check the rollout readings, control socket, quota and keepalive service. Disable the plugin with `plugins."codex-pacekeeper@pacekeeper-codex".enabled = false` in the Codex configuration, or remove it with `codex plugin remove codex-pacekeeper@pacekeeper-codex`.
+
 ## Usage
 
 Once installed, every prompt gets a one-line status prefix injected into Claude's context:

@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Codex package (opt-in), `plugins/codex-pacekeeper/`.** Pacing for Codex CLI
+  0.160 sessions on a ChatGPT subscription, installed from this repository's
+  Codex marketplace entry. It mirrors the Claude plugin: the status line with
+  time, session age, context, five-hour and weekly meters; warn/critical
+  directives once per level; context auto-save; five-hour auto-renewal with a
+  post-reset wake; the near-reset bridge; checkpoint lanes with the goal lock;
+  subagent budget contracts and handoffs; need-based cache keepalive; worktree
+  helpers; and `doctor`. Readings come from the session rollout; keepalive and
+  the reset wake are delivered by a small self-starting background service
+  through Codex's local control socket. See `docs/codex-acceptance.md` for what
+  still needs a live Codex check, and the README for what is not ported.
+
 ## [0.9.2]
 
 ### Added
