@@ -2,7 +2,7 @@
 
 A Claude Code plugin that hands monitoring of context window, 5-hour session block, and weekly usage limits over to Claude itself — so it can pace, warn, and checkpoint work before hitting a wall.
 
-**Status:** v0.10.0 — adds an **experimental**, opt-in port for the Codex CLI (see [Codex package](#codex-package-experimental)); the Claude plugin itself is unchanged since 0.9.x. 0.9.0 made the context meter agree with Claude Code about when compaction happens, re-injects this session's checkpoint after an in-session compaction, and locks a checkpoint lane's `## Goal` so long tasks can't drift; 0.9.1–0.9.2 prepared the plugin listing. See the [changelog](CHANGELOG.md).
+**Status:** v0.10.0 — adds an experimental, opt-in [Codex package](#codex-package-experimental); the Claude plugin is unchanged. See [what's new](#new-in-v010) and the [changelog](CHANGELOG.md).
 
 ![cc-pacekeeper in action](docs/demo.gif)
 
