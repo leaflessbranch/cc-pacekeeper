@@ -1,6 +1,6 @@
 {
   "name": "pacekeeper-codex",
-  "description": "Opt-in Codex pacing and checkpoint helpers.",
+  "description": "Opt-in, experimental Codex pacing and checkpoint helpers.",
   "owner": {
     "name": "pacekeeper"
   },
@@ -8,7 +8,7 @@
     {
       "name": "codex-pacekeeper",
       "source": "./plugins/codex-pacekeeper",
-      "description": "Pacing, checkpoint, presence and existing-owner queue helpers for Codex subscription sessions."
+      "description": "Experimental. Pacing, checkpoint, presence and existing-owner queue helpers for Codex subscription sessions."
     }
   ]
 }

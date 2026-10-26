@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Codex package (opt-in), `plugins/codex-pacekeeper/`.** Pacing for Codex CLI
+- **Codex package (opt-in, experimental), `plugins/codex-pacekeeper/`.** Pacing for Codex CLI
   0.160 sessions on a ChatGPT subscription, installed from this repository's
   Codex marketplace entry. It mirrors the Claude plugin: the status line with
   time, session age, context, five-hour and weekly meters; warn/critical

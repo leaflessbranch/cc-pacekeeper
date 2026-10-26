@@ -77,7 +77,9 @@ Presence probes are Linux-only for now (macOS support is deferred for lack of a 
 
 Requires [Claude Code](https://claude.com/claude-code) and [Bun](https://bun.sh) on PATH. On macOS, the first usage fetch may show a Keychain prompt for `bun` — choose "Always Allow" so the 5h/weekly meters can read Claude Code's OAuth credential. Linux and macOS are supported; native Windows is not (the hook entrypoints are bash).
 
-## Codex package
+## Codex package (experimental)
+
+> **Experimental.** The Codex package is live-tested on Codex 0.164 (Linux) for status, checkpoints, subagent handoffs and keepalive delivery, but the post-reset wake has not yet run against a real five-hour reset, macOS is untested, and Codex's thread-queue API it relies on is itself experimental. Expect rough edges and check `doctor`; the Claude plugin is unaffected.
 
 The repository also ships an opt-in package for the [Codex CLI](https://github.com/openai/codex) at `plugins/codex-pacekeeper/`, targeting Codex **0.160** with a ChatGPT subscription. It brings the same pacing to Codex sessions: the status line on every prompt, warn/critical directives, context auto-save, five-hour auto-renewal with a post-reset wake, the near-reset bridge, checkpoint lanes, subagent budget contracts and handoffs, need-based cache keepalive, worktree helpers and `doctor`. Codex keeps its own state and checkpoint subtree (`.claude-checkpoints/codex/`); it reads the Claude config as input but never writes it.
 
