@@ -236,16 +236,17 @@ function activeCheckpoints(root: string | null, config: CodexConfig): Checkpoint
  * A save run by the model inside Codex's workspace-write sandbox cannot write
  * the state directory, so its checkpoint records the reset but no wake job.
  * The hook runs outside the sandbox and registers it; the service makes this
- * idempotent per reset.
+ * idempotent per reset. The checkpoint is a workspace file, so its account
+ * and reset must match what the hook itself observed.
  */
-function registerDeferredResetWake(active: CheckpointEntry[], root: string | null, threadId: string, config: CodexConfig, store: CodexStore, nowMs: number): void {
-  if (root === null || !config.auto.enabled) return;
-  const entry = active.find((candidate) => candidate.owner.threadId === threadId && candidate.owner.accountId !== null
-    && candidate.resetGeneration !== undefined && candidate.resetGeneration > nowMs);
-  if (entry === undefined || entry.owner.accountId === null || entry.resetGeneration === undefined) return;
+function registerDeferredResetWake(active: CheckpointEntry[], root: string | null, threadId: string, observed: { accountId: string | undefined; resetAtMs: number | null }, config: CodexConfig, store: CodexStore, nowMs: number): void {
+  if (root === null || !config.auto.enabled || observed.accountId === undefined || observed.resetAtMs === null || observed.resetAtMs <= nowMs) return;
+  const entry = active.find((candidate) => candidate.owner.threadId === threadId
+    && candidate.owner.accountId === observed.accountId && candidate.resetGeneration === observed.resetAtMs);
+  if (entry === undefined) return;
   try {
     new CodexService({ config, store, projectRoot: root, now: () => nowMs })
-      .scheduleResetWake({ accountId: entry.owner.accountId, threadId }, entry.id, entry.resetGeneration, entry.resetGeneration);
+      .scheduleResetWake({ accountId: observed.accountId, threadId }, entry.id, observed.resetAtMs, observed.resetAtMs);
   } catch { /* withheld, exactly as it would have been at save */ }
 }
 
@@ -689,7 +690,7 @@ export function runTick(input: TickInput, options: TickOptions = {}): TickResult
     let launch = false;
     if (isMainThread) {
       const active = activeCheckpoints(root, config);
-      registerDeferredResetWake(active, root, threadId, config, store, nowMs);
+      registerDeferredResetWake(active, root, threadId, { accountId, resetAtMs: facts.fiveHour?.resetsAtMs ?? null }, config, store, nowMs);
       pendingWork = active.length > 0 || pendingHandoffs(root, config, threadId).length > 0;
       session = updateSession(store, identity, { pendingWork });
       launch = config.keepalive.enabled && (pendingWork || !config.keepalive.require_pending);

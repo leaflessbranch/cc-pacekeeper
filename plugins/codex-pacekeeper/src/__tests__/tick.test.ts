@@ -160,8 +160,8 @@ describe('checkpoint orientation', () => {
     // outside the sandbox and registers it.
     const h = harness('deferred-wake');
     const saved = new CodexCheckpoints(h.project, config).save({ lane: 'main', owner: { accountId: 'acct-1', threadId: MAIN }, body: 'x', resetGeneration: RESET });
-    h.tick({ hook_event_name: 'Stop' });
-    h.tick({ hook_event_name: 'Stop' }, rollout(), NOW + 1_000);
+    h.tick({ hook_event_name: 'Stop' }, rollout({ five: 20 }));
+    h.tick({ hook_event_name: 'Stop' }, rollout({ five: 20 }), NOW + 1_000);
     const wakes = h.store.list('job').filter((job) => (job as Record<string, unknown>)['kind'] === 'reset-wake') as Array<Record<string, unknown>>;
     expect(wakes).toHaveLength(1);
     expect(wakes[0]?.['dueAtMs']).toBe(RESET + config.auto.wake_delay_min * 60_000);
@@ -172,7 +172,17 @@ describe('checkpoint orientation', () => {
   test("Stop leaves another thread's checkpoint wake alone", () => {
     const h = harness('foreign-wake');
     new CodexCheckpoints(h.project, config).save({ lane: 'main', owner: { accountId: 'acct-1', threadId: CHILD }, body: 'x', resetGeneration: RESET });
-    h.tick({ hook_event_name: 'Stop' });
+    h.tick({ hook_event_name: 'Stop' }, rollout({ five: 20 }));
+    expect(h.store.list('job')).toHaveLength(0);
+  });
+
+  test('Stop ignores a checkpoint whose account or reset the hook did not observe', () => {
+    // The checkpoint is a workspace file; a forged one must not drive scheduling.
+    const h = harness('forged-wake');
+    const checkpoints = new CodexCheckpoints(h.project, config);
+    checkpoints.save({ lane: 'a', owner: { accountId: 'acct-other', threadId: MAIN }, body: 'x', resetGeneration: RESET });
+    checkpoints.save({ lane: 'b', owner: { accountId: 'acct-1', threadId: MAIN }, body: 'x', resetGeneration: RESET + 60_000 });
+    h.tick({ hook_event_name: 'Stop' }, rollout({ five: 20 }));
     expect(h.store.list('job')).toHaveLength(0);
   });
 });
