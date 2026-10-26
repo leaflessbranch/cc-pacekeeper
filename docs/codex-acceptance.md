@@ -49,9 +49,9 @@ tests, the fake-control-socket end-to-end test, and the parity suite);
 | 13 | Near-reset bridge | implemented | The "wait it out" directive under the same conditions as Claude (parity test). |
 | 14 | Resume consumption | implemented | `resume` archives; replaying an id reports already consumed; a crash between claim and archive is recovered by the next resume. The wake completes only when its checkpoint id reaches the archive. |
 | 15 | Subagent budgets | implemented | Spawn-relative pause point identical to Claude's (parity test); child tick line and pause directive; spawn anchor rebases on a new block. |
-| 16 | Subagent handoffs | implemented · live gate | Keyed by `agent_id` (the child thread), with child and parent recorded as provenance (review #3). The parent is shown each of its children's handoffs once on its next prompt or tool call; `handoffs archive` after re-dispatch. A real spawn/pause/absorb trace is a live gate. |
+| 16 | Subagent handoffs | implemented · live-verified | Keyed by `agent_id` (the child thread), with child and parent recorded as provenance (review #3). The parent is shown each of its children's handoffs once on its next prompt or tool call; `handoffs archive` after re-dispatch. Traced live on 0.164.0 (see below). |
 | 17 | Dispatch advisory | implemented | Advises (never denies) before `spawn_agent` at 5h warn+. |
-| 18 | Cache keepalive | implemented · live gate | Need-based (pending checkpoint or handoff), one job per thread, first ping one full idle interval after the last real hook event, suppressed by the hook if the user was active moments ago, 12-hour idle ceiling, included capacity only. The service queues `[pacekeeper-keepalive] ping`; the hook adds the reply-`pong`-no-tools guidance; the completed turn is read back and a non-exact reply or tool call is recorded for `doctor`. The one-hour cache-TTL experiment from issue #19 is a live gate. |
+| 18 | Cache keepalive | implemented · live gate | Need-based (pending checkpoint or handoff), one job per thread, first ping one full idle interval after the last real hook event, suppressed by the hook if the user was active moments ago, 12-hour idle ceiling, included capacity only. The service queues `[pacekeeper-keepalive] ping`; the hook adds the reply-`pong`-no-tools guidance; the completed turn is read back and a non-exact reply or tool call is recorded for `doctor`. Delivery, the `pong` readback and doctor's last-ping report are traced live on 0.164.0; the cache-TTL question is open (see below). |
 | 19 | Cache observability | implemented | Cached-input tokens from the rollout; `doctor` reports them and the last ping's reply. |
 | 20 | Presence detection | pending | The Linux probe fusion runs in the background service, but Codex has no plugin monitor to deliver presence changes, so nothing acts on it yet. |
 | 21 | Away routing | deferred | Depends on a delivery path Codex does not offer (row 20); no channel is requested or stored. |
@@ -72,12 +72,11 @@ records older than its retention windows. Hooks never list state directories.
 
 ## Live gates
 
-These need an authenticated Codex 0.160.x session and are not claimed by the
-offline suites:
+These need an authenticated Codex session and are not claimed by the offline
+suites:
 
-1. A queued ping started on an idle interactive thread appears in the TUI and
-   returns `pong`; the cache-read tokens on the next real turn show the prefix
-   stayed warm across more than one hour of 30-minute pings.
+1. The cache-TTL question from issue #19: whether 30-minute pings keep a
+   thread's prefix warm, and whether it would have gone cold without them.
 2. A real five-hour reset: save at the auto threshold, wake delivered after the
    reset, checkpoint resumed and archived, no duplicate wake.
 3. A spawned child reaching its pause point, writing a handoff, and the parent
@@ -91,11 +90,55 @@ and cache figures matching the rollout, real parent/child execution, and the
 checkpoint CLI. Its one failure — child ownership never persisted — is the
 `agent_id`/`session_id` mix-up fixed in this pass.
 
+## Live acceptance on Codex 0.164.0 (Linux, 2026-10-26)
+
+An authenticated ChatGPT Plus session in the TUI, the plugin enabled through a
+disposable project's `.codex/config.toml`, hooks trusted at the prompt.
+
+| Check | Result |
+|---|---|
+| Install, hook trust, status line on every prompt | pass |
+| Control socket, loaded-thread check, queue methods (experimental in 0.164, opted into at `initialize`) | pass, after the symlink fix below |
+| Model-driven `save` through the skill, inside the workspace-write sandbox | pass; the wake is registered by the Stop hook (fix below) |
+| Child pause: contract injected, `PAUSED-BUDGET <agent_id>` returned, handoff written from the sandbox | pass |
+| Parent absorb: shown the handoff once as a developer message at its next tool call, `handoffs archive`, not shown again | pass |
+| Keepalive: `[pacekeeper-keepalive] ping` queued into the idle TUI thread, answered `pong` with no tools, read back as verified, successor scheduled, `doctor` reports the last ping | pass, after the timeout fix below |
+| Cache warmth | inconclusive: a ping 30 minutes after the last turn read only the shared system prefix from cache (12,032 of 26,134 input tokens); a later turn 69 minutes after the previous one, with no ping between, read 25,984 of 26,153. OpenAI's cache is not a fixed TTL here, so two samples settle neither question in gate 1. |
+
+Defects the live run found, each fixed with a regression test:
+
+- **The control socket is a symlink.** 0.164 publishes
+  `app-server-control.sock` as a symlink into `/tmp/codex-daemon-<uid>/`; the
+  entry was refused, so keepalive, the wake and the account read never ran.
+- **The sandbox blocks the CLI's state writes.** The model's `save` runs inside
+  the workspace-write sandbox, where `~/.cache` is read-only, so every wake
+  registration failed with `EROFS`. The Stop hook (unsandboxed) now registers
+  it from the saved checkpoint, only when the checkpoint's account and reset
+  match what the hook observed itself.
+- **Discovery timed out on the backend read.** `account/rateLimits/read` takes
+  about 0.8-1.1s live and discovery allowed 750ms, so with a known account it
+  reported no owner, capacity read as unknown, and every keepalive after the
+  first was cancelled. The detached refresh lost its quota read the same way.
+- **doctor never saw a ping.** A keepalive id is stable per thread, so the
+  successor overwrote the completed record; the successor now carries it.
+- `SessionEnd` and `Interrupt` hook timeouts exceeded Codex's 3s cap.
+
+Operational notes:
+
+- Any `-c` override runs Codex in embedded mode without the shared background
+  server, so a session started with one has no control socket for keepalive
+  or the wake.
+- Reinstalling the plugin asks for hook trust again, and a running
+  `pacekeeper-service watch` keeps executing the old snapshot until it exits.
+- A child whose first tool calls precede its first `token_count`, with no
+  fresh account record, has no five-hour reading and therefore no pause
+  decision; this is the designed fail-closed path.
+
 ## Verification
 
 | Suite | Command | Result |
 |---|---|---|
-| Codex | `bun test` in `plugins/codex-pacekeeper` | 299 pass |
+| Codex | `bun test` in `plugins/codex-pacekeeper` | 308 pass |
 | Codex typecheck | `bun run typecheck` in `plugins/codex-pacekeeper` | clean |
 | Parity | `bun test` in `tests/parity` (after `bun install` in both plugins) | 45 pass |
 | Parity typecheck | `bun run typecheck` in `tests/parity` | clean |

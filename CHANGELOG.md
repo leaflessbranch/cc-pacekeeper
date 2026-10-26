@@ -17,8 +17,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   subagent budget contracts and handoffs; need-based cache keepalive; worktree
   helpers; and `doctor`. Readings come from the session rollout; keepalive and
   the reset wake are delivered by a small self-starting background service
-  through Codex's local control socket. See `docs/codex-acceptance.md` for what
-  still needs a live Codex check, and the README for what is not ported.
+  through Codex's local control socket. Live-tested on Codex 0.164.0 (Linux):
+  handoffs and keepalive delivery pass; see `docs/codex-acceptance.md` for the
+  results and what still needs a live Codex check, and the README for what is
+  not ported.
 
 ## [0.9.2]
 
