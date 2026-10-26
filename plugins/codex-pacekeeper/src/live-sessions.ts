@@ -62,16 +62,27 @@ export function nativeControlSocketPath(): string | null {
   if (!path.isAbsolute(candidate) || candidate.includes('\u0000')) return null;
   // Resolve the directory, not the socket: on macOS Bun's realpath opens the
   // file, and open() on a Unix socket fails, so a live socket read as absent.
+  const resolveDir = (file: string): string => path.join(fs.realpathSync(path.dirname(file)), path.basename(file));
   let real: string;
-  try { real = path.join(fs.realpathSync(path.dirname(candidate)), path.basename(candidate)); } catch { return null; }
+  try { real = resolveDir(candidate); } catch { return null; }
   // Compare canonical paths on both sides: the socket is realpath'd, so an
   // aliased root (macOS /var -> /private/var and /tmp -> /private/tmp, or a
   // symlinked ~/.codex) must be resolved too or a genuine socket is refused.
   const canonical = (dir: string): string => { try { return fs.realpathSync(dir); } catch { return path.resolve(dir); } };
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
   const roots = [canonical(codexHome()), ...(uid === null ? [] : [canonical(path.join('/tmp', `codex-daemon-${uid}`))])];
-  if (!roots.some((root) => real.startsWith(root + path.sep))) return null;
-  try { if (!fs.lstatSync(real).isSocket()) return null; } catch { return null; }
+  const allowed = (file: string): boolean => roots.some((root) => file.startsWith(root + path.sep));
+  if (!allowed(real)) return null;
+  try {
+    // Codex 0.164 publishes the control socket as a symlink to the daemon's
+    // socket under /tmp/codex-daemon-<uid>/. Follow it once; the target must
+    // also sit under an allowed root.
+    if (fs.lstatSync(real).isSymbolicLink()) {
+      real = resolveDir(path.resolve(path.dirname(real), fs.readlinkSync(real)));
+      if (!allowed(real)) return null;
+    }
+    if (!fs.lstatSync(real).isSocket()) return null;
+  } catch { return null; }
   return real;
 }
 
